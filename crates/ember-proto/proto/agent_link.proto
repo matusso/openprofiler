@@ -1,0 +1,352 @@
+// Ember agent-link protocol, v1.
+//
+// Spoken between the in-JVM agent (server) and ember-daemon (client). See
+// docs/spec/agent-link.md for framing and the session lifecycle.
+syntax = "proto3";
+
+package ember.link.v1;
+
+// ---------------------------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------------------------
+
+message JvmInfo {
+  uint32 pid = 1;
+  string name = 2;
+  string vm_name = 3;
+  string vm_version = 4;
+  string vm_vendor = 5;
+  string java_version = 6;
+  repeated string jvm_args = 7;
+  string main_class = 8;
+  string os = 9;
+  string arch = 10;
+  uint32 cpus = 11;
+  uint64 max_heap = 12;
+  // Epoch nanoseconds.
+  int64 start_time = 13;
+}
+
+// Agent -> daemon, first frame on every connection.
+message Hello {
+  string protocol_semver = 1;
+  string agent_version = 2;
+  JvmInfo jvm = 3;
+  // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "threads", "telemetry",
+  // "heap_dump", "thread_dump", "virtual_threads", ...
+  repeated string capabilities = 4;
+  // Echo of the daemon's token (daemon -> agent direction uses Auth below).
+  string token = 5;
+  // Random per agent instance. A daemon resuming a connection compares it to detect restarts.
+  uint64 instance_id = 6;
+  // "live" or "offline".
+  string mode = 7;
+}
+
+// Daemon -> agent, first frame from the daemon. The agent validates the token and closes the
+// connection if it does not match.
+message Auth {
+  string token = 1;
+  string client = 2;
+}
+
+message SessionConfig {
+  bool cpu = 1;
+  // Sampling interval in microseconds.
+  uint32 cpu_interval_us = 2;
+  bool alloc = 3;
+  // Mean bytes between allocation samples.
+  uint32 alloc_interval_bytes = 4;
+  bool monitors = 5;
+  // Monitor events shorter than this are aggregated but not reported individually.
+  uint32 monitor_threshold_us = 6;
+  bool telemetry = 7;
+  bool thread_states = 8;
+  // "auto", "async" or "sync".
+  string sampler = 9;
+}
+
+// Agent -> daemon after a successful Auth.
+message Welcome {
+  SessionConfig config = 1;
+  // Where the agent will resume sending from (the daemon's last ack if the agent still has the
+  // data, otherwise the oldest retained position).
+  Watermark resume_from = 2;
+}
+
+// Daemon -> agent, optional, right after Welcome: resume position the daemon already holds.
+message Resume {
+  uint64 instance_id = 1;
+  Watermark watermark = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data plane
+// ---------------------------------------------------------------------------------------------
+
+// Absolute positions in each of the agent's append-only tables.
+message Watermark {
+  uint64 strings = 1;
+  uint64 methods = 2;
+  uint64 frames = 3;
+  uint64 stacks = 4;
+  uint64 threads = 5;
+  uint64 samples = 6;
+  uint64 telemetry = 7;
+  uint64 thread_states = 8;
+  uint64 monitors = 9;
+  uint64 gc = 10;
+  uint64 bookmarks = 11;
+  // Monotonic sequence number of the batch that produced this watermark.
+  uint64 seq = 12;
+}
+
+message SymbolDelta {
+  uint32 string_base = 1;
+  repeated string strings = 2;
+  uint32 method_base = 3;
+  repeated uint32 method_class = 4;
+  repeated uint32 method_name = 5;
+  repeated uint32 method_signature = 6;
+  uint32 frame_base = 7;
+  repeated uint32 frame_method = 8;
+  repeated sint32 frame_line = 9;
+  // ember_model::FrameKind as u8.
+  repeated uint32 frame_kind = 10;
+}
+
+// New nodes of the global stack trie. Node `base + i` has parent `parent[i]` and leaf frame
+// `frame[i]`. Node 0 is the empty stack and is never sent.
+message StackDelta {
+  uint32 base = 1;
+  repeated uint32 parent = 2;
+  repeated uint32 frame = 3;
+}
+
+// Columnar sample rows of one kind (ember_model::SampleKind as u8).
+message SampleBatch {
+  uint32 kind = 1;
+  repeated int64 time = 2;
+  repeated uint32 thread = 3;
+  repeated uint32 state = 4;
+  repeated uint32 stack = 5;
+  repeated uint64 weight = 6;
+  repeated uint32 count = 7;
+  // String id of the allocated class; 0xFFFFFFFF if none.
+  repeated uint32 class_id = 8;
+}
+
+message ThreadInfo {
+  uint64 java_id = 1;
+  uint64 os_id = 2;
+  string name = 3;
+  string group = 4;
+  bool is_virtual = 5;
+  bool is_daemon = 6;
+  int64 start = 7;
+  int64 end = 8;
+}
+
+message ThreadUpdate {
+  uint32 index = 1;
+  string name = 2;
+  int64 end = 3;
+}
+
+message ThreadInfoBatch {
+  uint32 base = 1;
+  repeated ThreadInfo threads = 2;
+  repeated ThreadUpdate updates = 3;
+}
+
+message ThreadStateBatch {
+  repeated uint32 thread = 1;
+  repeated int64 start = 2;
+  repeated int64 end = 3;
+  repeated uint32 state = 4;
+}
+
+message TelemetrySeriesDelta {
+  string key = 1;
+  string label = 2;
+  // ember_model::Unit: 0 nanos, 1 bytes, 2 count, 3 percent, 4 per_second.
+  uint32 unit = 3;
+  repeated int64 time = 4;
+  repeated double value = 5;
+}
+
+message TelemetryBatch {
+  repeated TelemetrySeriesDelta series = 1;
+}
+
+message MonitorEvent {
+  int64 start = 1;
+  int64 duration = 2;
+  // 0 enter, 1 wait, 2 park.
+  uint32 kind = 3;
+  uint32 thread = 4;
+  // Thread index + 1 of the owner, 0 if unknown.
+  uint32 owner = 5;
+  string monitor_class = 6;
+  uint64 monitor_id = 7;
+  uint32 stack = 8;
+}
+
+message MonitorEventBatch {
+  repeated MonitorEvent events = 1;
+}
+
+message GcEvent {
+  int64 start = 1;
+  int64 duration = 2;
+  string name = 3;
+  string cause = 4;
+  uint64 heap_before = 5;
+  uint64 heap_after = 6;
+  int64 pause = 7;
+}
+
+message GcEventBatch {
+  repeated GcEvent events = 1;
+}
+
+message Bookmark {
+  int64 time = 1;
+  string label = 2;
+  string color = 3;
+}
+
+// One flush of everything that changed between `from` and `to`. Order of application:
+// symbols, stacks, threads, then the rest.
+message DataBatch {
+  Watermark from = 1;
+  Watermark to = 2;
+  SymbolDelta symbols = 3;
+  StackDelta stacks = 4;
+  ThreadInfoBatch threads = 5;
+  repeated SampleBatch samples = 6;
+  TelemetryBatch telemetry = 7;
+  ThreadStateBatch thread_states = 8;
+  MonitorEventBatch monitors = 9;
+  GcEventBatch gc = 10;
+  repeated Bookmark bookmarks = 11;
+  // Agent-side wall clock when the batch was cut (epoch nanos).
+  int64 time = 12;
+}
+
+// Daemon -> agent: everything up to `watermark` has been applied. In live mode the agent may
+// drop acknowledged sample/event rows (symbols and stacks are always retained).
+message Ack {
+  Watermark watermark = 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Request / response
+// ---------------------------------------------------------------------------------------------
+
+message ThreadDumpRequest {}
+
+message HeapDumpRequest {
+  // "hprof" (only format in v1).
+  string format = 1;
+  bool live_only = 2;
+  // If set and the daemon shares the filesystem, the agent writes here and sends no blob.
+  string local_path = 3;
+}
+
+message SetRecording {
+  // "cpu", "alloc", "monitor", "telemetry", "thread_states".
+  string kind = 1;
+  bool enabled = 2;
+  uint32 interval_us = 3;
+}
+
+message UpdateConfig {
+  SessionConfig config = 1;
+}
+
+message SaveSnapshot {
+  string path = 1;
+}
+
+message RunGc {}
+
+message AddBookmark {
+  string label = 1;
+  string color = 2;
+}
+
+message Request {
+  uint64 id = 1;
+  oneof kind {
+    ThreadDumpRequest thread_dump = 2;
+    HeapDumpRequest heap_dump = 3;
+    SetRecording set_recording = 4;
+    UpdateConfig update_config = 5;
+    SaveSnapshot save_snapshot = 6;
+    RunGc run_gc = 7;
+    AddBookmark bookmark = 8;
+  }
+}
+
+message DumpedThread {
+  string name = 1;
+  uint64 java_id = 2;
+  string state = 3;
+  bool is_virtual = 4;
+  repeated string frames = 5;
+  repeated string locked = 6;
+  string waiting_on = 7;
+}
+
+message ThreadDump {
+  int64 time = 1;
+  string label = 2;
+  repeated DumpedThread threads = 3;
+}
+
+message HeapDumpResult {
+  // Non-zero when the dump follows as BlobChunk frames.
+  uint64 blob_id = 1;
+  uint64 size = 2;
+  string format = 3;
+  // Set when the dump was written to HeapDumpRequest.local_path.
+  string local_path = 4;
+}
+
+message SnapshotResult {
+  string path = 1;
+}
+
+message Response {
+  uint64 id = 1;
+  bool ok = 2;
+  string error = 3;
+  oneof result {
+    ThreadDump thread_dump = 4;
+    HeapDumpResult heap_dump = 5;
+    SnapshotResult snapshot = 6;
+  }
+}
+
+message BlobChunk {
+  uint64 blob_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+
+message Error {
+  string message = 1;
+  bool fatal = 2;
+}
+
+message Ping {
+  int64 time = 1;
+}
+
+// Header record of an offline `.emberlink` recording file (see agent-link.md).
+message RecordingHeader {
+  Hello hello = 1;
+  int64 created = 2;
+}

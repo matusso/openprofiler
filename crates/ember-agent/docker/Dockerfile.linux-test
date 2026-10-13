@@ -1,0 +1,9 @@
+# Linux build/test image for the Ember agent (glibc + JDK 21).
+# docker build -t ember-agent-linux -f crates/ember-agent/docker/Dockerfile.linux-test crates/ember-agent/docker
+FROM rust:1-bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends wget ca-certificates \
+ && wget -qO /tmp/jdk.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/linux/$(uname -m | sed 's/x86_64/x64/;s/aarch64/aarch64/')/jdk/hotspot/normal/eclipse" \
+ && mkdir -p /opt/jdk && tar -xzf /tmp/jdk.tgz -C /opt/jdk --strip-components=1 && rm /tmp/jdk.tgz \
+ && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/opt/jdk PATH=/opt/jdk/bin:$PATH

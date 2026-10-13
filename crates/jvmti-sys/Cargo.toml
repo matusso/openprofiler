@@ -1,0 +1,12 @@
+[package]
+name = "jvmti-sys"
+description = "Raw JVMTI bindings (hand-maintained, generated once from jvmti.h) plus re-exported JNI types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jni-sys = "0.3"
+
+[lints]
+workspace = true
