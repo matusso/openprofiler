@@ -1,0 +1,21 @@
+[package]
+name = "ember-remote"
+description = "Remote transports for Ember: SSH, docker exec, kubectl exec (incl. ephemeral debug containers), relay upload and stdio tunnels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
