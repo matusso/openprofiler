@@ -33,7 +33,7 @@ enum Cmd {
         /// Serve the web UI.
         #[arg(long)]
         web: bool,
-        /// Directory containing the built UI (default: ./ui/dist).
+        /// Directory containing the built UI (default: `ui/` next to the executable, else ./ui/dist).
         #[arg(long)]
         ui_dir: Option<PathBuf>,
         /// Add the synthetic demo session.
@@ -189,7 +189,7 @@ fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Daemon { bind, port, token, web, ui_dir, demo, files } => {
-            let ui_dir = ui_dir.or_else(|| web.then(|| PathBuf::from("ui/dist")));
+            let ui_dir = ui_dir.or_else(|| web.then(default_ui_dir));
             if web && !ui_dir.as_ref().is_some_and(|d| d.join("index.html").exists()) {
                 bail!("--web needs a built UI (run `npm run build` in ui/ or pass --ui-dir)");
             }
@@ -477,10 +477,21 @@ fn openprofiler_snapshot_write(output: &std::path::Path) -> Result<()> {
     openprofiler_daemon::save::save_snapshot(&s, output)
 }
 
+/// The UI shipped in release archives (`<exe dir>/ui`), else the development build (`ui/dist`).
+fn default_ui_dir() -> PathBuf {
+    std::env::current_exe()
+        .and_then(|e| e.canonicalize())
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("ui")))
+        .filter(|d| d.join("index.html").exists())
+        .unwrap_or_else(|| PathBuf::from("ui/dist"))
+}
+
 /// Writes `~/.openprofiler/daemon.json` (mode 0600) so IDE plugins can find the daemon.
 fn publish_discovery(d: &openprofiler_daemon::RunningDaemon) -> Result<()> {
     use std::io::Write;
-    let home = std::env::var_os("HOME").context("HOME not set")?;
+    let home =
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).context("HOME not set")?;
     let dir = PathBuf::from(home).join(".openprofiler");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("daemon.json");

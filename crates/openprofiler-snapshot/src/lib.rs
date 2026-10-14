@@ -478,7 +478,7 @@ impl SnapshotReader {
                             let data =
                                 zstd::bulk::decompress(&b[offsets[i]..offsets[i] + lens[i]], frame_raw)?;
                             // Cloned handles share one file offset, so use positional writes.
-                            std::os::unix::fs::FileExt::write_all_at(&out, &data, (i * frame_raw) as u64)?;
+                            write_all_at(&out, &data, (i * frame_raw) as u64)?;
                         }
                     })
                 })
@@ -763,6 +763,24 @@ pub fn write_snapshot(path: &Path, p: &Profile, heap: Option<&Path>) -> Result<(
 pub fn read_snapshot(path: &Path) -> Result<(Profile, SnapshotInfo)> {
     let r = SnapshotReader::open(path)?;
     Ok((r.read_profile()?, r.info.clone()))
+}
+
+#[cfg(unix)]
+fn write_all_at(f: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(f: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = std::os::windows::fs::FileExt::seek_write(f, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

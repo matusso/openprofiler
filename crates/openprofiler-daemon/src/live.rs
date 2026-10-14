@@ -95,6 +95,7 @@ pub fn find_agent() -> Result<PathBuf> {
         return Ok(PathBuf::from(p));
     }
     let exe = std::env::current_exe()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
     let dir = exe.parent().unwrap_or(Path::new("."));
     let mut candidates = vec![dir.join(lib_name()), dir.join("../lib").join(lib_name())];
     for profile in ["release", "debug"] {
@@ -134,6 +135,7 @@ fn bundle_dir(opts: &AttachOptions) -> PathBuf {
         .or_else(|| std::env::var_os("OPENPROFILER_BUNDLE_DIR").map(PathBuf::from))
         .unwrap_or_else(|| {
             std::env::current_exe()
+                .and_then(|e| e.canonicalize())
                 .ok()
                 .and_then(|e| e.parent().map(|d| d.join("bundle")))
                 .unwrap_or_else(|| PathBuf::from("dist/bundle"))
