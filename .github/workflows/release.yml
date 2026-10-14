@@ -1,0 +1,294 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release archives drop the line tables the local release profile keeps (70 MB -> 14 MB CLI).
+  CARGO_PROFILE_RELEASE_DEBUG: "false"
+  CARGO_PROFILE_RELEASE_STRIP: debuginfo
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  check:
+    name: Validate tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Tag matches the workspace version
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must be a semantic version such as v0.1.0 or v0.2.0-rc1" >&2
+            exit 1
+          fi
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "Tag $TAG does not match the workspace version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+  ui:
+    name: Web UI
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui
+          path: ui/dist/
+          if-no-files-found: error
+
+  bundle:
+    name: Remote bundle (${{ matrix.arch }})
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      # Static musl relay + musl and glibc (Debian bookworm) agents for this architecture.
+      - run: scripts/build-bundle.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: dist/bundle/
+          if-no-files-found: error
+
+  # Built in Debian bookworm so the binary runs on glibc 2.36 and newer.
+  linux:
+    name: Package linux-${{ matrix.arch }}
+    needs: [ui, bundle]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            triple: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - arch: arm64
+            triple: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui
+          path: ui/dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: dist/bundle
+          merge-multiple: true
+      - run: cargo build --release --locked -p openprofiler-cli
+      - run: >-
+          scripts/package-release.sh "$TAG" linux-${{ matrix.arch }}
+          target/release/openprofiler dist/bundle/${{ matrix.triple }}/libopenprofiler_agent.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-linux-${{ matrix.arch }}
+          path: dist/openprofiler-*
+          if-no-files-found: error
+
+  native:
+    name: Package ${{ matrix.platform }}
+    needs: [ui, bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            triple: aarch64-apple-darwin
+            os: macos-15
+            agent: libopenprofiler_agent.dylib
+          - platform: darwin-amd64
+            triple: x86_64-apple-darwin
+            os: macos-15
+            agent: libopenprofiler_agent.dylib
+          # Windows ships the CLI, daemon and web UI for files and remote attach; the agent and
+          # local attach are Unix-only.
+          - platform: windows-amd64
+            triple: x86_64-pc-windows-msvc
+            os: windows-2025
+            exe: .exe
+          - platform: windows-arm64
+            triple: aarch64-pc-windows-msvc
+            os: windows-2025
+            exe: .exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      # The agent embeds its Java boot classes, compiled at build time.
+      - if: matrix.agent
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # ring needs clang for Windows on ARM.
+      - if: matrix.triple == 'aarch64-pc-windows-msvc'
+        run: echo 'C:/Program Files/LLVM/bin' >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui
+          path: ui/dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: dist/bundle
+          merge-multiple: true
+      - run: cargo build --release --locked --target ${{ matrix.triple }} -p openprofiler-cli
+      - if: matrix.agent
+        run: cargo build --profile release-agent --locked --target ${{ matrix.triple }} -p openprofiler-agent
+      - run: >-
+          scripts/package-release.sh "$TAG" ${{ matrix.platform }}
+          target/${{ matrix.triple }}/release/openprofiler${{ matrix.exe }}
+          ${{ matrix.agent && format('target/{0}/release-agent/{1}', matrix.triple, matrix.agent) || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}
+          path: dist/openprofiler-*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release and Homebrew
+    needs: [linux, native]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum openprofiler-* > SHA256SUMS && cat SHA256SUMS
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/openprofiler-* dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/openprofiler-* dist/SHA256SUMS \
+              --title "$TAG" --generate-notes --verify-tag $prerelease
+          fi
+      - name: Update Homebrew tap
+        if: ${{ !contains(env.TAG, '-') }}
+        env:
+          # SSH private key of a write deploy key on matusso/homebrew-tap.
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then
+            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY is not set, skipping matusso/homebrew-tap"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          tap="$RUNNER_TEMP/homebrew-tap"
+          git clone --depth 1 git@github.com:matusso/homebrew-tap.git "$tap"
+          mkdir -p "$tap/Formula"
+          scripts/homebrew-formula.sh "$TAG" dist/SHA256SUMS > "$tap/Formula/openprofiler.rb"
+          cd "$tap"
+          if git diff --quiet -- Formula/openprofiler.rb && git ls-files --error-unmatch Formula/openprofiler.rb >/dev/null 2>&1; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/openprofiler.rb
+          git commit -m "openprofiler $TAG"
+          git push origin HEAD:main
+
+  docker:
+    name: Docker image
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Extract archives
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "dist/docker/linux-$arch"
+            tar -xzf "dist/openprofiler-$TAG-linux-$arch.tar.gz" -C "dist/docker/linux-$arch" --strip-components=1
+          done
+      - name: Set image tags
+        id: image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "tags<<EOF"
+            echo "$image:$TAG"
+            if [[ "$TAG" != *-* ]]; then echo "$image:latest"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      # The Dockerfile only copies prebuilt files, so no emulation is needed for arm64.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          build-args: |
+            VERSION=${{ env.TAG }}
+            SOURCE=https://github.com/${{ github.repository }}
+          provenance: mode=max
+          sbom: true

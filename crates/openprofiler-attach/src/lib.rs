@@ -12,9 +12,13 @@
 
 pub mod hsperf;
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(unix)]
+use anyhow::anyhow;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -54,10 +58,16 @@ impl AttachResult {
     }
 }
 
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     // SAFETY: kill with signal 0 only checks for existence/permission.
     let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
 }
 
 /// Candidate directories holding `hsperfdata_<user>` directories.
@@ -147,6 +157,7 @@ impl AgentInfoFile {
 
 /// Where the target sees its temp dir, as a host path, plus the PID inside its namespace.
 struct Target {
+    #[cfg_attr(not(unix), allow(dead_code))]
     pid: u32,
     ns_pid: u32,
     /// Host path of the target's `/tmp` (or `$TMPDIR` on macOS).
@@ -166,6 +177,7 @@ fn target(pid: u32) -> Target {
     }
 }
 
+#[cfg(unix)]
 fn connect_attach_socket(t: &Target, timeout: Duration) -> Result<UnixStream> {
     let sock = t.tmp.join(format!(".java_pid{}", t.ns_pid));
     if let Ok(s) = UnixStream::connect(&sock) {
@@ -203,6 +215,7 @@ fn connect_attach_socket(t: &Target, timeout: Duration) -> Result<UnixStream> {
 }
 
 /// Sends one attach-protocol command and returns `(status, output)`.
+#[cfg(unix)]
 pub fn attach_command(pid: u32, cmd: &str, args: &[&str]) -> Result<(i32, String)> {
     let t = target(pid);
     let mut s = connect_attach_socket(&t, Duration::from_secs(10))?;
@@ -221,6 +234,12 @@ pub fn attach_command(pid: u32, cmd: &str, args: &[&str]) -> Result<(i32, String
     let (code, rest) = resp.split_once('\n').unwrap_or((resp.as_str(), ""));
     let code = code.trim().parse().with_context(|| format!("bad attach response: {resp:?}"))?;
     Ok((code, rest.to_string()))
+}
+
+/// HotSpot attach on Windows goes through remote thread injection, which is not implemented.
+#[cfg(not(unix))]
+pub fn attach_command(_pid: u32, _cmd: &str, _args: &[&str]) -> Result<(i32, String)> {
+    bail!("attaching to local JVMs is not supported on this platform")
 }
 
 /// Runs a diagnostic command (`Thread.print`, `GC.heap_dump /path`, `VM.version`, …).

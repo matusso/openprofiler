@@ -1,0 +1,3 @@
+# Release images are built from extracted archives in dist/docker (see Dockerfile).
+*
+!dist/docker/

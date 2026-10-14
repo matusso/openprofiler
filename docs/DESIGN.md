@@ -19,7 +19,7 @@ formats are specified separately:
 - **Open formats.** A documented snapshot format and protobuf schemas. HPROF and JFR import are
   first-class.
 - **Secure by default.** The agent port uses TLS with a pinned fingerprint and a mandatory token.
-- Licence: Apache-2.0.
+- Licence: Apache-2.0; the native agent is MPL-2.0.
 
 **Non-goals for v1:** Java < 11, IBM PHD import (later), a Windows agent (v1.x), Eclipse and
 NetBeans plugins.

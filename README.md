@@ -27,6 +27,18 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, `.opsnap` snapshots and
 `.oplink` offline recordings.
 
+## Install
+
+```sh
+brew install matusso/tap/openprofiler                 # macOS and Linux (amd64, arm64)
+docker run --rm -p 7878:7878 ghcr.io/matusso/openprofiler   # daemon + web UI
+```
+
+Archives for macOS, Linux and Windows (amd64, arm64) are on the
+[releases page](https://github.com/matusso/openprofiler/releases). Each one holds the
+`openprofiler` CLI, the native agent, the web UI and the remote bundle; keep them together. The
+Windows build covers files and the web UI; the agent and local attach are Unix-only.
+
 ## Quick start
 
 ```sh
@@ -157,6 +169,14 @@ MAT_HOME=/path/to/mat cargo test -p openprofiler-heap --test mat_parity  # retai
 (cd ui && npm run lint && npm run typecheck && npm test)
 ```
 
+**Releases**
+
+Bump `version` in `Cargo.toml`, then push a matching `vX.Y.Z` tag. The release workflow builds
+the archives, publishes the GitHub release with `SHA256SUMS`, pushes
+`ghcr.io/matusso/openprofiler`, and updates the
+[Homebrew tap](https://github.com/matusso/homebrew-tap) (needs the `HOMEBREW_TAP_DEPLOY_KEY`
+secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag.
+
 ## Repository layout
 
 | Path | Contents |
@@ -194,4 +214,5 @@ Planned work is tracked in [GitHub issues](https://github.com/matusso/openprofil
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE). The native agent (`crates/openprofiler-agent`) is MPL-2.0, see
+[its LICENSE](crates/openprofiler-agent/LICENSE).
