@@ -97,12 +97,14 @@ pub fn install(a: &Agent) -> bool {
     // SAFETY: transmuting between C function pointer types; see above.
     let (m, u): (jvmtiExtensionEvent, jvmtiExtensionEvent) = unsafe {
         (
-            Some(std::mem::transmute::<unsafe extern "C" fn(*mut jvmtiEnv), unsafe extern "C" fn(*mut jvmtiEnv, ...)>(
-                on_mount,
-            )),
-            Some(std::mem::transmute::<unsafe extern "C" fn(*mut jvmtiEnv), unsafe extern "C" fn(*mut jvmtiEnv, ...)>(
-                on_unmount,
-            )),
+            Some(std::mem::transmute::<
+                unsafe extern "C" fn(*mut jvmtiEnv),
+                unsafe extern "C" fn(*mut jvmtiEnv, ...),
+            >(on_mount)),
+            Some(std::mem::transmute::<
+                unsafe extern "C" fn(*mut jvmtiEnv),
+                unsafe extern "C" fn(*mut jvmtiEnv, ...),
+            >(on_unmount)),
         )
     };
     // Like standard events, extension events need a callback and to be enabled.
@@ -176,7 +178,9 @@ unsafe extern "C" fn on_mount(_jvmti: *mut jvmtiEnv) {
         t.parked.take()
     };
     let Some((since, owner)) = parked else { return };
-    if !a.monitor_on.load(Ordering::Relaxed) || ((now_nanos() - since) as u128) < a.opts.monitor_threshold.as_nanos() {
+    if !a.monitor_on.load(Ordering::Relaxed)
+        || ((now_nanos() - since) as u128) < a.opts.monitor_threshold.as_nanos()
+    {
         return;
     }
     // The blocker is still set: LockSupport.park clears it only after the thread continues.

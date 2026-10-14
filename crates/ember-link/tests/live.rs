@@ -66,7 +66,12 @@ fn has_frame(p: &Profile, kind: SampleKind, needle: &str) -> bool {
 }
 
 /// Like [`has_frame`], restricted to samples of threads matching `thread`.
-fn has_frame_on(p: &Profile, kind: SampleKind, needle: &str, thread: impl Fn(&ember_model::ThreadInfo) -> bool) -> bool {
+fn has_frame_on(
+    p: &Profile,
+    kind: SampleKind,
+    needle: &str,
+    thread: impl Fn(&ember_model::ThreadInfo) -> bool,
+) -> bool {
     let Some(set) = p.samples.get(&kind) else { return false };
     let mut frames = vec![];
     (0..set.len()).any(|i| {
@@ -112,7 +117,8 @@ async fn check_locks_and_virtual_threads(client: &LinkClient) {
     }
     if has("virtual_threads") {
         wait_for(client, "virtual threads with states and park events", |p| {
-            let vt = |i: u32| p.threads.get(i as usize).is_some_and(|t| t.is_virtual && t.name.starts_with("vt-"));
+            let vt =
+                |i: u32| p.threads.get(i as usize).is_some_and(|t| t.is_virtual && t.name.starts_with("vt-"));
             p.threads.iter().any(|t| t.is_virtual && t.name.starts_with("vt-"))
                 && (0..p.thread_states.len()).any(|i| vt(p.thread_states.thread[i]))
                 && p.monitors.iter().any(|m| m.kind == MonitorEventKind::Park && vt(m.thread))
@@ -137,7 +143,9 @@ async fn check_triggers(client: &LinkClient) {
     wait_for(client, "trigger bookmark and thread dump", |p| {
         p.bookmarks.iter().any(|b| b.label == "timer-fired")
             && p.bookmarks.iter().any(|b| b.label == "Trigger soon")
-            && p.thread_dumps.iter().any(|d| d.label == "Trigger soon" && d.threads.iter().any(|t| t.name == "burner"))
+            && p.thread_dumps
+                .iter()
+                .any(|d| d.label == "Trigger soon" && d.threads.iter().any(|t| t.name == "burner"))
     })
     .await;
     let bad = ember_proto::v1::Trigger { id: "broken".into(), ..Default::default() };

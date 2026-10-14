@@ -522,9 +522,14 @@ fn init_anchor_offsets(jni: *mut JNIEnv) {
         return;
     };
     let env = jni as isize - thread as isize;
-    if !(1..1 << 16).contains(&env) || !(0..1 << 16).contains(&anchor) || !(0..64).contains(&sp) || !(0..64).contains(&pc)
+    if !(1..1 << 16).contains(&env)
+        || !(0..1 << 16).contains(&anchor)
+        || !(0..64).contains(&sp)
+        || !(0..64).contains(&pc)
     {
-        crate::debug(&format!("implausible JavaThread layout (env {env}, anchor {anchor}); anchor recovery disabled"));
+        crate::debug(&format!(
+            "implausible JavaThread layout (env {env}, anchor {anchor}); anchor recovery disabled"
+        ));
         return;
     }
     ENV_TO_SP.store(anchor + sp - env, Ordering::SeqCst);
@@ -538,7 +543,8 @@ fn current_java_thread(jni: *mut JNIEnv) -> Option<usize> {
         jni!(jni, ExceptionClear);
         return None;
     }
-    let current = jni!(jni, GetStaticMethodID, cls, c"currentThread".as_ptr(), c"()Ljava/lang/Thread;".as_ptr());
+    let current =
+        jni!(jni, GetStaticMethodID, cls, c"currentThread".as_ptr(), c"()Ljava/lang/Thread;".as_ptr());
     let eetop = jni!(jni, GetFieldID, cls, c"eetop".as_ptr(), c"J".as_ptr());
     let r = if current.is_null() || eetop.is_null() {
         jni!(jni, ExceptionClear);
@@ -630,9 +636,26 @@ fn comm(tid: i32) -> String {
 /// Label for a sample without Java frames, by what the thread does.
 fn role_label(thread_name: &str, code: i32) -> &'static str {
     // JDK 21 calls the non-generational ZGC threads X*.
-    const GC: &[&str] = &["GC Thread", "G1 ", "GC ", "Conc#", "ParGC", "ZDirector", "ZDriver", "ZWorker", "ZStat",
-        "ZUnmapper", "ZUncommitter", "XDirector", "XDriver", "XWorker", "XStat", "XUnmapper", "XUncommitter",
-        "Shenandoah"];
+    const GC: &[&str] = &[
+        "GC Thread",
+        "G1 ",
+        "GC ",
+        "Conc#",
+        "ParGC",
+        "ZDirector",
+        "ZDriver",
+        "ZWorker",
+        "ZStat",
+        "ZUnmapper",
+        "ZUncommitter",
+        "XDirector",
+        "XDriver",
+        "XWorker",
+        "XStat",
+        "XUnmapper",
+        "XUncommitter",
+        "Shenandoah",
+    ];
     if thread_name.contains("CompilerThre") || thread_name.starts_with("JVMCI") {
         "[JIT compiler]"
     } else if GC.iter().any(|p| thread_name.starts_with(p)) {

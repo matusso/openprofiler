@@ -52,7 +52,8 @@ fn init_ids(jni: *mut JNIEnv) -> Option<Ids> {
     let ids = if thread.is_null() || aos.is_null() {
         None
     } else {
-        let park_blocker = jni!(jni, GetFieldID, thread, c"parkBlocker".as_ptr(), c"Ljava/lang/Object;".as_ptr());
+        let park_blocker =
+            jni!(jni, GetFieldID, thread, c"parkBlocker".as_ptr(), c"Ljava/lang/Object;".as_ptr());
         let exclusive_owner =
             jni!(jni, GetFieldID, aos, c"exclusiveOwnerThread".as_ptr(), c"Ljava/lang/Thread;".as_ptr());
         (!park_blocker.is_null() && !exclusive_owner.is_null()).then(|| Ids {
@@ -89,7 +90,15 @@ pub fn blocker(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Blocker {
 }
 
 /// Records a finished park of thread `idx` that started at `start` (stack of the current thread).
-pub fn record(a: &Agent, jni: *mut JNIEnv, idx: u32, start: i64, class: Option<String>, owner: Option<u32>, id: u64) {
+pub fn record(
+    a: &Agent,
+    jni: *mut JNIEnv,
+    idx: u32,
+    start: i64,
+    class: Option<String>,
+    owner: Option<u32>,
+    id: u64,
+) {
     let dur = (now_nanos() - start).max(0);
     if (dur as u128) < a.opts.monitor_threshold.as_nanos() {
         return;
@@ -97,8 +106,11 @@ pub fn record(a: &Agent, jni: *mut JNIEnv, idx: u32, start: i64, class: Option<S
     let Some(stack) = capture_stack(a, jni, std::ptr::null_mut()) else { return };
     // Waiting for a lock someone holds is blocking; anything else (conditions, latches, queues,
     // idle pools) is waiting.
-    let (kind, state) =
-        if owner.is_some() { (SampleKind::Monitor, ThreadState::Blocked) } else { (SampleKind::Wait, ThreadState::Waiting) };
+    let (kind, state) = if owner.is_some() {
+        (SampleKind::Monitor, ThreadState::Blocked)
+    } else {
+        (SampleKind::Wait, ThreadState::Waiting)
+    };
     let mut c = a.collector.lock();
     let class_id = class.as_deref().map(|s| c.symbols.intern_str(s));
     c.add_sample(start, kind, idx, state, stack, dur as u64, class_id);
@@ -118,7 +130,8 @@ pub fn record(a: &Agent, jni: *mut JNIEnv, idx: u32, start: i64, class: Option<S
 unsafe extern "system" fn park_hook(env: *mut JNIEnv, unsafe_: jobject, absolute: jboolean, time: jlong) {
     // SAFETY: `ORIGINAL` holds the VM's implementation, set before the hook was registered.
     let original: ParkFn = unsafe { std::mem::transmute::<usize, ParkFn>(ORIGINAL.load(Ordering::Relaxed)) };
-    let Some(a) = agent().filter(|a| a.monitor_on.load(Ordering::Relaxed) && !a.shutting_down.load(Ordering::Relaxed))
+    let Some(a) =
+        agent().filter(|a| a.monitor_on.load(Ordering::Relaxed) && !a.shutting_down.load(Ordering::Relaxed))
     else {
         // SAFETY: same arguments as the VM passed to us.
         return unsafe { original(env, unsafe_, absolute, time) };
@@ -205,7 +218,9 @@ fn native_function(jni: *mut JNIEnv, cls: jclass, name: &str, sig: &str) -> Opti
         let cp = word(cm + constants)?;
         // SAFETY: u2 indices in the ConstMethod.
         let (ni, si) = unsafe { (*((cm + name_index) as *const u16), *((cm + sig_index) as *const u16)) };
-        if symbol(cp, ni).as_deref() == Some(name.as_bytes()) && symbol(cp, si).as_deref() == Some(sig.as_bytes()) {
+        if symbol(cp, ni).as_deref() == Some(name.as_bytes())
+            && symbol(cp, si).as_deref() == Some(sig.as_bytes())
+        {
             let f = word(m + method_size)?;
             return in_libjvm(f).then_some(f);
         }

@@ -440,7 +440,8 @@ async fn install_triggers(
 ) -> Result<()> {
     let Some(file) = file else { return Ok(()) };
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let req: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let req: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
     let r = ember_daemon::live::control(engine, s, "triggers", req).await?;
     eprintln!("Installed {} trigger(s)", r["installed"]);
     Ok(())

@@ -357,7 +357,8 @@ fn monitor_begin(jni: *mut JNIEnv, thread: jthread, object: jobject, kind: Monit
     let Some(stack) = capture_stack(a, jni, ptr::null_mut()) else { return };
     let class = object_class_name(a, jni, object);
     let owner = if kind == MonitorEventKind::Enter { monitor_owner(a, jni, object) } else { None };
-    let pending = PendingMonitor { start: now_nanos(), kind, class, stack, owner, id: identity_hash(a, object) };
+    let pending =
+        PendingMonitor { start: now_nanos(), kind, class, stack, owner, id: identity_hash(a, object) };
     MONITOR_PENDING.lock().get_or_insert_with(HashMap::new).insert(idx, pending);
 }
 

@@ -262,7 +262,8 @@ mod tests {
         assert_eq!(o.interval, Duration::from_millis(5));
         assert!(o.tls);
         assert_eq!(o.mode, Mode::Offline);
-        let (o, w) = Options::parse("bogus,alloc_interval=1m,nowait,owner_rate=0,vthreads=off,recover=0", None);
+        let (o, w) =
+            Options::parse("bogus,alloc_interval=1m,nowait,owner_rate=0,vthreads=off,recover=0", None);
         assert_eq!(w.len(), 1);
         assert_eq!(o.alloc_interval, 1 << 20);
         assert!(!o.wait);

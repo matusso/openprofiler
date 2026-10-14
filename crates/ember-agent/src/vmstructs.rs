@@ -47,7 +47,16 @@ impl VmStructs {
     }
 
     fn load_fields(&mut self, types: &[&str]) {
-        let (Some(base), Some(stride), Some(ty), Some(field), Some(type_string), Some(is_static), Some(offset), Some(addr)) = (
+        let (
+            Some(base),
+            Some(stride),
+            Some(ty),
+            Some(field),
+            Some(type_string),
+            Some(is_static),
+            Some(offset),
+            Some(addr),
+        ) = (
             var::<*const u8>(c"gHotSpotVMStructs"),
             var::<u64>(c"gHotSpotVMStructEntryArrayStride"),
             var::<u64>(c"gHotSpotVMStructEntryTypeNameOffset"),
@@ -56,7 +65,8 @@ impl VmStructs {
             var::<u64>(c"gHotSpotVMStructEntryIsStaticOffset"),
             var::<u64>(c"gHotSpotVMStructEntryOffsetOffset"),
             var::<u64>(c"gHotSpotVMStructEntryAddressOffset"),
-        ) else {
+        )
+        else {
             return;
         };
         if base.is_null() || stride == 0 {
@@ -198,7 +208,8 @@ impl CodeCache {
             "GrowableArray<int>",
         ]);
         let heaps_var = v.field("CodeCache", "_heaps")?.address;
-        let len = v.offset("GrowableArrayBase", "_len").or_else(|| v.offset("GenericGrowableArray", "_len"))?;
+        let len =
+            v.offset("GrowableArrayBase", "_len").or_else(|| v.offset("GenericGrowableArray", "_len"))?;
         let data = v.offset("GrowableArray<int>", "_data")?;
         let memory = v.offset("CodeHeap", "_memory")?;
         let segmap = v.offset("CodeHeap", "_segmap")?;
@@ -223,7 +234,10 @@ impl CodeCache {
                     if !(0..=16).contains(&n) || items == 0 {
                         return None;
                     }
-                    (0..n as usize).map(|i| *((items + i * size_of::<usize>()) as *const usize)).filter(|&h| h != 0).collect()
+                    (0..n as usize)
+                        .map(|i| *((items + i * size_of::<usize>()) as *const usize))
+                        .filter(|&h| h != 0)
+                        .collect()
                 }
             },
             memory_low_boundary: memory + vs_low_boundary,

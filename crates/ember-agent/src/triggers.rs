@@ -202,10 +202,13 @@ fn check_timers() {
 
 /// Value of `metric` in a telemetry row; `heap.used_pct` is derived from used and max heap.
 fn metric(keys: &[String], values: &[f64], name: &str) -> Option<f64> {
-    let get = |k: &str| keys.iter().position(|x| x == k).and_then(|i| values.get(i).copied()).filter(|v| v.is_finite());
+    let get = |k: &str| {
+        keys.iter().position(|x| x == k).and_then(|i| values.get(i).copied()).filter(|v| v.is_finite())
+    };
     if name == "heap.used_pct" {
         let used = get("heap.used")?;
-        let max = get("heap.max").filter(|&m| m > 0.0).or_else(|| get("heap.committed").filter(|&c| c > 0.0))?;
+        let max =
+            get("heap.max").filter(|&m| m > 0.0).or_else(|| get("heap.committed").filter(|&c| c > 0.0))?;
         return Some(used * 100.0 / max);
     }
     get(name)
@@ -231,7 +234,11 @@ pub fn on_out_of_memory(flags: i32, description: &str) {
         .filter(|t| matches!(t.spec.condition, Some(Condition::OutOfMemory(_))))
         .filter_map(|t| t.fire(now))
         .map(|mut j| {
-            j.why = Some(if description.is_empty() { format!("resource exhausted ({flags:#x})") } else { description.into() });
+            j.why = Some(if description.is_empty() {
+                format!("resource exhausted ({flags:#x})")
+            } else {
+                description.into()
+            });
             j
         })
         .collect();
@@ -254,7 +261,10 @@ pub fn on_exit(a: &Agent, jni: *mut jvmti_sys::JNIEnv) {
 
 /// Substitutes `{pid}`, `{time}`, `{trigger}` and `{n}` in an action path.
 pub fn expand(path: &str, trigger: &str, n: u32) -> String {
-    let safe: String = trigger.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
+    let safe: String = trigger
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' })
+        .collect();
     path.replace("{pid}", &std::process::id().to_string())
         .replace("{time}", &(now_nanos() / 1_000_000_000).to_string())
         .replace("{trigger}", &safe)
@@ -268,7 +278,11 @@ fn run_job(a: &Agent, jni: *mut jvmti_sys::JNIEnv, j: Job) {
     };
     log(&format!("{label} (firing {})", j.n));
     let bookmark = |text: String| {
-        a.collector.lock().add_bookmark(Bookmark { time: now_nanos(), label: text, color: Some(FIRE_COLOR.into()) });
+        a.collector.lock().add_bookmark(Bookmark {
+            time: now_nanos(),
+            label: text,
+            color: Some(FIRE_COLOR.into()),
+        });
     };
     bookmark(label);
     for action in &j.actions {
@@ -299,7 +313,9 @@ fn run_job(a: &Agent, jni: *mut jvmti_sys::JNIEnv, j: Job) {
             Kind::HeapDump(h) => match a.java.get() {
                 Some(helpers) => {
                     let path = expand(&h.path, &j.id, j.n);
-                    if let Some(dir) = std::path::Path::new(&path).parent().filter(|d| !d.as_os_str().is_empty()) {
+                    if let Some(dir) =
+                        std::path::Path::new(&path).parent().filter(|d| !d.as_os_str().is_empty())
+                    {
                         let _ = std::fs::create_dir_all(dir);
                     }
                     helpers

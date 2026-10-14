@@ -167,7 +167,14 @@ impl Collector {
     }
 
     pub fn new_virtual_thread(&mut self, java_id: u64, name: String, now: Nanos) -> u32 {
-        self.add_thread(AgentThread { java_id, name, is_daemon: true, is_virtual: true, start: now, ..Default::default() })
+        self.add_thread(AgentThread {
+            java_id,
+            name,
+            is_daemon: true,
+            is_virtual: true,
+            start: now,
+            ..Default::default()
+        })
     }
 
     pub fn set_os_id(&mut self, idx: u32, os_id: u64) {

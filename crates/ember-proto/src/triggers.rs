@@ -34,7 +34,11 @@ pub fn parse_json(text: &str) -> Result<Vec<v1::Trigger>, String> {
         .enumerate()
         .map(|(i, t)| {
             let o = t.as_object().ok_or_else(|| format!("trigger {i}: expected an object"))?;
-            let id = o.get("id").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("trigger-{i}"));
+            let id = o
+                .get("id")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or_else(|| format!("trigger-{i}"));
             trigger(id.clone(), o).map_err(|e| format!("trigger `{id}`: {e}"))
         })
         .collect()
@@ -191,14 +195,21 @@ mod tests {
         }
         assert!(matches!(t[0].actions[1].kind, Some(Kind::ThreadDump(_))));
         assert_eq!(t[1].id, "trigger-1");
-        assert!(matches!(t[1].condition, Some(Condition::Timer(v1::TimerCondition { delay_ms: 500, period_ms: 60_000 }))));
+        assert!(matches!(
+            t[1].condition,
+            Some(Condition::Timer(v1::TimerCondition { delay_ms: 500, period_ms: 60_000 }))
+        ));
         assert!(matches!(&t[2].actions[0].kind, Some(Kind::StopRecording(k)) if k == "cpu"));
     }
 
     #[test]
     fn rejects_bad_triggers() {
         assert!(parse_json(r#"[{"actions": ["run_gc"]}]"#).unwrap_err().contains("no condition"));
-        assert!(parse_json(r#"[{"jvm_start": {}, "actions": ["explode"]}]"#).unwrap_err().contains("unknown action"));
+        assert!(
+            parse_json(r#"[{"jvm_start": {}, "actions": ["explode"]}]"#)
+                .unwrap_err()
+                .contains("unknown action")
+        );
         assert!(parse_json(r#"[{"threshold": {"metric": "cpu.process"}, "actions": ["run_gc"]}]"#).is_err());
         assert!(parse_json(r#"[{"jvm_start": {}, "actions": [{"start_recording": "disk"}]}]"#).is_err());
         assert_eq!(duration_ms(&Value::from("1.5s")).unwrap(), 1500);
