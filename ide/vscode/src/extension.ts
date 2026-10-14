@@ -17,6 +17,15 @@ interface Discovery {
   token: string;
 }
 
+interface AgentLaunch {
+  path: string;
+  options: string;
+}
+
+/** Debug configuration attribute that marks a Java launch for profiling, and the one we add to track it. */
+const PROFILE_ATTR = "openprofiler";
+const INFOFILE_ATTR = "openprofilerInfofile";
+
 let socket: WebSocket | undefined;
 let nextId = 1;
 const pending = new Map<number, (v: unknown, err?: string) => void>();
@@ -24,6 +33,9 @@ const pending = new Map<number, (v: unknown, err?: string) => void>();
 const HEAT_LEVELS = [0.08, 0.16, 0.28, 0.42];
 let heat: vscode.TextEditorDecorationType[] = [];
 let status: vscode.StatusBarItem;
+// Debug sessions running with the agent; while any is alive the gutter heat refreshes periodically.
+const profiled = new Set<string>();
+let liveRefresh: ReturnType<typeof setInterval> | undefined;
 
 function discovery(): Discovery | undefined {
   const cfg = vscode.workspace.getConfiguration("openprofiler");
@@ -123,6 +135,93 @@ function refreshAll(): void {
   for (const e of vscode.window.visibleTextEditors) void refresh(e);
 }
 
+/** The agent library and options: the `openprofiler.agentPath` setting, else whatever the daemon uses. */
+async function agentLaunch(): Promise<AgentLaunch | undefined> {
+  const configured = vscode.workspace.getConfiguration("openprofiler").get<string>("agentPath");
+  if (configured) return { path: configured, options: "tls" };
+  try {
+    return await call<AgentLaunch>("agent", {});
+  } catch {
+    return undefined;
+  }
+}
+
+function agentOption(agent: AgentLaunch, infofile?: string): string {
+  return `-agentpath:${agent.path}=${agent.options}${infofile ? `,infofile=${infofile}` : ""}`;
+}
+
+/** Adds the agent to Java launch configurations that set `"openprofiler": true`. */
+const javaLaunchProvider: vscode.DebugConfigurationProvider = {
+  async resolveDebugConfiguration(_folder, config) {
+    if (!config[PROFILE_ATTR] || config.request !== "launch") return config;
+    const agent = await agentLaunch();
+    if (!agent) {
+      void vscode.window.showErrorMessage(
+        "OpenProfiler: cannot find the agent. Start `openprofiler daemon` or set openprofiler.agentPath.",
+      );
+      return undefined;
+    }
+    const infofile = path.join(os.tmpdir(), `openprofiler-vscode-${process.pid}-${Date.now()}.json`);
+    const arg = agentOption(agent, infofile);
+    if (Array.isArray(config.vmArgs)) config.vmArgs = [...config.vmArgs, arg];
+    else config.vmArgs = [config.vmArgs, /\s/.test(arg) ? `"${arg}"` : arg].filter(Boolean).join(" ");
+    config[INFOFILE_ATTR] = infofile;
+    return config;
+  },
+};
+
+async function onSessionStarted(session: vscode.DebugSession): Promise<void> {
+  const infofile = session.configuration[INFOFILE_ATTR] as string | undefined;
+  if (!infofile) return;
+  profiled.add(session.id);
+  liveRefresh ??= setInterval(refreshAll, 5000);
+  try {
+    const s = await call<{ name: string }>("attachLaunched", { infofile });
+    void vscode.window.showInformationMessage(`OpenProfiler: profiling ${s.name}`);
+  } catch (e) {
+    onSessionEnded(session);
+    void vscode.window.showWarningMessage(`OpenProfiler: could not connect to the launched JVM: ${(e as Error).message}`);
+  }
+}
+
+function onSessionEnded(session: vscode.DebugSession): void {
+  if (!profiled.delete(session.id) || profiled.size > 0) return;
+  clearInterval(liveRefresh);
+  liveRefresh = undefined;
+  refreshAll();
+}
+
+/** Picks a Java launch configuration from launch.json (or the current file) and runs it with the agent. */
+async function launchWithAgent(): Promise<void> {
+  type Item = vscode.QuickPickItem & { folder?: vscode.WorkspaceFolder; config: vscode.DebugConfiguration };
+  const items: Item[] = [];
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const configs = vscode.workspace.getConfiguration("launch", folder).get<vscode.DebugConfiguration[]>("configurations") ?? [];
+    for (const config of configs) {
+      if (config.type === "java" && config.request === "launch") {
+        items.push({ label: config.name, description: folder.name, folder, config });
+      }
+    }
+  }
+  const file = vscode.window.activeTextEditor?.document;
+  if (file && /\.java$/.test(file.fileName)) {
+    items.push({
+      label: `Current file: ${path.basename(file.fileName)}`,
+      folder: vscode.workspace.getWorkspaceFolder(file.uri),
+      config: { type: "java", request: "launch", name: `OpenProfiler: ${path.basename(file.fileName)}`, mainClass: "${file}" },
+    });
+  }
+  if (items.length === 0) {
+    void vscode.window.showInformationMessage(
+      "OpenProfiler: no Java launch configuration found. Add one to launch.json (needs the Debugger for Java extension).",
+    );
+    return;
+  }
+  const pick = items.length === 1 ? items[0] : await vscode.window.showQuickPick(items, { placeHolder: "Launch with the OpenProfiler agent" });
+  if (!pick) return;
+  await vscode.debug.startDebugging(pick.folder, { ...pick.config, [PROFILE_ATTR]: true }, { noDebug: true });
+}
+
 async function navigate(p: { class: string; method?: string; line?: number }): Promise<void> {
   const top = p.class.split("$")[0];
   const rel = top.replace(/\./g, "/");
@@ -150,21 +249,28 @@ export function activate(ctx: vscode.ExtensionContext): void {
     status,
     vscode.commands.registerCommand("openprofiler.connect", connect),
     vscode.commands.registerCommand("openprofiler.refreshGutter", refreshAll),
+    vscode.commands.registerCommand("openprofiler.launch", launchWithAgent),
     vscode.commands.registerCommand("openprofiler.copyAgentOption", async () => {
-      const agent = vscode.workspace.getConfiguration("openprofiler").get<string>("agentPath") || "/path/to/libopenprofiler_agent.so";
-      await vscode.env.clipboard.writeText(`-agentpath:${agent}=port=0`);
-      void vscode.window.showInformationMessage("Copied the OpenProfiler -agentpath option. Add it to your launch configuration's vmArgs.");
+      const agent = (await agentLaunch()) ?? { path: "/path/to/libopenprofiler_agent.so", options: "tls" };
+      await vscode.env.clipboard.writeText(agentOption(agent));
+      void vscode.window.showInformationMessage(
+        "Copied the OpenProfiler -agentpath option. Add it to vmArgs, or set \"openprofiler\": true in a Java launch configuration.",
+      );
     }),
     vscode.commands.registerCommand("openprofiler.openFile", async () => {
       const pick = await vscode.window.showOpenDialog({ filters: { Profiles: ["jfr", "hprof", "opsnap", "oplink", "gz"] } });
       if (pick?.[0]) await call("openFile", { path: pick[0].fsPath });
     }),
     vscode.window.onDidChangeVisibleTextEditors(refreshAll),
+    vscode.debug.registerDebugConfigurationProvider("java", javaLaunchProvider),
+    vscode.debug.onDidStartDebugSession(onSessionStarted),
+    vscode.debug.onDidTerminateDebugSession(onSessionEnded),
   );
   void connect();
 }
 
 export function deactivate(): void {
+  clearInterval(liveRefresh);
   socket?.close();
   heat.forEach((t) => t.dispose());
 }
