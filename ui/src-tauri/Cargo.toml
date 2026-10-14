@@ -1,0 +1,27 @@
+[package]
+name = "ember-desktop"
+description = "Ember desktop shell (Tauri 2) embedding the Ember daemon"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Standalone workspace: the desktop shell is built separately from the main Cargo workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+ember-daemon = { path = "../../crates/ember-daemon" }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

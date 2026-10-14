@@ -1,0 +1,139 @@
+/* Ember design tokens. Themes switch via [data-theme] on <html>. */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1014;
+  --bg-elev: #151820;
+  --bg-elev-2: #1b1f29;
+  --bg-hover: #222735;
+  --bg-active: #2a3142;
+  --border: #262b37;
+  --border-strong: #353c4d;
+  --fg: #e6e8ee;
+  --fg-muted: #9aa1b2;
+  --fg-faint: #6b7283;
+  --accent: #ff7a3d;
+  --accent-fg: #1a0d05;
+  --accent-soft: rgba(255, 122, 61, 0.16);
+  --focus: #6ea8ff;
+  --danger: #ff5c6c;
+  --warning: #f2b84b;
+  --ok: #3fcf8e;
+  --info: #6ea8ff;
+  --bar: #ff7a3d;
+  --bar-self: #ffb58f;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --chart-grid: rgba(255, 255, 255, 0.06);
+  --chart-axis: #7c8395;
+
+  /* Categorical palette (frame kinds, series). */
+  --c1: #6ea8ff;
+  --c2: #ff7a3d;
+  --c3: #3fcf8e;
+  --c4: #c38bff;
+  --c5: #f2b84b;
+  --c6: #ff5c9a;
+  --c7: #4fd1d9;
+  --c8: #a0a7b8;
+
+  /* Thread states. */
+  --st-runnable: #3fcf8e;
+  --st-waiting: #f2b84b;
+  --st-blocked: #ff5c6c;
+  --st-net_io: #6ea8ff;
+  --st-sleeping: #c38bff;
+  --st-unknown: #4b5263;
+
+  /* Diff (blue = faster/less, red = slower/more). */
+  --diff-neg: #4a8cff;
+  --diff-pos: #ff4d5e;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #f0f2f5;
+  --bg-hover: #e9ecf1;
+  --bg-active: #dde3ec;
+  --border: #e1e5eb;
+  --border-strong: #c9cfd9;
+  --fg: #171a21;
+  --fg-muted: #586073;
+  --fg-faint: #8a92a3;
+  --accent: #e2551a;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(226, 85, 26, 0.12);
+  --focus: #2563eb;
+  --danger: #d92c3c;
+  --warning: #b7791f;
+  --ok: #138a55;
+  --info: #2563eb;
+  --bar: #e2551a;
+  --bar-self: #f6a57f;
+  --shadow: 0 8px 30px rgba(20, 30, 50, 0.12);
+  --chart-grid: rgba(0, 0, 0, 0.06);
+  --chart-axis: #6b7283;
+  --c1: #2563eb;
+  --c2: #e2551a;
+  --c3: #138a55;
+  --c4: #8b46e0;
+  --c5: #b7791f;
+  --c6: #d6336c;
+  --c7: #0e8f98;
+  --c8: #6b7283;
+  --st-runnable: #1f9d63;
+  --st-waiting: #d39b1d;
+  --st-blocked: #d92c3c;
+  --st-net_io: #2563eb;
+  --st-sleeping: #8b46e0;
+  --st-unknown: #c3c8d2;
+  --diff-neg: #2563eb;
+  --diff-pos: #d92c3c;
+}
+
+[data-theme="contrast"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-elev: #000000;
+  --bg-elev-2: #0a0a0a;
+  --bg-hover: #1f1f1f;
+  --bg-active: #333333;
+  --border: #ffffff;
+  --border-strong: #ffffff;
+  --fg: #ffffff;
+  --fg-muted: #e0e0e0;
+  --fg-faint: #c0c0c0;
+  --accent: #ffd400;
+  --accent-fg: #000000;
+  --accent-soft: rgba(255, 212, 0, 0.25);
+  --focus: #00e5ff;
+  --danger: #ff6b6b;
+  --warning: #ffd400;
+  --ok: #5cff9d;
+  --info: #00e5ff;
+  --bar: #ffd400;
+  --bar-self: #fff08a;
+  --shadow: none;
+  --chart-grid: rgba(255, 255, 255, 0.25);
+  --chart-axis: #ffffff;
+}
+
+/* Colour-blind-safe palette (Okabe–Ito). */
+[data-palette="cb"] {
+  --c1: #0072b2;
+  --c2: #e69f00;
+  --c3: #009e73;
+  --c4: #cc79a7;
+  --c5: #f0e442;
+  --c6: #d55e00;
+  --c7: #56b4e9;
+  --c8: #999999;
+  --st-runnable: #009e73;
+  --st-waiting: #e69f00;
+  --st-blocked: #d55e00;
+  --st-net_io: #0072b2;
+  --st-sleeping: #cc79a7;
+  --diff-neg: #0072b2;
+  --diff-pos: #d55e00;
+}

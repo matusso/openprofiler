@@ -1,0 +1,27 @@
+[package]
+name = "ember-link"
+description = "Daemon side of the Ember agent-link protocol: live sessions and .emberlink replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ember-model.workspace = true
+ember-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+ember-attach = { path = "../ember-attach" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

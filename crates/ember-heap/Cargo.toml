@@ -1,0 +1,25 @@
+[package]
+name = "ember-heap"
+description = "Out-of-core heap analysis: object index, CSR graphs, dominators, retained sizes, inspections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ember-hprof.workspace = true
+ember-model.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+xxhash-rust.workspace = true
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+rustc-hash = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+rand.workspace = true
+
+[lints]
+workspace = true

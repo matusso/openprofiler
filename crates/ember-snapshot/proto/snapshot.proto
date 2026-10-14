@@ -1,0 +1,166 @@
+// Section payload schemas of the .ember snapshot format. See docs/spec/snapshot-format.md.
+// Column-oriented: repeated scalar fields are packed; times are delta-encoded zigzag varints.
+syntax = "proto3";
+package ember.snapshot.v1;
+
+message JvmInfo {
+  optional uint32 pid = 1;
+  string name = 2;
+  string vm_name = 3;
+  string vm_version = 4;
+  string vm_vendor = 5;
+  string java_version = 6;
+  repeated string jvm_args = 7;
+  string main_class = 8;
+  string os = 9;
+  string arch = 10;
+  optional uint32 cpus = 11;
+  optional uint64 max_heap = 12;
+  optional sint64 start_time = 13;
+}
+
+// Section kind 1.
+message Meta {
+  string source = 1;
+  JvmInfo jvm = 2;
+  sint64 start = 3;
+  sint64 end = 4;
+  optional sint64 cpu_interval = 5;
+  map<string, string> properties = 6;
+  string producer = 7;
+}
+
+// Section kind 2. Methods and frames are columnar; ids are indices.
+message Symbols {
+  repeated string strings = 1;
+  repeated uint32 method_class = 2;
+  repeated uint32 method_name = 3;
+  repeated uint32 method_signature = 4;
+  repeated uint32 frame_method = 5;
+  repeated sint32 frame_line = 6;
+  repeated uint32 frame_kind = 7;
+}
+
+// Section kind 3. Node 0 is the root sentinel and is not stored; node i+1 = (parent[i], frame[i]).
+message Stacks {
+  repeated uint32 parent = 1;
+  repeated uint32 frame = 2;
+}
+
+// Section kind 4, one section per sample kind.
+message Samples {
+  uint32 kind = 1;            // SampleKind
+  repeated sint64 time_delta = 2;
+  repeated uint32 thread = 3;
+  repeated uint32 state = 4;  // ThreadState
+  repeated uint32 stack = 5;
+  repeated uint64 weight = 6;
+  repeated uint32 count = 7;  // empty = all 1
+  repeated uint32 class = 8;  // empty = none; 0xFFFFFFFF = none
+}
+
+message Thread {
+  uint64 java_id = 1;
+  optional uint64 os_id = 2;
+  string name = 3;
+  optional string group = 4;
+  bool is_virtual = 5;
+  bool is_daemon = 6;
+  optional sint64 start = 7;
+  optional sint64 end = 8;
+}
+
+// Section kind 5.
+message Threads { repeated Thread threads = 1; }
+
+// Section kind 6.
+message ThreadStates {
+  repeated uint32 thread = 1;
+  repeated sint64 start_delta = 2;
+  repeated sint64 duration = 3;
+  repeated uint32 state = 4;
+}
+
+message Series {
+  string key = 1;
+  string label = 2;
+  uint32 unit = 3; // 0 nanos, 1 bytes, 2 count, 3 percent, 4 per_second
+  repeated sint64 time_delta = 4;
+  repeated double value = 5;
+}
+
+// Section kind 7.
+message Telemetry { repeated Series series = 1; }
+
+message GcEvent {
+  sint64 start = 1;
+  sint64 duration = 2;
+  string name = 3;
+  string cause = 4;
+  optional uint64 heap_before = 5;
+  optional uint64 heap_after = 6;
+  optional sint64 pause = 7;
+}
+
+// Section kind 8.
+message Gc { repeated GcEvent events = 1; }
+
+message MonitorEvent {
+  sint64 start = 1;
+  sint64 duration = 2;
+  uint32 kind = 3; // 0 enter, 1 wait, 2 park
+  uint32 thread = 4;
+  optional uint32 owner = 5;
+  string monitor_class = 6;
+  optional uint64 monitor_id = 7;
+  uint32 stack = 8;
+}
+
+// Section kind 9.
+message Monitors { repeated MonitorEvent events = 1; }
+
+message Bookmark {
+  sint64 time = 1;
+  string label = 2;
+  optional string color = 3;
+}
+
+// Section kind 10.
+message Bookmarks { repeated Bookmark bookmarks = 1; }
+
+message DumpedThread {
+  string name = 1;
+  uint64 java_id = 2;
+  string state = 3;
+  bool is_virtual = 4;
+  repeated string frames = 5;
+  repeated string locked = 6;
+  optional string waiting_on = 7;
+}
+
+message ThreadDump {
+  sint64 time = 1;
+  string label = 2;
+  repeated DumpedThread threads = 3;
+}
+
+// Section kind 11.
+message ThreadDumps { repeated ThreadDump dumps = 1; }
+
+// Section kind 12 (HeapDump) is not protobuf: it is an HPROF file stored with codec 2
+// (independent zstd frames, see the spec) so it can be extracted without a full decompress.
+
+// Index (written after the last section).
+message SectionEntry {
+  uint32 kind = 1;
+  uint64 offset = 2;     // offset of the section header
+  uint64 length = 3;     // payload length (stored bytes)
+  uint32 codec = 4;
+  uint64 raw_length = 5; // uncompressed length
+  uint64 xxh3 = 6;       // of the stored payload
+  string name = 7;       // optional label, e.g. sample kind
+}
+
+message Index {
+  repeated SectionEntry sections = 1;
+}

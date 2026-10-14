@@ -1,0 +1,26 @@
+[package]
+name = "ember-cli"
+description = "The `ember` command-line tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ember"
+path = "src/main.rs"
+
+[dependencies]
+ember-daemon.workspace = true
+ember-model.workspace = true
+ember-snapshot.workspace = true
+ember-attach.workspace = true
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

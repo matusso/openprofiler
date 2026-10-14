@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: Swatinem/rust-cache@v2
+      - run: java/build.sh
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+
+  jdk-matrix:
+    name: Agent on JDK ${{ matrix.jdk }} (${{ matrix.distribution }})
+    needs: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        jdk: ["11", "17", "21", "25"]
+        distribution: [temurin]
+        include:
+          - jdk: "21"
+            distribution: semeru # OpenJ9
+          - jdk: "21"
+            distribution: graalvm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: ${{ matrix.distribution }}
+          java-version: ${{ matrix.jdk }}
+      - uses: Swatinem/rust-cache@v2
+      - run: java/build.sh
+      - run: cargo test -p ember-link -p ember-attach -p ember-jfr -p ember-heap -- --nocapture
+
+  alpine:
+    name: Alpine (musl) agent + relay
+    runs-on: ubuntu-24.04
+    container: rust:alpine
+    steps:
+      - uses: actions/checkout@v4
+      - run: apk add --no-cache musl-dev openjdk21-jdk bash
+      - run: java/build.sh
+      - run: cargo build --profile release-relay -p ember-relay
+      - run: RUSTFLAGS="-C target-feature=-crt-static" cargo test -p ember-agent -p ember-link
+
+  ui:
+    name: UI
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
