@@ -240,9 +240,20 @@ fn generic_events_are_resolved() {
     assert!(stack.frames.iter().all(|f| !f.method.is_empty()));
     assert!(sample.thread.is_some());
     assert!(sample.start >= chunk.header.start_nanos);
-    let gc = chunk.events().map(Result::unwrap).find(|e| e.type_name == "jdk.GarbageCollection").unwrap();
-    assert!(matches!(gc.field("sumOfPauses"), Some(openprofiler_jfr::Value::Duration(d)) if *d > 0));
-    assert!(matches!(gc.field("name"), Some(openprofiler_jfr::Value::String(_))));
+    // A concurrent cycle aborted by a full GC (e.g. G1Old on JDK 11) can report zero pauses, so
+    // only require the field to resolve as a duration everywhere and be non-zero somewhere.
+    let gcs: Vec<_> =
+        chunk.events().map(Result::unwrap).filter(|e| e.type_name == "jdk.GarbageCollection").collect();
+    assert!(!gcs.is_empty());
+    let pauses: Vec<_> = gcs
+        .iter()
+        .map(|gc| match gc.field("sumOfPauses") {
+            Some(openprofiler_jfr::Value::Duration(d)) => *d,
+            other => panic!("sumOfPauses is not a duration: {other:?}"),
+        })
+        .collect();
+    assert!(pauses.iter().any(|d| *d > 0), "all GC pauses are zero: {pauses:?}");
+    assert!(gcs.iter().all(|gc| matches!(gc.field("name"), Some(openprofiler_jfr::Value::String(_)))));
 }
 
 #[test]
