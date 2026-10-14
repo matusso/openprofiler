@@ -106,6 +106,7 @@ fn publish_info(a: &Agent, port: u16) {
 }
 
 fn run(a: &'static Agent) {
+    crate::own_thread();
     let Some(jni) = a.vm.attach_daemon("Ember Link") else {
         log("agent-link: cannot attach to the VM");
         return;
@@ -344,6 +345,11 @@ fn handle_request<S: Write>(
             label: b.label,
             color: (!b.color.is_empty()).then_some(b.color),
         }),
+        Some(Kind::SetTriggers(t)) => {
+            if let Err(e) = crate::triggers::set(t.triggers) {
+                fail(&mut resp, &e);
+            }
+        }
         None => fail(&mut resp, "empty request"),
     }
     send(s, FrameType::Response, &resp)?;

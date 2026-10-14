@@ -8,6 +8,8 @@ use std::io::{self, Read, Write};
 
 pub use prost::Message;
 
+pub mod triggers;
+
 #[allow(clippy::all, clippy::pedantic)]
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/ember.link.v1.rs"));

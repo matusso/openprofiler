@@ -32,8 +32,9 @@ message Hello {
   string protocol_semver = 1;
   string agent_version = 2;
   JvmInfo jvm = 3;
-  // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "threads", "telemetry",
-  // "heap_dump", "thread_dump", "virtual_threads", ...
+  // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "monitor_usage" (owners of
+  // contended monitors), "park" (j.u.c lock hooks), "threads", "telemetry", "heap_dump",
+  // "thread_dump", "virtual_threads", "triggers", ...
   repeated string capabilities = 4;
   // Echo of the daemon's token (daemon -> agent direction uses Auth below).
   string token = 5;
@@ -99,6 +100,7 @@ message Watermark {
   uint64 bookmarks = 11;
   // Monotonic sequence number of the batch that produced this watermark.
   uint64 seq = 12;
+  uint64 thread_dumps = 13;
 }
 
 message SymbolDelta {
@@ -187,7 +189,9 @@ message MonitorEvent {
   uint32 thread = 4;
   // Thread index + 1 of the owner, 0 if unknown.
   uint32 owner = 5;
+  // Class of the monitor object; for park events, of the blocker (e.g. a ReentrantLock's sync).
   string monitor_class = 6;
+  // Identity hash code of the monitor/blocker object (0 if unknown).
   uint64 monitor_id = 7;
   uint32 stack = 8;
 }
@@ -232,6 +236,8 @@ message DataBatch {
   repeated Bookmark bookmarks = 11;
   // Agent-side wall clock when the batch was cut (epoch nanos).
   int64 time = 12;
+  // Thread dumps taken by the agent itself (triggers).
+  repeated ThreadDump thread_dumps = 13;
 }
 
 // Daemon -> agent: everything up to `watermark` has been applied. In live mode the agent may
@@ -276,6 +282,77 @@ message AddBookmark {
   string color = 2;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Triggers: conditions evaluated in the agent that run actions. See agent-link.md.
+// ---------------------------------------------------------------------------------------------
+
+// Fires `delay_ms` after the trigger is installed, then every `period_ms` (0 = once).
+message TimerCondition {
+  int64 delay_ms = 1;
+  int64 period_ms = 2;
+}
+
+// Fires when a telemetry series (or `heap.used_pct`) stays above/below a value for `for_ms`.
+// It re-arms once the condition no longer holds.
+message ThresholdCondition {
+  string metric = 1;
+  optional double above = 2;
+  optional double below = 3;
+  int64 for_ms = 4;
+}
+
+// JVMTI ResourceExhausted: Java heap, metaspace or native threads.
+message OutOfMemoryCondition {}
+
+// When the agent goes live (or when the trigger is installed on a live agent).
+message JvmStartCondition {}
+
+// At VM death, before the agent shuts down.
+message JvmExitCondition {}
+
+message HeapDumpAction {
+  // Path on the agent's filesystem; `{pid}`, `{time}` (epoch seconds), `{trigger}`, `{n}` (fire
+  // count) are substituted.
+  string path = 1;
+  bool live_only = 2;
+}
+
+message TriggerAction {
+  oneof kind {
+    // "cpu", "alloc" or "monitor".
+    string start_recording = 1;
+    string stop_recording = 2;
+    AddBookmark bookmark = 3;
+    // `.emberlink` path; same substitutions as HeapDumpAction.path.
+    string save_snapshot = 4;
+    HeapDumpAction heap_dump = 5;
+    // The dump is added to the data plane (DataBatch.thread_dumps).
+    ThreadDumpRequest thread_dump = 6;
+    RunGc run_gc = 7;
+  }
+}
+
+message Trigger {
+  string id = 1;
+  oneof condition {
+    TimerCondition timer = 2;
+    ThresholdCondition threshold = 3;
+    OutOfMemoryCondition out_of_memory = 4;
+    JvmStartCondition jvm_start = 5;
+    JvmExitCondition jvm_exit = 6;
+  }
+  repeated TriggerAction actions = 7;
+  // Minimum time between two firings.
+  int64 cooldown_ms = 8;
+  // 0 = unlimited.
+  uint32 max_fires = 9;
+}
+
+// Replaces the agent's trigger set.
+message SetTriggers {
+  repeated Trigger triggers = 1;
+}
+
 message Request {
   uint64 id = 1;
   oneof kind {
@@ -286,6 +363,7 @@ message Request {
     SaveSnapshot save_snapshot = 6;
     RunGc run_gc = 7;
     AddBookmark bookmark = 8;
+    SetTriggers set_triggers = 9;
   }
 }
 

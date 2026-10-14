@@ -1,7 +1,7 @@
 //! In-agent aggregation and delta shipping.
 //!
 //! The collector owns append-only tables (symbols, stack trie, threads, sample rows, telemetry,
-//! thread-state spans, monitor/GC events, bookmarks). Samples are first aggregated per
+//! thread-state spans, monitor/GC events, bookmarks, thread dumps). Samples are first aggregated per
 //! `(second, kind, thread, state, stack, class)` and turned into rows when a batch is cut. A
 //! [`Watermark`] is a vector of absolute table positions; a [`DataBatch`] carries everything
 //! between two watermarks. In live mode, rows the daemon acknowledged may be discarded.
@@ -55,13 +55,17 @@ struct SampleRow {
 }
 
 #[derive(Debug, Clone)]
-struct MonitorRow {
-    start: Nanos,
-    duration: Nanos,
-    kind: MonitorEventKind,
-    thread: u32,
-    monitor_class: String,
-    stack: u32,
+pub struct MonitorRow {
+    pub start: Nanos,
+    pub duration: Nanos,
+    pub kind: MonitorEventKind,
+    pub thread: u32,
+    /// Thread index of the lock owner, if known.
+    pub owner: Option<u32>,
+    pub monitor_class: String,
+    /// Identity hash of the monitor/blocker object, 0 if unknown.
+    pub monitor_id: u64,
+    pub stack: u32,
 }
 
 /// An append-only table that can drop a prefix.
@@ -109,6 +113,7 @@ pub struct Collector {
     monitors: Table<MonitorRow>,
     gc: Table<GcEvent>,
     bookmarks: Table<Bookmark>,
+    thread_dumps: Table<v1::ThreadDump>,
     seq: u64,
     /// Whether acknowledged rows may be dropped.
     pub live: bool,
@@ -140,6 +145,7 @@ impl Collector {
             monitors: Table::default(),
             gc: Table::default(),
             bookmarks: Table::default(),
+            thread_dumps: Table::default(),
             seq: 0,
             live,
             last_span_cut: 0,
@@ -158,6 +164,10 @@ impl Collector {
 
     pub fn new_thread(&mut self, java_id: u64, name: String, is_daemon: bool, now: Nanos) -> u32 {
         self.add_thread(AgentThread { java_id, name, is_daemon, start: now, ..Default::default() })
+    }
+
+    pub fn new_virtual_thread(&mut self, java_id: u64, name: String, now: Nanos) -> u32 {
+        self.add_thread(AgentThread { java_id, name, is_daemon: true, is_virtual: true, start: now, ..Default::default() })
     }
 
     pub fn set_os_id(&mut self, idx: u32, os_id: u64) {
@@ -242,6 +252,10 @@ impl Collector {
         self.telemetry_series = keys;
     }
 
+    pub fn telemetry_keys(&self) -> Vec<String> {
+        self.telemetry_series.iter().map(|(k, _, _)| k.clone()).collect()
+    }
+
     pub fn add_telemetry_row(&mut self, time: Nanos, values: &[f64]) {
         for (i, v) in values.iter().enumerate().take(self.telemetry_series.len()) {
             if v.is_finite() {
@@ -258,16 +272,12 @@ impl Collector {
         self.bookmarks.rows.push(b);
     }
 
-    pub fn add_monitor_event(
-        &mut self,
-        start: Nanos,
-        duration: Nanos,
-        kind: MonitorEventKind,
-        thread: u32,
-        monitor_class: String,
-        stack: u32,
-    ) {
-        self.monitors.rows.push(MonitorRow { start, duration, kind, thread, monitor_class, stack });
+    pub fn add_monitor_event(&mut self, row: MonitorRow) {
+        self.monitors.rows.push(row);
+    }
+
+    pub fn add_thread_dump(&mut self, dump: v1::ThreadDump) {
+        self.thread_dumps.rows.push(dump);
     }
 
     pub fn sample_rows(&self) -> usize {
@@ -323,6 +333,7 @@ impl Collector {
             gc: self.gc.end(),
             bookmarks: self.bookmarks.end(),
             seq: self.seq,
+            thread_dumps: self.thread_dumps.end(),
         }
     }
 
@@ -335,6 +346,7 @@ impl Collector {
             monitors: self.monitors.base,
             gc: self.gc.base,
             bookmarks: self.bookmarks.base,
+            thread_dumps: self.thread_dumps.base,
             ..Default::default()
         }
     }
@@ -356,6 +368,7 @@ impl Collector {
             gc: w.gc.clamp(r.gc, e.gc),
             bookmarks: w.bookmarks.clamp(r.bookmarks, e.bookmarks),
             seq: w.seq,
+            thread_dumps: w.thread_dumps.clamp(r.thread_dumps, e.thread_dumps),
         }
     }
 
@@ -488,9 +501,9 @@ impl Collector {
                         MonitorEventKind::Park => 2,
                     },
                     thread: m.thread,
-                    owner: 0,
+                    owner: m.owner.map_or(0, |o| o + 1),
                     monitor_class: m.monitor_class.clone(),
-                    monitor_id: 0,
+                    monitor_id: m.monitor_id,
                     stack: m.stack,
                 })
                 .collect(),
@@ -534,6 +547,7 @@ impl Collector {
             gc: Some(gc),
             bookmarks,
             time: now,
+            thread_dumps: self.thread_dumps.since(from.thread_dumps).to_vec(),
         })
     }
 
@@ -554,6 +568,8 @@ impl Collector {
         if self.monitors.rows.len() > RETAIN_ROWS / 4 {
             self.monitors.drop_until(w.monitors);
         }
+        // Dumps are large; once the daemon has them they are not kept.
+        self.thread_dumps.drop_until(w.thread_dumps);
     }
 }
 

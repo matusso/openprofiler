@@ -49,6 +49,7 @@ fn is_net_io(class: &str) -> bool {
 }
 
 fn run(a: &'static Agent) {
+    crate::own_thread();
     let Some(jni) = a.vm.attach_daemon("Ember Sampler") else {
         crate::log("sampler: cannot attach to the VM");
         return;
@@ -193,6 +194,9 @@ fn sample_all(
                 }
                 c.observe_state(ti, state, now);
             }
+        }
+        if wall.is_some() {
+            crate::vthreads::observe_states(c, now);
         }
     }
     a.jvmti.dealloc(info);

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 prost = "0.14"
+serde_json.workspace = true
 zstd = { version = "0.13", optional = true }
 
 [build-dependencies]

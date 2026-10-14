@@ -114,6 +114,9 @@ enum Cmd {
         kind: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// JSON trigger file to install in the agent (see docs/spec/agent-link.md).
+        #[arg(long)]
+        triggers: Option<PathBuf>,
     },
     /// Attach to a running JVM, record for a duration and write an .ember snapshot.
     Record {
@@ -127,6 +130,9 @@ enum Cmd {
         /// Also embed a heap dump taken at the end.
         #[arg(long)]
         heap: bool,
+        /// JSON trigger file to install in the agent (see docs/spec/agent-link.md).
+        #[arg(long)]
+        triggers: Option<PathBuf>,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -211,9 +217,10 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Cmd::Mcp => ember_daemon::mcp::McpServer::new(Engine::new()).serve_stdio().await,
-        Cmd::Attach { pid, duration, kind: k, limit } => {
+        Cmd::Attach { pid, duration, kind: k, limit, triggers } => {
             let engine = Engine::new();
             let s = attach_live(&engine, pid, None).await?;
+            install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Attached to {}; sampling for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
             let r = hotspots(
@@ -238,9 +245,10 @@ async fn run(cli: Cli) -> Result<()> {
             engine.close(&s.id)?;
             Ok(())
         }
-        Cmd::Record { pid, duration, interval, heap, output } => {
+        Cmd::Record { pid, duration, interval, heap, triggers, output } => {
             let engine = Engine::new();
             let s = attach_live(&engine, pid, interval).await?;
+            install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Recording {} for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
             let heap_path = if heap {
@@ -423,6 +431,19 @@ async fn attach_live(
         ember_daemon::live::AttachRequest { pid: Some(pid), options: Some(options) },
     )
     .await
+}
+
+async fn install_triggers(
+    engine: &std::sync::Arc<Engine>,
+    s: &std::sync::Arc<ember_daemon::Session>,
+    file: Option<&std::path::Path>,
+) -> Result<()> {
+    let Some(file) = file else { return Ok(()) };
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let req: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let r = ember_daemon::live::control(engine, s, "triggers", req).await?;
+    eprintln!("Installed {} trigger(s)", r["installed"]);
+    Ok(())
 }
 
 fn parse_duration(s: &str) -> std::result::Result<std::time::Duration, String> {

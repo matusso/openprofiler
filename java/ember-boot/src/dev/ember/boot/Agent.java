@@ -34,6 +34,8 @@ public final class Agent {
 
     static native String saveSnapshot0(String path);
 
+    static native boolean registerPark0(Class<?> unsafeClass);
+
     // ---- called from native --------------------------------------------------------------------
 
     /** Starts the telemetry sampler. Idempotent. */
@@ -79,6 +81,14 @@ public final class Agent {
     /** Writes an HPROF heap dump; returns null on success or an error message. */
     public static String dumpHeap(String path, boolean live) {
         return Dumps.dumpHeap(path, live);
+    }
+
+    /**
+     * Binds the agent's {@code Unsafe.park} wrapper. Done from here rather than from the agent
+     * thread so the VM sees a boot-loader caller, which it accepts without a warning.
+     */
+    public static boolean registerPark(Class<?> unsafeClass) {
+        return registerPark0(unsafeClass);
     }
 
     /** Thread dump in the line-oriented format documented in {@link Dumps#threadDump()}. */

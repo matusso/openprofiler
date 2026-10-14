@@ -449,6 +449,7 @@ dependencies = [
  "ember-jfr",
  "ember-link",
  "ember-model",
+ "ember-proto",
  "ember-remote",
  "ember-snapshot",
  "futures-util",
@@ -541,6 +542,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protox",
+ "serde_json",
  "zstd",
 ]
 

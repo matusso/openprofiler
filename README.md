@@ -44,6 +44,7 @@ ember convert recording.jfr -o recording.ember
 ember list                                  # local JVMs
 ember attach <pid> --duration 10s           # live hot spots
 ember record --pid <pid> --duration 60s --heap -o out.ember
+ember record --pid <pid> --triggers triggers.json -o out.ember   # heap/thread dumps on thresholds, OOM, timers
 ember dump <pid> -o heap.hprof
 ember mcp                                   # MCP server on stdio
 ember daemon [--web] [--demo] [files…]
@@ -60,7 +61,7 @@ mode is `=mode=offline,file=app.emberlink`. See [docs/spec/agent-link.md](docs/s
 | `crates/ember-jfr` | Metadata-driven JFR parser (about 650 MB/s) mapped to `ember-model` |
 | `crates/ember-hprof`, `crates/ember-heap` | Zero-copy HPROF parser; mmap'd CSR graphs, Semi-NCA dominators, retained sizes, inspections, persistent index (10 GB dump: about 25 s cold, under 5 ms warm) |
 | `crates/ember-snapshot` | `.ember` container ([spec](docs/spec/snapshot-format.md)) |
-| `crates/jvmti-sys`, `crates/ember-agent` | JVMTI bindings; native agent (async sampler with AsyncGetCallTrace on Linux, sync sampler elsewhere, allocation and monitor events, telemetry, heap and thread dumps) |
+| `crates/jvmti-sys`, `crates/ember-agent` | JVMTI bindings; native agent (async sampler with AsyncGetCallTrace on Linux, sync sampler elsewhere, allocation, monitor and park events with lock owners, virtual threads, triggers, telemetry, heap and thread dumps) |
 | `crates/ember-proto`, `crates/ember-link` | Agent-link protocol (protobuf, zstd frames, TLS 1.3 with pinned fingerprint) and the daemon-side client |
 | `crates/ember-attach` | hsperfdata discovery, HotSpot dynamic attach, container `NSpid` handling, `jcmd` |
 | `crates/ember-remote`, `crates/ember-relay` | ssh, docker and kubectl transports (incl. ephemeral debug containers), verified uploads, stdio tunnels; the static helper binary |
@@ -84,7 +85,7 @@ MAT_HOME=/path/to/mat cargo test -p ember-heap --test mat_parity   # exact parit
 |---|---|
 | 0 Foundations | Done: workspace, CI workflow, JVMTI bindings, protobuf specs, `.ember` spec |
 | 1 Offline analyzer | Done: HPROF/heap engine with exact MAT parity, 10 GB under 3 min cold and under 5 s warm; JFR; Query API; UI; CLI; MCP |
-| 2 Live agent | Mostly done: sampling (async on Linux, sync elsewhere), allocation and monitor events, telemetry, thread and heap dumps, TLS + token link, reconnect, local attach, offline recording. Missing: triggers, `j.u.c` park hooks, virtual-thread mount events, monitor owners |
+| 2 Live agent | Done: sampling (async on Linux with stack-walk repair, sync elsewhere), allocation and monitor events with lock owners, `j.u.c` park events, virtual-thread mount tracking, telemetry, thread and heap dumps, triggers (timer, threshold, OOM, start, exit), TLS + token link, reconnect, local attach, offline recording |
 | 3 Probes and instrumentation | Not started: no bytecode instrumentation, probes (JDBC, HTTP, …), or custom-probe API yet |
 | 4 Remote and cloud | Mostly done: relay, ssh/docker/kubectl transports, ephemeral debug containers, verified upload, tunnelled attach (tested end to end with Docker), web mode with token. Not yet: shareable read-only links, armhf/amd64 bundles built in CI |
 | 5 Polish | Partial: VS Code extension, insights, IDE bridge. Not yet: native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Windows agent, PHD import, Arrow IPC sections |

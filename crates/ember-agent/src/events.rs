@@ -1,6 +1,6 @@
 //! JVMTI event callbacks and agent start-up once the VM is live.
 
-use crate::collector::now_nanos;
+use crate::collector::{MonitorRow, now_nanos};
 use crate::jvm::{JResult, jni, jvmti};
 use crate::{Agent, Mode, agent, debug, log};
 use ember_model::{FrameKind, MonitorEventKind, SampleKind, ThreadState};
@@ -16,10 +16,21 @@ const INTERNAL_TAG: jlong = -1;
 static REGISTER: Mutex<()> = Mutex::new(());
 /// Fallback thread registry when object tagging is unavailable: Java thread id → index.
 static BY_JAVA_ID: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
-/// An in-flight monitor enter/wait: (start, kind, monitor class, stack).
-type PendingMonitor = (i64, MonitorEventKind, String, u32);
+
+/// An in-flight monitor enter or wait.
+struct PendingMonitor {
+    start: i64,
+    kind: MonitorEventKind,
+    class: String,
+    stack: u32,
+    owner: Option<u32>,
+    id: u64,
+}
+
 /// In-flight monitor waits per thread index.
 static MONITOR_PENDING: Mutex<Option<HashMap<u32, PendingMonitor>>> = Mutex::new(None);
+/// Owner lookups used in the current second: `(second, count)`.
+static OWNER_BUDGET: Mutex<(i64, u32)> = Mutex::new((0, 0));
 
 pub fn install(a: &Agent) -> JResult<()> {
     let cb = jvmtiEventCallbacks {
@@ -34,6 +45,8 @@ pub fn install(a: &Agent) -> JResult<()> {
         MonitorContendedEntered: Some(monitor_contended_entered),
         MonitorWait: Some(monitor_wait),
         MonitorWaited: Some(monitor_waited),
+        ResourceExhausted: Some(resource_exhausted),
+        VirtualThreadEnd: Some(crate::vthreads::virtual_thread_end),
         ..Default::default()
     };
     a.jvmti.set_callbacks(&cb)?;
@@ -55,6 +68,12 @@ pub fn install(a: &Agent) -> JResult<()> {
     }
     if has_cap(a, "monitor") {
         set_monitor_events(a, a.monitor_on.load(Ordering::SeqCst));
+    }
+    if has_cap(a, "oom") {
+        let _ = j.enable_event(JVMTI_EVENT_RESOURCE_EXHAUSTED, true);
+    }
+    if has_cap(a, "virtual_threads") && !crate::vthreads::install(a) {
+        a.caps.lock().retain(|c| c != "virtual_threads");
     }
     Ok(())
 }
@@ -115,9 +134,15 @@ pub fn on_live(a: &'static Agent, jni: *mut JNIEnv) {
         }
     }
     preload_methods(a);
+    // Installed even with monitors off so `SetRecording monitor` works later; the hook passes
+    // straight through while monitor recording is off.
+    if crate::park::install(a, jni) {
+        a.caps.lock().push("park".into());
+    }
     #[cfg(target_os = "linux")]
-    crate::sampler_async::start(a);
+    crate::sampler_async::start(a, jni);
     crate::sampler::start(a);
+    crate::triggers::start(a);
     if a.opts.mode == Mode::Live {
         crate::server::start(a);
         if a.opts.wait {
@@ -239,8 +264,9 @@ unsafe extern "C" fn vm_init(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, _thread: j
     }
 }
 
-unsafe extern "C" fn vm_death(_jvmti: *mut jvmtiEnv, _jni: *mut JNIEnv) {
+unsafe extern "C" fn vm_death(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv) {
     let Some(a) = agent() else { return };
+    crate::triggers::on_exit(a, jni);
     a.shutting_down.store(true, Ordering::SeqCst);
     if a.opts.mode == Mode::Offline {
         let path =
@@ -329,30 +355,88 @@ fn monitor_begin(jni: *mut JNIEnv, thread: jthread, object: jobject, kind: Monit
     }
     let Some(idx) = thread_index(a, jni, thread) else { return };
     let Some(stack) = capture_stack(a, jni, ptr::null_mut()) else { return };
+    let class = object_class_name(a, jni, object);
+    let owner = if kind == MonitorEventKind::Enter { monitor_owner(a, jni, object) } else { None };
+    let pending = PendingMonitor { start: now_nanos(), kind, class, stack, owner, id: identity_hash(a, object) };
+    MONITOR_PENDING.lock().get_or_insert_with(HashMap::new).insert(idx, pending);
+}
+
+/// Class name of `object` (Java syntax).
+pub fn object_class_name(a: &Agent, jni: *mut JNIEnv, object: jobject) -> String {
     let cls = jni!(jni, GetObjectClass, object);
     let class = a.collector.lock().resolver.class_name(a.jvmti, cls);
     jni!(jni, DeleteLocalRef, cls);
-    MONITOR_PENDING.lock().get_or_insert_with(HashMap::new).insert(idx, (now_nanos(), kind, class, stack));
+    class
+}
+
+/// Identity hash code of `object` as an id (0 if unavailable).
+pub fn identity_hash(a: &Agent, object: jobject) -> u64 {
+    let mut h: jint = 0;
+    if object.is_null() || jvmti!(a.jvmti, GetObjectHashCode, object, &mut h) != JVMTI_ERROR_NONE {
+        return 0;
+    }
+    h as u32 as u64
+}
+
+/// Thread index of the thread that owns the (contended) monitor of `object`.
+///
+/// `GetObjectMonitorUsage` runs as a safepoint operation, so lookups are limited to `owner_rate`
+/// per second; contention beyond that is recorded without an owner.
+fn monitor_owner(a: &Agent, jni: *mut JNIEnv, object: jobject) -> Option<u32> {
+    if !has_cap(a, "monitor_usage") {
+        return None;
+    }
+    {
+        let second = now_nanos() / 1_000_000_000;
+        let mut b = OWNER_BUDGET.lock();
+        if b.0 != second {
+            *b = (second, 0);
+        }
+        if b.1 >= a.opts.owner_rate {
+            return None;
+        }
+        b.1 += 1;
+    }
+    // SAFETY: plain-old-data out struct; zero is a valid initial value.
+    let mut u: jvmtiMonitorUsage = unsafe { std::mem::zeroed() };
+    if jvmti!(a.jvmti, GetObjectMonitorUsage, object, &mut u) != JVMTI_ERROR_NONE {
+        return None;
+    }
+    a.jvmti.dealloc(u.waiters);
+    a.jvmti.dealloc(u.notify_waiters);
+    if u.owner.is_null() {
+        return None;
+    }
+    let idx = thread_index(a, jni, u.owner);
+    jni!(jni, DeleteLocalRef, u.owner);
+    idx
 }
 
 fn monitor_end(jni: *mut JNIEnv, thread: jthread) {
     let Some(a) = agent() else { return };
     let Some(idx) = thread_index(a, jni, thread) else { return };
-    let Some((start, kind, class, stack)) = MONITOR_PENDING.lock().as_mut().and_then(|m| m.remove(&idx))
-    else {
+    let Some(m) = MONITOR_PENDING.lock().as_mut().and_then(|m| m.remove(&idx)) else {
         return;
     };
-    let now = now_nanos();
-    let dur = (now - start).max(0);
-    let (sample_kind, state) = match kind {
+    let dur = (now_nanos() - m.start).max(0);
+    let (sample_kind, state) = match m.kind {
         MonitorEventKind::Enter => (SampleKind::Monitor, ThreadState::Blocked),
         _ => (SampleKind::Wait, ThreadState::Waiting),
     };
     let mut c = a.collector.lock();
-    let class_id = c.symbols.intern_str(&class);
-    c.add_sample(start, sample_kind, idx, state, stack, dur as u64, Some(class_id));
+    let class_id = c.symbols.intern_str(&m.class);
+    c.add_sample(m.start, sample_kind, idx, state, m.stack, dur as u64, Some(class_id));
     if dur as u128 >= a.opts.monitor_threshold.as_nanos() {
-        c.add_monitor_event(start, dur, kind, idx, class, stack);
+        c.add_monitor_event(MonitorRow {
+            start: m.start,
+            duration: dur,
+            kind: m.kind,
+            thread: idx,
+            owner: m.owner,
+            monitor_class: m.class,
+            monitor_id: m.id,
+            stack: m.stack,
+        });
     }
 }
 
@@ -392,6 +476,25 @@ unsafe extern "C" fn monitor_waited(
     _to: jboolean,
 ) {
     monitor_end(jni, thread);
+}
+
+unsafe extern "C" fn resource_exhausted(
+    _j: *mut jvmtiEnv,
+    _jni: *mut JNIEnv,
+    flags: jint,
+    _reserved: *const std::ffi::c_void,
+    description: *const std::ffi::c_char,
+) {
+    if agent().is_none() {
+        return;
+    }
+    let what = if description.is_null() {
+        String::new()
+    } else {
+        // SAFETY: the VM passes a NUL-terminated description.
+        unsafe { std::ffi::CStr::from_ptr(description) }.to_string_lossy().into_owned()
+    };
+    crate::triggers::on_out_of_memory(flags, &what);
 }
 
 #[cfg(test)]

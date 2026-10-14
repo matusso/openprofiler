@@ -11,6 +11,7 @@ ember-snapshot.workspace = true
 ember-jfr.workspace = true
 ember-heap.workspace = true
 ember-link.workspace = true
+ember-proto.workspace = true
 ember-attach.workspace = true
 ember-remote.workspace = true
 anyhow.workspace = true

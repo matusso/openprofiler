@@ -16,6 +16,7 @@ mod events;
 mod java;
 mod jvm;
 mod options;
+mod park;
 mod recording;
 mod resolve;
 mod sampler;
@@ -23,6 +24,10 @@ mod sampler;
 mod sampler_async;
 mod server;
 mod tls;
+mod triggers;
+#[cfg(unix)]
+mod vmstructs;
+mod vthreads;
 
 pub use collector::Collector;
 pub use options::{Mode, Options, SamplerChoice};
@@ -74,6 +79,12 @@ pub(crate) fn log(msg: &str) {
     eprintln!("[ember] {msg}");
 }
 
+/// Marks the calling thread as one of the agent's own (never CPU-sampled).
+pub(crate) fn own_thread() {
+    #[cfg(target_os = "linux")]
+    sampler_async::register_own_thread();
+}
+
 pub(crate) fn debug(msg: &str) {
     if agent().is_some_and(|a| a.opts.debug) {
         log(msg);
@@ -100,13 +111,21 @@ const CAP_GROUPS: &[(&str, &[u32])] = &[
     ("alloc", &[CAN_GENERATE_SAMPLED_OBJECT_ALLOC_EVENTS]),
     ("thread_cpu", &[CAN_GET_THREAD_CPU_TIME]),
     ("monitor_info", &[CAN_GET_OWNED_MONITOR_INFO, CAN_GET_CURRENT_CONTENDED_MONITOR]),
+    ("monitor_usage", &[CAN_GET_MONITOR_INFO]),
+    ("oom", &[CAN_GENERATE_RESOURCE_EXHAUSTION_HEAP_EVENTS, CAN_GENERATE_RESOURCE_EXHAUSTION_THREADS_EVENTS]),
+    ("virtual_threads", &[CAN_SUPPORT_VIRTUAL_THREADS]),
 ];
 
-fn request_capabilities(jvmti: Jvmti) -> Vec<String> {
+fn request_capabilities(jvmti: Jvmti, opts: &Options) -> Vec<String> {
     let potential = jvmti.potential_capabilities();
     let mut granted = vec![];
     for (name, bits) in CAP_GROUPS {
-        if !bits.iter().all(|&b| potential.get(b)) {
+        let wanted = match *name {
+            "virtual_threads" => opts.vthreads,
+            "monitor_usage" => opts.owner_rate > 0,
+            _ => true,
+        };
+        if !wanted || !bits.iter().all(|&b| potential.get(b)) {
             continue;
         }
         let caps = jvmtiCapabilities::default().with(bits);
@@ -146,12 +165,13 @@ unsafe fn init(vm: *mut JavaVM, options: *const c_char, attach: bool) -> jint {
         return 1;
     }
     let jvmti = Jvmti(env as *mut jvmtiEnv);
-    let mut caps = request_capabilities(jvmti);
+    let mut caps = request_capabilities(jvmti, &opts);
     caps.push("cpu".into());
     caps.push("threads".into());
     caps.push("telemetry".into());
     caps.push("thread_dump".into());
     caps.push("heap_dump".into());
+    caps.push("triggers".into());
 
     let tls = if opts.tls && opts.mode == Mode::Live {
         match tls::TlsIdentity::generate() {

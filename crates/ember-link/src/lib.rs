@@ -340,6 +340,11 @@ impl LinkClient {
         self.request(v1::request::Kind::Bookmark(b), None).await.map(|_| ())
     }
 
+    /// Replaces the agent's triggers (see `ember_proto::triggers` for the JSON form).
+    pub async fn set_triggers(&self, triggers: Vec<v1::Trigger>) -> Result<()> {
+        self.request(v1::request::Kind::SetTriggers(v1::SetTriggers { triggers }), None).await.map(|_| ())
+    }
+
     /// Asks the agent to write an `.emberlink` recording at `path` (on the agent's filesystem).
     pub async fn save_recording(&self, path: &str) -> Result<()> {
         let s = v1::SaveSnapshot { path: path.into() };

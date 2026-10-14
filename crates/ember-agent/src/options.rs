@@ -36,11 +36,19 @@ pub struct Options {
     pub wait: bool,
     pub tls: bool,
     pub sampler: SamplerChoice,
+    /// Repair and retry failed `AsyncGetCallTrace` walks (Linux async sampler).
+    pub recover: bool,
     pub cpu: bool,
     pub alloc: bool,
     pub alloc_interval: u32,
     pub monitors: bool,
     pub monitor_threshold: Duration,
+    /// Owner lookups for contended monitors per second (each is a safepoint); 0 disables them.
+    pub owner_rate: u32,
+    /// Virtual-thread mount/unmount tracking (JDK 21+).
+    pub vthreads: bool,
+    /// JSON trigger file loaded at start-up.
+    pub triggers: Option<PathBuf>,
     pub max_frames: u32,
     pub bootjar: Option<PathBuf>,
     /// Where to publish `{pid, port, token, fingerprint}`; default `$TMPDIR/ember-<pid>.json`.
@@ -61,11 +69,15 @@ impl Default for Options {
             wait: false,
             tls: false,
             sampler: SamplerChoice::Auto,
+            recover: true,
             cpu: true,
             alloc: true,
             alloc_interval: 512 * 1024,
             monitors: true,
             monitor_threshold: Duration::from_micros(100),
+            owner_rate: 50,
+            vthreads: true,
+            triggers: None,
             max_frames: 256,
             bootjar: None,
             infofile: None,
@@ -182,6 +194,10 @@ impl Options {
                         }
                         _ => false,
                     },
+                    "recover" => {
+                        o.recover = flag(v);
+                        true
+                    }
                     "cpu" => {
                         o.cpu = flag(v);
                         true
@@ -196,6 +212,15 @@ impl Options {
                         true
                     }
                     "monitor_threshold" => parse_duration(v).map(|d| o.monitor_threshold = d).is_some(),
+                    "owner_rate" => v.parse().map(|n| o.owner_rate = n).is_ok(),
+                    "vthreads" => {
+                        o.vthreads = flag(v);
+                        true
+                    }
+                    "triggers" => {
+                        o.triggers = Some(v.into());
+                        true
+                    }
                     "max_frames" | "depth" => v.parse().map(|n: u32| o.max_frames = n.clamp(1, 2048)).is_ok(),
                     "bootjar" => {
                         o.bootjar = Some(v.into());
@@ -237,10 +262,12 @@ mod tests {
         assert_eq!(o.interval, Duration::from_millis(5));
         assert!(o.tls);
         assert_eq!(o.mode, Mode::Offline);
-        let (o, w) = Options::parse("bogus,alloc_interval=1m,nowait", None);
+        let (o, w) = Options::parse("bogus,alloc_interval=1m,nowait,owner_rate=0,vthreads=off,recover=0", None);
         assert_eq!(w.len(), 1);
         assert_eq!(o.alloc_interval, 1 << 20);
         assert!(!o.wait);
+        assert_eq!(o.owner_rate, 0);
+        assert!(!o.vthreads && !o.recover);
         assert_eq!(parse_duration("250us"), Some(Duration::from_micros(250)));
     }
 }

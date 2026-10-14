@@ -16,6 +16,7 @@ pub struct JavaHelpers {
     m_jvm_info: jmethodID,
     m_dump_heap: jmethodID,
     m_thread_dump: jmethodID,
+    m_register_park: jmethodID,
     pub m_thread_id: jmethodID,
 }
 
@@ -91,6 +92,7 @@ pub fn init(jni: *mut JNIEnv) -> Result<JavaHelpers, String> {
         native!("bookmark0", "(Ljava/lang/String;Ljava/lang/String;)V", bookmark0),
         native!("setRecording0", "(Ljava/lang/String;Z)V", set_recording0),
         native!("saveSnapshot0", "(Ljava/lang/String;)Ljava/lang/String;", save_snapshot0),
+        native!("registerPark0", "(Ljava/lang/Class;)Z", register_park0),
     ];
     if jni!(jni, RegisterNatives, local, methods.as_ptr(), methods.len() as jint) != 0 {
         return Err(take_exception(jni).unwrap_or_else(|| "RegisterNatives failed".into()));
@@ -110,6 +112,7 @@ pub fn init(jni: *mut JNIEnv) -> Result<JavaHelpers, String> {
         m_jvm_info: sm(c"jvmInfo", c"()[Ljava/lang/String;"),
         m_dump_heap: sm(c"dumpHeap", c"(Ljava/lang/String;Z)Ljava/lang/String;"),
         m_thread_dump: sm(c"threadDump", c"()[Ljava/lang/String;"),
+        m_register_park: sm(c"registerPark", c"(Ljava/lang/Class;)Z"),
         m_thread_id,
     })
 }
@@ -173,6 +176,16 @@ impl JavaHelpers {
             (Some(e), _) | (None, Some(e)) => Err(e),
             (None, None) => Ok(()),
         }
+    }
+
+    /// Binds the `Unsafe.park` hook through `Agent.registerPark` (a boot-class caller).
+    pub fn register_park(&self, jni: *mut JNIEnv, unsafe_class: jclass) -> bool {
+        if self.m_register_park.is_null() {
+            return crate::park::register(jni, unsafe_class);
+        }
+        let args = [jvalue { l: unsafe_class }];
+        let ok = jni!(jni, CallStaticBooleanMethodA, self.agent_class, self.m_register_park, args.as_ptr());
+        take_exception(jni).is_none() && ok != 0
     }
 
     pub fn thread_dump(&self, jni: *mut JNIEnv) -> v1::ThreadDump {
@@ -254,7 +267,12 @@ extern "system" fn telemetry0(env: *mut JNIEnv, _cls: jclass, time: jlong, value
     let n = jni!(env, GetArrayLength, values).max(0) as usize;
     let mut v = vec![0f64; n];
     jni!(env, GetDoubleArrayRegion, values, 0, n as jint, v.as_mut_ptr());
-    a.collector.lock().add_telemetry_row(time, &v);
+    let keys = {
+        let mut c = a.collector.lock();
+        c.add_telemetry_row(time, &v);
+        c.telemetry_keys()
+    };
+    crate::triggers::on_telemetry(time, &keys, &v);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,6 +314,10 @@ extern "system" fn set_recording0(env: *mut JNIEnv, _cls: jclass, kind: jstring,
     let Some(a) = agent() else { return };
     let kind = jstring_to_string(env, kind).unwrap_or_default();
     crate::events::set_recording(a, &kind, enabled != 0, 0);
+}
+
+extern "system" fn register_park0(env: *mut JNIEnv, _cls: jclass, unsafe_class: jclass) -> jboolean {
+    crate::park::register(env, unsafe_class) as jboolean
 }
 
 extern "system" fn save_snapshot0(env: *mut JNIEnv, _cls: jclass, path: jstring) -> jstring {

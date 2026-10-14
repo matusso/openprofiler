@@ -1,0 +1,8 @@
+What's still missing:
+- Phase 3 (probes and instrumentation) is not started: no JDBC/HTTP/Kafka probes, no exact call counts, no custom-probe API.
+- Phase 2 gaps: triggers, java.util.concurrent lock (park) hooks, virtual-thread mount events and lock-owner tracking. On Linux, about 20–30% of CPU samples show up as [unknown Java] or [non-Java thread] frames.
+- Phase 4 and 5 gaps:
+  - The CI workflow is written but has never run on GitHub.
+  - Only Linux arm64 builds of the remote bundle were made and tested; x86_64 and armhf weren't.
+  - Kubernetes and SSH attach are implemented but untested, because I had no cluster or remote host to try them on.
+  - Not built: the IntelliJ plugin, Windows agent, MBean browser, call tracer, IBM PHD import, and the Arrow export the plan mentions.

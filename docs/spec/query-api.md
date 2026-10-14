@@ -221,6 +221,8 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 - `POST .../snapshot` `{ path }` → writes a `.ember` file.
 - `POST .../bookmark` `{ label }`
 - `POST .../gc` → runs a full GC.
+- `POST .../triggers` `{ triggers: Trigger[] }` → replaces the agent's triggers (format in
+  [agent-link.md](agent-link.md#triggers)); returns `{ installed }`.
 
 ## Export
 

@@ -306,6 +306,13 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
             let hs = engine.open(&out.path)?;
             Ok(json!({ "session": hs.info(), "path": out.path, "size": out.size }))
         }
+        "triggers" => {
+            // `{"triggers": [...]}` or a bare array; see `ember_proto::triggers`.
+            let triggers = ember_proto::triggers::parse_json(&req.to_string()).map_err(|e| anyhow!(e))?;
+            let n = triggers.len();
+            c.set_triggers(triggers).await?;
+            Ok(json!({ "installed": n }))
+        }
         "probe-events" => bail!("probes are not available yet (planned for phase 3)"),
         other => bail!("unknown live action: {other}"),
     }

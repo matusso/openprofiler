@@ -232,6 +232,9 @@ pub fn apply_batch(p: &mut Profile, b: &v1::DataBatch) -> Result<()> {
             color: (!bm.color.is_empty()).then(|| bm.color.clone()),
         });
     }
+    for d in &b.thread_dumps {
+        p.thread_dumps.push(thread_dump(d));
+    }
     if b.time != 0 {
         p.extend_range(b.time);
     }

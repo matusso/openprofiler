@@ -101,6 +101,12 @@ pub fn tools() -> Vec<Value> {
             &["session"],
         ),
         tool(
+            "set_triggers",
+            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit) and actions (heap_dump {path}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor, run_gc), plus optional cooldown and max_fires.",
+            json!({ "session": session, "triggers": { "type": "array", "items": { "type": "object" } } }),
+            &["session", "triggers"],
+        ),
+        tool(
             "probe_events",
             "Probe events (JDBC, HTTP, ...) of a session. Requires a live agent with probes enabled.",
             json!({ "session": session, "probe": { "type": "string" } }),
@@ -364,10 +370,14 @@ impl McpServer {
                 }
                 Ok(v)
             }
-            "heap_dump" | "probe_events" => {
+            "heap_dump" | "probe_events" | "set_triggers" => {
                 let s = self.session(args, "session")?;
                 let engine = self.engine.clone();
-                let action = if name == "heap_dump" { "heap-dump" } else { "probe-events" };
+                let action = match name {
+                    "heap_dump" => "heap-dump",
+                    "set_triggers" => "triggers",
+                    _ => "probe-events",
+                };
                 tokio::runtime::Handle::current()
                     .block_on(async move { crate::live::control(&engine, &s, action, args.clone()).await })
             }

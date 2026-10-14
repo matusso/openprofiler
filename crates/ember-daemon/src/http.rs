@@ -97,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/snapshot", post(live_h))
         .route("/sessions/{id}/bookmark", post(live_h))
         .route("/sessions/{id}/gc", post(live_h))
+        .route("/sessions/{id}/triggers", post(live_h))
         .route("/compare", post(compare_h))
         .route("/compare/flame", post(compare_flame_h))
         .route("/jvms", get(jvms))
