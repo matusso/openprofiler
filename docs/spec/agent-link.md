@@ -1,9 +1,9 @@
-# Ember agent-link protocol v1
+# OpenProfiler agent-link protocol v1
 
-The agent-link protocol connects the in-JVM agent (`libember_agent`, the **server**) to
-`ember-daemon` (the **client**). The schema lives in
-[`crates/ember-proto/proto/agent_link.proto`](../../crates/ember-proto/proto/agent_link.proto);
-the daemon-side implementation is `crates/ember-link`.
+The agent-link protocol connects the in-JVM agent (`libopenprofiler_agent`, the **server**) to
+`openprofiler-daemon` (the **client**). The schema lives in
+[`crates/openprofiler-proto/proto/agent_link.proto`](../../crates/openprofiler-proto/proto/agent_link.proto);
+the daemon-side implementation is `crates/openprofiler-link`.
 
 ## Transport
 
@@ -14,12 +14,12 @@ the daemon-side implementation is `crates/ember-link`.
 - **TLS 1.3** with the `tls` option. The agent generates a self-signed certificate (ECDSA P-256)
   at start-up; the client pins its SHA-256 fingerprint (published in the info file). TLS 1.2 and
   other certificates are rejected.
-- Over a relay (`ember-relay`, `docker exec`, `kubectl exec`) the link runs in plain TCP on
+- Over a relay (`openprofiler-relay`, `docker exec`, `kubectl exec`) the link runs in plain TCP on
   loopback inside the target namespace. The token still applies.
 
 ### Info file
 
-After binding, the agent publishes `$TMPDIR/ember-<pid>.json` (or the `infofile=` path),
+After binding, the agent publishes `$TMPDIR/openprofiler-<pid>.json` (or the `infofile=` path),
 mode `0600`, written atomically:
 
 ```json
@@ -82,7 +82,7 @@ serves clients lazily. The agent's state is a set of append-only tables:
 
 | table | contents |
 |---|---|
-| strings, methods, frames | `ember_model::Symbols` (string 0 is `""`) |
+| strings, methods, frames | `openprofiler_model::Symbols` (string 0 is `""`) |
 | stacks | global stack trie (node 0 = empty stack) |
 | threads | `ThreadInfo` rows (index = thread id used by all other tables) |
 | samples | per-second pre-aggregated rows `(time, kind, thread, state, stack, weight, count, class)` |
@@ -96,7 +96,7 @@ A `Watermark` holds one absolute position per table. A `DataBatch` carries every
 interns them in the same order, so the agent's ids equal the daemon's ids. `ThreadInfoBatch.updates`
 carry later changes to existing threads (end time, rename).
 
-Sample kinds (`ember_model::SampleKind`): `0 cpu`, `1 wall`, `2 alloc`, `3 monitor`, `4 wait`,
+Sample kinds (`openprofiler_model::SampleKind`): `0 cpu`, `1 wall`, `2 alloc`, `3 monitor`, `4 wait`,
 `5 io`, `6 exception`. Thread states: `0 runnable`, `1 waiting`, `2 blocked`, `3 net_io`,
 `4 sleeping`, `5 new`, `6 terminated`, `7 unknown`.
 
@@ -166,7 +166,7 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 | `HeapDump{format, live_only, local_path}` | `HotSpotDiagnosticMXBean.dumpHeap` | `HeapDumpResult`; without `local_path` the HPROF follows as `BlobChunk`s (1 MiB, `last` on the final one) |
 | `SetRecording{kind, enabled, interval_us}` | toggles `cpu`, `alloc`, `monitor` | `ok` |
 | `UpdateConfig{config}` | applies a whole `SessionConfig` | `ok` |
-| `SaveSnapshot{path}` | writes an `.emberlink` recording on the agent's filesystem | `SnapshotResult` |
+| `SaveSnapshot{path}` | writes an `.oplink` recording on the agent's filesystem | `SnapshotResult` |
 | `RunGc` | JVMTI `ForceGarbageCollection` | `ok` |
 | `AddBookmark{label, color}` | adds a bookmark | `ok` |
 | `SetTriggers{triggers}` | replaces the agent's triggers (see below) | `ok`, or an error for an invalid trigger |
@@ -175,7 +175,7 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 
 Triggers are conditions the agent evaluates itself, so they also work in offline mode and while
 no daemon is connected. They are installed with the `triggers=<file>` option at start-up or with
-`SetTriggers` (CLI: `ember record|attach --triggers file.json`; HTTP: `POST .../triggers`; MCP:
+`SetTriggers` (CLI: `openprofiler record|attach --triggers file.json`; HTTP: `POST .../triggers`; MCP:
 `set_triggers`), which replaces the whole set.
 
 ```json
@@ -184,9 +184,9 @@ no daemon is connected. They are installed with the `triggers=<file>` option at 
    "actions": [{"heap_dump": {"path": "/tmp/heap-{pid}-{time}.hprof"}}, "thread_dump"],
    "cooldown": "5m", "max_fires": 1},
   {"id": "every-minute", "timer": {"delay": "30s", "period": "1m"},
-   "actions": [{"save_snapshot": "/tmp/app-{n}.emberlink"}]},
-  {"id": "oom", "out_of_memory": {}, "actions": ["thread_dump", {"save_snapshot": "/tmp/oom.emberlink"}]},
-  {"id": "exit", "jvm_exit": {}, "actions": [{"save_snapshot": "/tmp/final.emberlink"}]},
+   "actions": [{"save_snapshot": "/tmp/app-{n}.oplink"}]},
+  {"id": "oom", "out_of_memory": {}, "actions": ["thread_dump", {"save_snapshot": "/tmp/oom.oplink"}]},
+  {"id": "exit", "jvm_exit": {}, "actions": [{"save_snapshot": "/tmp/final.oplink"}]},
   {"id": "quiet-start", "jvm_start": {}, "actions": [{"stop_recording": "alloc"}]}
 ]}
 ```
@@ -212,7 +212,7 @@ plus `heap.used_pct` (used heap as a percentage of the maximum).
 | `bookmark` `"label"` or `{label, color}` | adds a bookmark |
 | `thread_dump` | takes a dump and adds it to the data plane (`DataBatch.thread_dumps`) |
 | `heap_dump {path, live_only}` | writes an HPROF file on the agent's filesystem |
-| `save_snapshot` `"path"` | writes an `.emberlink` recording on the agent's filesystem |
+| `save_snapshot` `"path"` | writes an `.oplink` recording on the agent's filesystem |
 | `run_gc` | `ForceGarbageCollection` |
 
 Paths substitute `{pid}`, `{time}` (epoch seconds), `{trigger}` (the id) and `{n}` (how often the
@@ -221,21 +221,21 @@ unlimited). Each firing adds a bookmark `Trigger <id>` (with the threshold value
 description), plus a bookmark per action that wrote a file or failed. Actions run one firing at a
 time on the agent's trigger thread; `jvm_exit` actions run inside `VMDeath`.
 
-## Offline recordings (`.emberlink`)
+## Offline recordings (`.oplink`)
 
-With `mode=offline,file=<path>` (or the Controller API's `Ember.saveSnapshot`) the agent writes
+With `mode=offline,file=<path>` (or the Controller API's `OpenProfiler.saveSnapshot`) the agent writes
 the frames a daemon would have received:
 
 ```
-"EMBRLINK" | frame(RecordingHeader{hello, created}) | frame(DataBatch)*
+"OPRFLINK" | frame(RecordingHeader{hello, created}) | frame(DataBatch)*
 ```
 
-`ember_link::replay_recording` turns this into an `ember_model::Profile`. The `.ember` snapshot
+`openprofiler_link::replay_recording` turns this into an `openprofiler_model::Profile`. The `.opsnap` snapshot
 format (see the snapshot spec) supersedes this as the long-term archive format.
 
 ## Agent options
 
-`-agentpath:/path/libember_agent.so=<k=v,…>`, the attach argument, or `EMBER_AGENT_OPTIONS`
+`-agentpath:/path/libopenprofiler_agent.so=<k=v,…>`, the attach argument, or `OPENPROFILER_AGENT_OPTIONS`
 (applied first).
 
 | option | default | meaning |
@@ -245,8 +245,8 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `token` | random | required client token |
 | `tls` | off | TLS 1.3 with a pinned self-signed certificate |
 | `mode` | `live` | `live` or `offline` (`offline` is a shortcut) |
-| `file` | `ember-<pid>.emberlink` | offline recording path |
-| `infofile` | `$TMPDIR/ember-<pid>.json` | where to publish port/token |
+| `file` | `openprofiler-<pid>.oplink` | offline recording path |
+| `infofile` | `$TMPDIR/openprofiler-<pid>.json` | where to publish port/token |
 | `interval` | `10ms` | CPU sampling interval |
 | `wall` | `50ms` | wall-clock / thread-state sampling interval |
 | `sampler` | `auto` | `auto`, `async` (Linux), `sync` |
@@ -259,7 +259,7 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `recover` | on | repair failed `AsyncGetCallTrace` walks (Linux async sampler) |
 | `max_frames` | `256` | maximum stack depth |
 | `wait` / `nowait` | `nowait` | block VM start until a daemon connected |
-| `bootjar` | embedded | use an external `ember-boot.jar` instead of the embedded classes |
+| `bootjar` | embedded | use an external `openprofiler-boot.jar` instead of the embedded classes |
 | `debug` | off | log to stderr |
 
 ## Samplers
@@ -293,8 +293,8 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 
 ## Attach
 
-`ember_attach::attach_agent(pid, agent, options)` uses the HotSpot attach mechanism. It creates
+`openprofiler_attach::attach_agent(pid, agent, options)` uses the HotSpot attach mechanism. It creates
 `.attach_pid<nspid>`, sends `SIGQUIT`, connects to `.java_pid<nspid>` and sends
 `1\0load\0<path>\0true\0<options>\0`. It passes a fresh token and an `infofile` and then reads
 that file. For containers on Linux it uses `NSpid` and `/proc/<pid>/root/tmp`, and copies the
-agent into the target's `/tmp/ember/`.
+agent into the target's `/tmp/openprofiler/`.

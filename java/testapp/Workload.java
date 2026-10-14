@@ -3,7 +3,7 @@ import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Test workload for Ember: a CPU-hot method, steady allocation, a contended monitor, a contended
+ * Test workload for OpenProfiler: a CPU-hot method, steady allocation, a contended monitor, a contended
  * ReentrantLock, sleeping threads and (JDK 21+) virtual threads contending on a lock. Usage:
  * java Workload.java [seconds] (0 = run until killed).
  */

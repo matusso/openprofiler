@@ -1,0 +1,21 @@
+[package]
+name = "openprofiler-proto"
+description = "Protobuf schemas and framing for the OpenProfiler agent-link protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prost = "0.14"
+serde_json.workspace = true
+zstd = { version = "0.13", optional = true }
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.10"
+
+[features]
+default = ["zstd"]
+
+[lints]
+workspace = true

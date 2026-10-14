@@ -1,4 +1,4 @@
-// Ember VS Code extension: a thin client of the daemon's IDE bridge (docs/spec/query-api.md, /api/v1/ide).
+// OpenProfiler VS Code extension: a thin client of the daemon's IDE bridge (docs/spec/query-api.md, /api/v1/ide).
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as os from "os";
@@ -26,12 +26,12 @@ let heat: vscode.TextEditorDecorationType[] = [];
 let status: vscode.StatusBarItem;
 
 function discovery(): Discovery | undefined {
-  const cfg = vscode.workspace.getConfiguration("ember");
+  const cfg = vscode.workspace.getConfiguration("openprofiler");
   const url = cfg.get<string>("daemonUrl");
   const token = cfg.get<string>("token");
   if (url && token) return { url, token };
   try {
-    const file = path.join(os.homedir(), ".ember", "daemon.json");
+    const file = path.join(os.homedir(), ".openprofiler", "daemon.json");
     return JSON.parse(fs.readFileSync(file, "utf8")) as Discovery;
   } catch {
     return undefined;
@@ -41,7 +41,7 @@ function discovery(): Discovery | undefined {
 function call<T>(method: string, params: object): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      reject(new Error("not connected to the Ember daemon"));
+      reject(new Error("not connected to the OpenProfiler daemon"));
       return;
     }
     const id = nextId++;
@@ -53,7 +53,7 @@ function call<T>(method: string, params: object): Promise<T> {
 async function connect(): Promise<void> {
   const d = discovery();
   if (!d) {
-    void vscode.window.showWarningMessage("Ember daemon not found. Start `ember daemon` or set ember.daemonUrl/ember.token.");
+    void vscode.window.showWarningMessage("OpenProfiler daemon not found. Start `openprofiler daemon` or set openprofiler.daemonUrl/openprofiler.token.");
     return;
   }
   socket?.close();
@@ -61,12 +61,12 @@ async function connect(): Promise<void> {
   const ws = new WebSocket(wsUrl);
   socket = ws;
   ws.onopen = () => {
-    status.text = "$(flame) Ember";
+    status.text = "$(flame) OpenProfiler";
     status.tooltip = `Connected to ${d.url}`;
     void call("hello", { ide: "vscode", version: vscode.version }).then(() => refreshAll());
   };
   ws.onclose = () => {
-    status.text = "$(flame) Ember (offline)";
+    status.text = "$(flame) OpenProfiler (offline)";
   };
   ws.onmessage = (ev: MessageEvent) => {
     const msg = JSON.parse(String(ev.data));
@@ -90,7 +90,7 @@ function classesOf(doc: vscode.TextDocument): string[] {
 
 async function refresh(editor: vscode.TextEditor): Promise<void> {
   if (!/\.(java|kt|scala)$/.test(editor.document.fileName)) return;
-  const min = vscode.workspace.getConfiguration("ember").get<number>("minPercent") ?? 0.5;
+  const min = vscode.workspace.getConfiguration("openprofiler").get<number>("minPercent") ?? 0.5;
   let res: { lines: LineHeat[] };
   try {
     res = await call("gutterData", { classes: classesOf(editor.document) });
@@ -109,7 +109,7 @@ async function refresh(editor: vscode.TextEditor): Promise<void> {
     buckets[level].push({
       range: editor.document.lineAt(l.line - 1).range,
       hoverMessage: new vscode.MarkdownString(
-        `**Ember CPU** \`${l.method}\` line ${l.line}: total ${l.total_percent}% · self ${l.self_percent}%`,
+        `**OpenProfiler CPU** \`${l.method}\` line ${l.line}: total ${l.total_percent}% · self ${l.self_percent}%`,
       ),
       renderOptions: {
         after: { contentText: `  ${l.total_percent.toFixed(1)}%`, color: new vscode.ThemeColor("editorCodeLens.foreground") },
@@ -128,7 +128,7 @@ async function navigate(p: { class: string; method?: string; line?: number }): P
   const rel = top.replace(/\./g, "/");
   const files = await vscode.workspace.findFiles(`**/${rel}.{java,kt,scala}`, "**/node_modules/**", 1);
   if (files.length === 0) {
-    void vscode.window.showInformationMessage(`Ember: source for ${p.class} not found in workspace`);
+    void vscode.window.showInformationMessage(`OpenProfiler: source for ${p.class} not found in workspace`);
     return;
   }
   const doc = await vscode.workspace.openTextDocument(files[0]);
@@ -143,20 +143,20 @@ async function navigate(p: { class: string; method?: string; line?: number }): P
 
 export function activate(ctx: vscode.ExtensionContext): void {
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
-  status.text = "$(flame) Ember (offline)";
-  status.command = "ember.connect";
+  status.text = "$(flame) OpenProfiler (offline)";
+  status.command = "openprofiler.connect";
   status.show();
   ctx.subscriptions.push(
     status,
-    vscode.commands.registerCommand("ember.connect", connect),
-    vscode.commands.registerCommand("ember.refreshGutter", refreshAll),
-    vscode.commands.registerCommand("ember.copyAgentOption", async () => {
-      const agent = vscode.workspace.getConfiguration("ember").get<string>("agentPath") || "/path/to/libember_agent.so";
+    vscode.commands.registerCommand("openprofiler.connect", connect),
+    vscode.commands.registerCommand("openprofiler.refreshGutter", refreshAll),
+    vscode.commands.registerCommand("openprofiler.copyAgentOption", async () => {
+      const agent = vscode.workspace.getConfiguration("openprofiler").get<string>("agentPath") || "/path/to/libopenprofiler_agent.so";
       await vscode.env.clipboard.writeText(`-agentpath:${agent}=port=0`);
-      void vscode.window.showInformationMessage("Copied the Ember -agentpath option. Add it to your launch configuration's vmArgs.");
+      void vscode.window.showInformationMessage("Copied the OpenProfiler -agentpath option. Add it to your launch configuration's vmArgs.");
     }),
-    vscode.commands.registerCommand("ember.openFile", async () => {
-      const pick = await vscode.window.showOpenDialog({ filters: { Profiles: ["jfr", "hprof", "ember", "gz"] } });
+    vscode.commands.registerCommand("openprofiler.openFile", async () => {
+      const pick = await vscode.window.showOpenDialog({ filters: { Profiles: ["jfr", "hprof", "opsnap", "oplink", "gz"] } });
       if (pick?.[0]) await call("openFile", { path: pick[0].fsPath });
     }),
     vscode.window.onDidChangeVisibleTextEditors(refreshAll),

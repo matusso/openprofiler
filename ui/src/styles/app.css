@@ -81,6 +81,21 @@ select {
   letter-spacing: 0.2px;
 }
 
+.brand-mark {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.brand-wordmark {
+  color: var(--fg);
+  font-weight: 450;
+  letter-spacing: -0.04em;
+}
+
+.brand-wordmark > span:last-child {
+  font-weight: 700;
+}
+
 .nav {
   grid-area: nav;
   display: flex;
@@ -1166,8 +1181,19 @@ select {
 }
 
 .welcome h1 {
-  font-size: 26px;
+  font-size: 32px;
   margin: 0 0 6px;
+}
+
+.welcome-brand {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.welcome-logo {
+  width: 64px;
+  height: 64px;
 }
 
 .welcome-grid {

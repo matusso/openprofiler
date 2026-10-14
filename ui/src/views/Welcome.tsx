@@ -1,8 +1,9 @@
 import { useMutation } from "@tanstack/react-query";
-import { EmberLogo, IconOpen, IconPlug } from "../components/icons";
+import { OpenProfilerLogo, IconOpen, IconPlug } from "../components/icons";
 import { recentPaths } from "../lib/tauri";
 import { client, queryClient, selectSession, store } from "../state";
 import { useOpenFile } from "../components/Dialogs";
+import { OpenProfilerWordmark } from "../components/Brand";
 
 export function Welcome() {
   const open = useOpenFile();
@@ -17,10 +18,12 @@ export function Welcome() {
   return (
     <div className="view-body">
       <div className="welcome">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <EmberLogo width={44} height={44} />
+        <div className="welcome-brand">
+          <OpenProfilerLogo className="welcome-logo" width={64} height={64} aria-hidden="true" />
           <div>
-            <h1>Ember</h1>
+            <h1>
+              <OpenProfilerWordmark />
+            </h1>
             <div className="muted">Open-source JVM profiler: CPU, memory, heap, threads and locks.</div>
           </div>
         </div>
@@ -34,7 +37,7 @@ export function Welcome() {
               <IconOpen width={14} /> Open a file
             </h3>
             <div className="muted">
-              .ember snapshots, JFR recordings, HPROF heap dumps. Drop a file anywhere.
+              .opsnap snapshots, JFR recordings, HPROF heap dumps. Drop a file anywhere.
             </div>
           </button>
           <button

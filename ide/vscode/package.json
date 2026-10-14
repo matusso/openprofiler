@@ -1,9 +1,9 @@
 {
-  "name": "ember-profiler",
-  "displayName": "Ember Profiler",
-  "description": "Ember JVM profiler integration: CPU gutter heat, navigate from the profiler to source, launch with the agent",
+  "name": "openprofiler",
+  "displayName": "OpenProfiler",
+  "description": "OpenProfiler JVM profiler integration: CPU gutter heat, navigate from the profiler to source, launch with the agent",
   "version": "0.1.0",
-  "publisher": "ember-profiler",
+  "publisher": "openprofiler",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Debuggers", "Visualization"],
@@ -11,18 +11,18 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "ember.connect", "title": "Ember: Connect to Daemon" },
-      { "command": "ember.refreshGutter", "title": "Ember: Refresh CPU Heat" },
-      { "command": "ember.copyAgentOption", "title": "Ember: Copy -agentpath Option" },
-      { "command": "ember.openFile", "title": "Ember: Open Profile in Daemon" }
+      { "command": "openprofiler.connect", "title": "OpenProfiler: Connect to Daemon" },
+      { "command": "openprofiler.refreshGutter", "title": "OpenProfiler: Refresh CPU Heat" },
+      { "command": "openprofiler.copyAgentOption", "title": "OpenProfiler: Copy -agentpath Option" },
+      { "command": "openprofiler.openFile", "title": "OpenProfiler: Open Profile in Daemon" }
     ],
     "configuration": {
-      "title": "Ember",
+      "title": "OpenProfiler",
       "properties": {
-        "ember.daemonUrl": { "type": "string", "default": "", "description": "Daemon URL (default: read from ~/.ember/daemon.json)" },
-        "ember.token": { "type": "string", "default": "", "description": "Daemon API token (default: read from ~/.ember/daemon.json)" },
-        "ember.agentPath": { "type": "string", "default": "", "description": "Path to libember_agent.so / .dylib" },
-        "ember.minPercent": { "type": "number", "default": 0.5, "description": "Hide gutter heat below this total CPU percent" }
+        "openprofiler.daemonUrl": { "type": "string", "default": "", "description": "Daemon URL (default: read from ~/.openprofiler/daemon.json)" },
+        "openprofiler.token": { "type": "string", "default": "", "description": "Daemon API token (default: read from ~/.openprofiler/daemon.json)" },
+        "openprofiler.agentPath": { "type": "string", "default": "", "description": "Path to libopenprofiler_agent.so / .dylib" },
+        "openprofiler.minPercent": { "type": "number", "default": 0.5, "description": "Hide gutter heat below this total CPU percent" }
       }
     }
   },

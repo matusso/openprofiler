@@ -1,12 +1,12 @@
-# Ember Query API v1
+# OpenProfiler Query API v1
 
-The Query API is the single contract between `ember-daemon` and every client: the desktop/web UI,
-the `ember` CLI exporter, the MCP server and the IDE bridge. It behaves identically for live
-sessions, `.ember` snapshots, HPROF heap dumps and JFR recordings.
+The Query API is the single contract between `openprofiler-daemon` and every client: the desktop/web UI,
+the `openprofiler` CLI exporter, the MCP server and the IDE bridge. It behaves identically for live
+sessions, `.opsnap` snapshots, HPROF heap dumps and JFR recordings.
 
 Transport: JSON over HTTP (`/api/v1/...`) plus a WebSocket (`/api/v1/events`) that pushes
 invalidations. All requests carry `Authorization: Bearer <token>` (or `?token=` for the
-WebSocket and for downloads). The token is printed by `ember daemon` and injected into the
+WebSocket and for downloads). The token is printed by `openprofiler daemon` and injected into the
 Tauri webview.
 
 Conventions:
@@ -32,7 +32,7 @@ Conventions:
 | `GET /api/v1/sessions/{id}/summary` | | `Summary` |
 
 ```ts
-type SessionKind = "hprof" | "jfr" | "ember" | "live";
+type SessionKind = "hprof" | "jfr" | "snapshot" | "live";
 type Capability = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception"
                 | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording";
 interface Session {
@@ -218,7 +218,7 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 
 - `POST .../recording` `{ kind: "cpu"|"alloc"|"monitor"|"telemetry", enabled: boolean, interval_ms? }`
 - `POST .../heap-dump` → creates a new `hprof` session from a dump streamed back by the agent.
-- `POST .../snapshot` `{ path }` → writes a `.ember` file.
+- `POST .../snapshot` `{ path }` → writes a `.opsnap` file.
 - `POST .../bookmark` `{ label }`
 - `POST .../gc` → runs a full GC.
 - `POST .../triggers` `{ triggers: Trigger[] }` → replaces the agent's triggers (format in
@@ -265,4 +265,4 @@ WebSocket `/api/v1/ide?token=…`, JSON-RPC 2.0.
   `profiledPackages {session?}`.
 - The daemon sends a `navigate {class, method?, line?}` notification when a client calls
   `POST /api/v1/ide/navigate` with the same body. The response is `{delivered: number}`.
-- The daemon publishes its URL and token in `~/.ember/daemon.json` (mode 0600) for IDE plugins.
+- The daemon publishes its URL and token in `~/.openprofiler/daemon.json` (mode 0600) for IDE plugins.

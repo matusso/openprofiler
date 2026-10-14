@@ -31,7 +31,7 @@ import { TimeScrubber } from "./TimeScrubber";
 const KIND_LABEL: Record<Session["kind"], string> = {
   hprof: "HPROF",
   jfr: "JFR",
-  ember: "Snapshot",
+  snapshot: "Snapshot",
   live: "Live",
 };
 

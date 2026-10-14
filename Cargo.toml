@@ -6,21 +6,21 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/ember-profiler/ember"
+repository = "https://github.com/matusso/openprofiler"
 rust-version = "1.85"
 
 [workspace.dependencies]
-ember-model = { path = "crates/ember-model" }
-ember-proto = { path = "crates/ember-proto" }
-ember-snapshot = { path = "crates/ember-snapshot" }
-ember-hprof = { path = "crates/ember-hprof" }
-ember-heap = { path = "crates/ember-heap" }
-ember-jfr = { path = "crates/ember-jfr" }
-ember-attach = { path = "crates/ember-attach" }
-ember-remote = { path = "crates/ember-remote" }
-ember-daemon = { path = "crates/ember-daemon" }
-ember-link = { path = "crates/ember-link" }
-ember-agent = { path = "crates/ember-agent" }
+openprofiler-model = { path = "crates/openprofiler-model" }
+openprofiler-proto = { path = "crates/openprofiler-proto" }
+openprofiler-snapshot = { path = "crates/openprofiler-snapshot" }
+openprofiler-hprof = { path = "crates/openprofiler-hprof" }
+openprofiler-heap = { path = "crates/openprofiler-heap" }
+openprofiler-jfr = { path = "crates/openprofiler-jfr" }
+openprofiler-attach = { path = "crates/openprofiler-attach" }
+openprofiler-remote = { path = "crates/openprofiler-remote" }
+openprofiler-daemon = { path = "crates/openprofiler-daemon" }
+openprofiler-link = { path = "crates/openprofiler-link" }
+openprofiler-agent = { path = "crates/openprofiler-agent" }
 jvmti-sys = { path = "crates/jvmti-sys" }
 anyhow = "1"
 thiserror = "2"

@@ -1,0 +1,26 @@
+[package]
+name = "openprofiler-cli"
+description = "The `openprofiler` command-line tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openprofiler"
+path = "src/main.rs"
+
+[dependencies]
+openprofiler-daemon.workspace = true
+openprofiler-model.workspace = true
+openprofiler-snapshot.workspace = true
+openprofiler-attach.workspace = true
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

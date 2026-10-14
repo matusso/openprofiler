@@ -1,4 +1,4 @@
-/* Ember design tokens. Themes switch via [data-theme] on <html>. */
+/* OpenProfiler design tokens. Themes switch via [data-theme] on <html>. */
 :root,
 [data-theme="dark"] {
   color-scheme: dark;

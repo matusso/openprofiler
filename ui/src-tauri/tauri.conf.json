@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ember",
+  "productName": "OpenProfiler",
   "version": "0.1.0",
-  "identifier": "dev.ember.desktop",
+  "identifier": "dev.openprofiler.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",

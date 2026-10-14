@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>OpenProfiler</title>
+  <rect width="64" height="64" rx="16" fill="#151820"/>
+  <g color="#ff7a3d">
+    <path d="M47.56 16.44A22 22 0 1 0 54 32" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+    <rect x="21" y="33" width="6" height="10" rx="2" fill="currentColor"/>
+    <rect x="30" y="22" width="6" height="21" rx="2" fill="currentColor"/>
+    <rect x="39" y="28" width="6" height="15" rx="2" fill="currentColor"/>
+  </g>
+</svg>

@@ -803,7 +803,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
-name = "ember-attach"
+name = "openprofiler-attach"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -815,18 +815,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-daemon"
+name = "openprofiler-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "ember-attach",
- "ember-heap",
- "ember-jfr",
- "ember-link",
- "ember-model",
- "ember-remote",
- "ember-snapshot",
+ "openprofiler-attach",
+ "openprofiler-heap",
+ "openprofiler-jfr",
+ "openprofiler-link",
+ "openprofiler-model",
+ "openprofiler-remote",
+ "openprofiler-snapshot",
  "futures-util",
  "hex",
  "parking_lot",
@@ -839,11 +839,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-desktop"
+name = "openprofiler-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ember-daemon",
+ "openprofiler-daemon",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -851,13 +851,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-heap"
+name = "openprofiler-heap"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "ember-hprof",
- "ember-model",
+ "openprofiler-hprof",
+ "openprofiler-model",
  "memmap2",
  "rayon",
  "rustc-hash",
@@ -867,7 +867,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-hprof"
+name = "openprofiler-hprof"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -877,23 +877,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-jfr"
+name = "openprofiler-jfr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ember-model",
+ "openprofiler-model",
  "memmap2",
  "rayon",
  "rustc-hash",
 ]
 
 [[package]]
-name = "ember-link"
+name = "openprofiler-link"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ember-model",
- "ember-proto",
+ "openprofiler-model",
+ "openprofiler-proto",
  "hex",
  "parking_lot",
  "rustls",
@@ -906,7 +906,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-model"
+name = "openprofiler-model"
 version = "0.1.0"
 dependencies = [
  "rustc-hash",
@@ -914,7 +914,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-proto"
+name = "openprofiler-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -924,7 +924,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-remote"
+name = "openprofiler-remote"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -937,11 +937,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ember-snapshot"
+name = "openprofiler-snapshot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ember-model",
+ "openprofiler-model",
  "memmap2",
  "prost",
  "prost-build",

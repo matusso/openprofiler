@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds ember-boot.jar and ember-api.jar with plain javac/jar (Java 11 bytecode).
-# Output: java/ember-boot/build/ember-boot.jar, java/ember-api/build/ember-api.jar
+# Builds openprofiler-boot.jar and openprofiler-api.jar with plain javac/jar (Java 11 bytecode).
+# Output: java/openprofiler-boot/build/openprofiler-boot.jar, java/openprofiler-api/build/openprofiler-api.jar
 set -euo pipefail
 cd "$(dirname "$0")"
 JAVAC="${JAVA_HOME:+$JAVA_HOME/bin/}javac"
@@ -15,5 +15,5 @@ build() {
   echo "built $name/build/$name.jar"
 }
 
-build ember-boot
-build ember-api
+build openprofiler-boot
+build openprofiler-api

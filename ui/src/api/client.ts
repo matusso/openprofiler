@@ -39,24 +39,24 @@ import type {
   TreeResponse,
 } from "./types";
 
-export interface EmberConfig {
+export interface OpenProfilerConfig {
   url: string;
   token: string;
 }
 
 declare global {
   interface Window {
-    __EMBER__?: Partial<EmberConfig>;
+    __OPENPROFILER__?: Partial<OpenProfilerConfig>;
   }
 }
 
 /** Resolves the daemon URL + token: injected config, then `?api=&token=`, then same origin. */
-export function resolveConfig(): EmberConfig {
-  const injected = typeof window !== "undefined" ? window.__EMBER__ : undefined;
+export function resolveConfig(): OpenProfilerConfig {
+  const injected = typeof window !== "undefined" ? window.__OPENPROFILER__ : undefined;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
   const url = injected?.url ?? params?.get("api") ?? "";
-  const token = injected?.token ?? params?.get("token") ?? sessionStorage.getItem("ember.token") ?? "";
-  if (token) sessionStorage.setItem("ember.token", token);
+  const token = injected?.token ?? params?.get("token") ?? sessionStorage.getItem("openprofiler.token") ?? "";
+  if (token) sessionStorage.setItem("openprofiler.token", token);
   return { url: url.replace(/\/$/, ""), token };
 }
 
@@ -69,8 +69,8 @@ export class ApiError extends Error {
   }
 }
 
-export class EmberClient {
-  constructor(public config: EmberConfig) {}
+export class OpenProfilerClient {
+  constructor(public config: OpenProfilerConfig) {}
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.config.url}/api/v1${path}`, {
