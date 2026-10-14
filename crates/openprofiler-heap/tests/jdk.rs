@@ -1,5 +1,6 @@
 //! Integration test against a real HotSpot heap dump produced by the local JDK.
-//! Skipped (passes trivially) when `java` is not on the PATH.
+//! Skipped (passes trivially) when `java` is not on the PATH or the JVM cannot write
+//! HPROF dumps (e.g. OpenJ9).
 
 use openprofiler_heap::{ClassQuery, HeapAnalysis, ObjectQuery, OpenOptions, SelectStep};
 use std::process::Command;
@@ -11,6 +12,7 @@ import java.util.*;
 
 public class Dumper {
     static final List<Object> KEEP = new ArrayList<>();
+    static final int UNSUPPORTED = 3;
 
     static final class Marker {
         String name;
@@ -27,11 +29,18 @@ public class Dumper {
         for (int i = 0; i < 50; i++) KEEP.add(new ArrayList<>(64));
         KEEP.add(new ThreadLocal<String>());
         HotSpotDiagnosticMXBean bean = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
-        bean.dumpHeap(args[0], true);
+        try {
+            bean.dumpHeap(args[0], true);
+        } catch (UnsupportedOperationException e) {
+            System.exit(UNSUPPORTED);
+        }
         System.out.println(KEEP.size());
     }
 }
 "#;
+
+/// Exit code `Dumper` uses when `dumpHeap` is unsupported (matches `Dumper.UNSUPPORTED`).
+const EXIT_UNSUPPORTED: i32 = 3;
 
 #[test]
 fn real_hotspot_dump() {
@@ -44,6 +53,10 @@ fn real_hotspot_dump() {
     std::fs::write(&src, PROGRAM).unwrap();
     let dump = dir.path().join("dump.hprof");
     let st = Command::new("java").arg("-Xmx256m").arg(&src).arg(&dump).status().unwrap();
+    if st.code() == Some(EXIT_UNSUPPORTED) {
+        eprintln!("JVM cannot write HPROF heap dumps; skipping");
+        return;
+    }
     assert!(st.success());
 
     let h = HeapAnalysis::open(&dump, &OpenOptions::default(), |_, _| {}).unwrap();
