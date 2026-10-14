@@ -55,7 +55,7 @@ jobs:
           java-version: ${{ matrix.jdk }}
       - uses: Swatinem/rust-cache@v2
       - run: java/build.sh
-      - run: cargo test -p openprofiler-link -p openprofiler-attach -p openprofiler-jfr -p openprofiler-heap -- --nocapture
+      - run: cargo test --no-fail-fast -p openprofiler-link -p openprofiler-attach -p openprofiler-jfr -p openprofiler-heap -- --nocapture
 
   alpine:
     name: Alpine (musl) agent + relay

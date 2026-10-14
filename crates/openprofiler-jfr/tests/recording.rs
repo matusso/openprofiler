@@ -1,7 +1,8 @@
 //! End-to-end tests against a recording produced by the local JDK.
 //!
 //! A small multi-threaded workload (`tests/workload/Workload.java`) is run once with JFR enabled;
-//! every test shares that recording. Tests are skipped (pass trivially) when `java` is missing.
+//! every test shares that recording. Tests are skipped (pass trivially) when `java` is missing or
+//! the JVM rejects HotSpot's JFR options (e.g. OpenJ9).
 
 use openprofiler_jfr::{JfrReader, parse_bytes, parse_file};
 use openprofiler_model::views::{TreeOptions, hot_spots, key_label};
@@ -32,24 +33,61 @@ fn java_home() -> Option<PathBuf> {
     out.status.success().then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
+/// The `profile` settings with a 0 ms `jdk.JavaMonitorEnter` threshold. JDK 11 lacks the
+/// `event#setting=value` override syntax, so patch a copy of `profile.jfc` instead.
+fn profile_settings(home: &Path, dir: &Path) -> String {
+    let Ok(jfc) = std::fs::read_to_string(home.join("lib/jfr/profile.jfc")) else {
+        return "profile".into();
+    };
+    let Some(ev) = jfc.find(r#"<event name="jdk.JavaMonitorEnter">"#) else {
+        return "profile".into();
+    };
+    let end = ev + jfc[ev..].find("</event>").unwrap();
+    let block = &jfc[ev..end];
+    let Some(t) = block.find(r#"<setting name="threshold""#) else {
+        return "profile".into();
+    };
+    let (open, close) =
+        (ev + t + block[t..].find('>').unwrap() + 1, ev + t + block[t..].find("</setting>").unwrap());
+    let patched = format!("{}0 ms{}", &jfc[..open], &jfc[close..]);
+    let out = dir.join("profile.jfc");
+    std::fs::write(&out, patched).unwrap();
+    out.display().to_string()
+}
+
 fn recording() -> Option<&'static Recording> {
     static REC: OnceLock<Option<Recording>> = OnceLock::new();
     REC.get_or_init(|| {
-        let java = java_home().map(|h| h.join("bin/java")).filter(|p| p.exists())?;
+        let home = java_home()?;
+        let java = Some(home.join("bin/java")).filter(|p| p.exists())?;
         let dir = tempfile::tempdir().ok()?;
         let path = dir.path().join("workload.jfr");
+        let settings = profile_settings(&home, dir.path());
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/workload/Workload.java");
-        let status = Command::new(java)
-            .arg(format!(
-                "-XX:StartFlightRecording=filename={},settings=profile,jdk.JavaMonitorEnter#threshold=0ms",
-                path.display()
-            ))
+        let mut cmd = Command::new(&java);
+        // JFR's sampler can rarely walk Graal-JIT-compiled frames, so `hotLoop` would get almost
+        // no execution samples; use C2 instead.
+        if Command::new(&java)
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("GraalVM"))
+        {
+            cmd.arg("-XX:-UseJVMCICompiler");
+        }
+        let status = cmd
+            .arg(format!("-XX:StartFlightRecording=filename={},settings={settings}", path.display()))
             .arg(src)
             .arg("3")
             .current_dir(dir.path())
             .output()
             .expect("run java");
-        assert!(status.status.success(), "workload failed: {}", String::from_utf8_lossy(&status.stderr));
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if !status.status.success() && stderr.contains("Could not create the Java Virtual Machine") {
+            eprintln!("JVM does not accept HotSpot JFR options; skipping:\n{stderr}");
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(status.status.success(), "workload failed:\n{stdout}\n{stderr}");
         let profile = parse_file(&path).expect("parse recording");
         Some(Recording { _dir: dir, path, profile })
     })
@@ -61,7 +99,7 @@ macro_rules! rec_or_skip {
         match recording() {
             Some(r) => r,
             None => {
-                eprintln!("java not found; skipping");
+                eprintln!("java not found or JFR unsupported; skipping");
                 return;
             }
         }
@@ -151,8 +189,11 @@ fn event_counts_match_jfr_summary() {
             let name = it.next()?;
             let count: usize = it.next()?.parse().ok()?;
             // Metadata and constant-pool records are not events.
-            (count > 0 && name.starts_with("jdk.") && name != "jdk.Metadata" && name != "jdk.Checkpoint")
-                .then(|| (name.to_owned(), count))
+            (count > 0
+                && name.starts_with("jdk.")
+                && name != "jdk.Metadata"
+                && !name.eq_ignore_ascii_case("jdk.Checkpoint"))
+            .then(|| (name.to_owned(), count))
         })
         .collect();
     assert!(expected.len() > 20, "unexpected jfr summary output:\n{text}");
@@ -170,7 +211,12 @@ fn event_counts_match_jfr_summary() {
     if e("jdk.CPUTimeSample") == 0 {
         assert_eq!(n(SampleKind::Cpu), e("jdk.ExecutionSample"));
     }
-    assert_eq!(n(SampleKind::Alloc), e("jdk.ObjectAllocationSample"));
+    // JDK 11 has no `jdk.ObjectAllocationSample`; the TLAB events are used instead.
+    let alloc = match e("jdk.ObjectAllocationSample") {
+        0 => e("jdk.ObjectAllocationInNewTLAB") + e("jdk.ObjectAllocationOutsideTLAB"),
+        n => n,
+    };
+    assert_eq!(n(SampleKind::Alloc), alloc);
     assert_eq!(n(SampleKind::Monitor), e("jdk.JavaMonitorEnter"));
     assert_eq!(n(SampleKind::Wait), e("jdk.ThreadPark") + e("jdk.JavaMonitorWait"));
     assert_eq!(p.gc.len(), e("jdk.GarbageCollection"));

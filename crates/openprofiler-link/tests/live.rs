@@ -1,5 +1,6 @@
 //! End-to-end tests: a real JVM running `java/testapp/Workload.java` with the OpenProfiler agent, either
-//! loaded at startup (`-agentpath`) or attached dynamically. Skipped when `java` is unavailable.
+//! loaded at startup (`-agentpath`) or attached dynamically. Skipped when `java` is unavailable;
+//! dynamic attach and heap dumps are skipped on JVMs that do not support them (e.g. OpenJ9).
 
 use openprofiler_link::{AgentInfo, LinkClient, LinkOptions};
 use openprofiler_model::{MonitorEventKind, Profile, SampleKind};
@@ -13,6 +14,14 @@ fn java() -> Option<PathBuf> {
         .map(|h| Path::new(&h).join("bin/java"))
         .unwrap_or_else(|| "java".into());
     Command::new(&java).arg("-version").output().ok().filter(|o| o.status.success()).map(|_| java)
+}
+
+/// OpenJ9 does not implement the HotSpot attach protocol that `openprofiler-attach` speaks.
+fn is_openj9(java: &Path) -> bool {
+    Command::new(java)
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("OpenJ9"))
 }
 
 fn workload() -> PathBuf {
@@ -197,11 +206,18 @@ async fn exercise(client: &LinkClient, dir: &Path) {
     assert!(!burner.frames.is_empty());
 
     let hprof = dir.join("dump.hprof");
-    let out = client.heap_dump(&hprof, true, false).await.unwrap();
-    assert!(out.size > 1000);
-    let head = std::fs::read(&out.path).unwrap();
-    assert_eq!(head.len() as u64, out.size);
-    assert!(head.starts_with(b"JAVA PROFILE 1.0."), "streamed dump is HPROF");
+    match client.heap_dump(&hprof, true, false).await {
+        Err(e) if e.to_string().contains("UnsupportedOperationException") => {
+            eprintln!("JVM cannot write HPROF heap dumps; skipping heap dump checks");
+        }
+        res => {
+            let out = res.unwrap();
+            assert!(out.size > 1000);
+            let head = std::fs::read(&out.path).unwrap();
+            assert_eq!(head.len() as u64, out.size);
+            assert!(head.starts_with(b"JAVA PROFILE 1.0."), "streamed dump is HPROF");
+        }
+    }
 
     client.bookmark("checkpoint", Some("#ff0000")).await.unwrap();
     client.set_recording("cpu", false, 0).await.unwrap();
@@ -251,6 +267,10 @@ async fn dynamic_attach_with_tls() {
         eprintln!("skipping: java not found");
         return;
     };
+    if is_openj9(&java) {
+        eprintln!("skipping: dynamic attach is not supported on OpenJ9");
+        return;
+    }
     let lib = agent_lib();
     let dir = tempfile::tempdir().unwrap();
     let (_jvm, pid) = spawn(&java, &["-XX:+EnableDynamicAgentLoading".to_string()]);
