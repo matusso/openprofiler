@@ -1,0 +1,19 @@
+[package]
+name = "openprofiler-jfr"
+description = "Streaming JDK Flight Recorder (JFR) parser producing an openprofiler-model Profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openprofiler-model.workspace = true
+anyhow.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+rustc-hash = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

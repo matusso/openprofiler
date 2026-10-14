@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { EmberClient, resolveConfig } from "./api/client";
+import { OpenProfilerClient, resolveConfig } from "./api/client";
 import type {
   Aggregation,
   Filter,
@@ -88,9 +88,9 @@ export interface AppState {
 }
 
 const storedTheme = (typeof localStorage !== "undefined" &&
-  localStorage.getItem("ember.theme")) as Theme | null;
-const storedPalette = (typeof localStorage !== "undefined" && localStorage.getItem("ember.palette")) as
-  "default" | "cb" | null;
+  localStorage.getItem("openprofiler.theme")) as Theme | null;
+const storedPalette = (typeof localStorage !== "undefined" &&
+  localStorage.getItem("openprofiler.palette")) as "default" | "cb" | null;
 
 export const store = createStore<AppState>({
   sessionId: null,
@@ -144,7 +144,7 @@ export function openContextMenu(
 
 export const useApp = store.use;
 
-export const client = new EmberClient(resolveConfig());
+export const client = new OpenProfilerClient(resolveConfig());
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -175,12 +175,12 @@ export function selectSession(id: string | null) {
 }
 
 export function setTheme(theme: Theme) {
-  localStorage.setItem("ember.theme", theme);
+  localStorage.setItem("openprofiler.theme", theme);
   store.set({ theme });
 }
 
 export function setPalette(palette: "default" | "cb") {
-  localStorage.setItem("ember.palette", palette);
+  localStorage.setItem("openprofiler.palette", palette);
   store.set({ palette });
 }
 

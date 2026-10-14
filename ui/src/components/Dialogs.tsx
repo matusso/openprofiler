@@ -68,8 +68,8 @@ export function OpenDialog() {
       }
     >
       <p className="muted" style={{ marginTop: 0 }}>
-        Supports <code>.ember</code> snapshots, <code>.jfr</code> recordings and <code>.hprof</code> heap
-        dumps (optionally gzipped). The path is resolved on the machine running the Ember daemon.
+        Supports <code>.opsnap</code> snapshots, <code>.jfr</code> recordings and <code>.hprof</code> heap
+        dumps (optionally gzipped). The path is resolved on the machine running the OpenProfiler daemon.
       </p>
       <div style={{ display: "flex", gap: 8 }}>
         <input

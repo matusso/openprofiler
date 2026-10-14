@@ -1,0 +1,20 @@
+[package]
+name = "openprofiler-relay"
+description = "Tiny static helper for remote hosts and containers: stdio<->TCP relay, JVM listing, attach, heap dump, pty exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openprofiler-relay"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+sha2.workspace = true
+hex.workspace = true
+openprofiler-attach.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -31,7 +31,7 @@ export async function goToSource(target: NavigateRequest | null) {
     const name = target.method ? `${target.class}.${target.method}` : target.class;
     if (!r.delivered)
       toast(
-        "No IDE connected. Install the Ember plugin for IntelliJ or VS Code to jump to source.",
+        "No IDE connected. Install the OpenProfiler plugin for IntelliJ or VS Code to jump to source.",
         "warning",
       );
     else toast(`Opened ${name} in your IDE`);

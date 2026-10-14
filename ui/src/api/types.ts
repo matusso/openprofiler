@@ -1,6 +1,6 @@
 // Types mirroring docs/spec/query-api.md. Keep in sync with the spec.
 
-export type SessionKind = "hprof" | "jfr" | "ember" | "live";
+export type SessionKind = "hprof" | "jfr" | "snapshot" | "live";
 export type Capability =
   | "cpu"
   | "wall"

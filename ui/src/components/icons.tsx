@@ -124,20 +124,4 @@ export const IconZoomOut = base(
   </>,
 );
 
-export function EmberLogo(props: P) {
-  return (
-    <svg viewBox="0 0 32 32" aria-label="Ember" {...props}>
-      <defs>
-        <linearGradient id="ember-g" x1="0" y1="1" x2="0.4" y2="0">
-          <stop offset="0" stopColor="#ff4d1a" />
-          <stop offset="1" stopColor="#ffb547" />
-        </linearGradient>
-      </defs>
-      <rect width="32" height="32" rx="8" fill="#1b1f29" />
-      <path
-        d="M16 5c1.2 4.4 7 6.6 7 13a7 7 0 0 1-14 0c0-3.4 2.3-5.6 3.5-6.8 0 2.3 1.2 3.5 2.3 3.5 0-3.4-1.2-6.8 1.2-9.7z"
-        fill="url(#ember-g)"
-      />
-    </svg>
-  );
-}
+export { OpenProfilerLogo } from "./Brand";

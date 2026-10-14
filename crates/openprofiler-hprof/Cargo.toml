@@ -1,0 +1,18 @@
+[package]
+name = "openprofiler-hprof"
+description = "Zero-copy streaming parser for HPROF heap dumps (1.0.1 / 1.0.2, gzip)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memmap2.workspace = true
+flate2.workspace = true
+thiserror.workspace = true
+rustc-hash = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

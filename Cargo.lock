@@ -392,199 +392,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
-name = "ember-agent"
-version = "0.1.0"
-dependencies = [
- "ember-model",
- "ember-proto",
- "getrandom 0.3.4",
- "hex",
- "jvmti-sys",
- "libc",
- "parking_lot",
- "rcgen",
- "rustls",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "ember-attach"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "getrandom 0.3.4",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "ember-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ember-attach",
- "ember-daemon",
- "ember-model",
- "ember-snapshot",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ember-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "ember-attach",
- "ember-heap",
- "ember-jfr",
- "ember-link",
- "ember-model",
- "ember-remote",
- "ember-snapshot",
- "futures-util",
- "hex",
- "http-body-util",
- "parking_lot",
- "rand",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "ember-heap"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "ember-hprof",
- "ember-model",
- "memmap2",
- "rand",
- "rayon",
- "rustc-hash",
- "serde",
- "serde_json",
- "tempfile",
- "xxhash-rust",
-]
-
-[[package]]
-name = "ember-hprof"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "memmap2",
- "rustc-hash",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "ember-jfr"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ember-model",
- "memmap2",
- "rayon",
- "rustc-hash",
- "tempfile",
-]
-
-[[package]]
-name = "ember-link"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ember-attach",
- "ember-model",
- "ember-proto",
- "hex",
- "parking_lot",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tracing",
-]
-
-[[package]]
-name = "ember-model"
-version = "0.1.0"
-dependencies = [
- "rustc-hash",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ember-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "protox",
- "zstd",
-]
-
-[[package]]
-name = "ember-relay"
-version = "0.1.0"
-dependencies = [
- "ember-attach",
- "hex",
- "libc",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "ember-remote"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ember-snapshot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ember-model",
- "memmap2",
- "prost",
- "prost-build",
- "protox",
- "tempfile",
- "xxhash-rust",
- "zstd",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1164,6 +971,201 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "openprofiler-agent"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "jvmti-sys",
+ "libc",
+ "openprofiler-model",
+ "openprofiler-proto",
+ "parking_lot",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "openprofiler-attach"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "openprofiler-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "openprofiler-attach",
+ "openprofiler-daemon",
+ "openprofiler-model",
+ "openprofiler-snapshot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "openprofiler-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "openprofiler-attach",
+ "openprofiler-heap",
+ "openprofiler-jfr",
+ "openprofiler-link",
+ "openprofiler-model",
+ "openprofiler-proto",
+ "openprofiler-remote",
+ "openprofiler-snapshot",
+ "parking_lot",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "openprofiler-heap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "memmap2",
+ "openprofiler-hprof",
+ "openprofiler-model",
+ "rand",
+ "rayon",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "openprofiler-hprof"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "memmap2",
+ "rustc-hash",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "openprofiler-jfr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "memmap2",
+ "openprofiler-model",
+ "rayon",
+ "rustc-hash",
+ "tempfile",
+]
+
+[[package]]
+name = "openprofiler-link"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "openprofiler-attach",
+ "openprofiler-model",
+ "openprofiler-proto",
+ "parking_lot",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "openprofiler-model"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "openprofiler-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protox",
+ "serde_json",
+ "zstd",
+]
+
+[[package]]
+name = "openprofiler-relay"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "openprofiler-attach",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "openprofiler-remote"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "openprofiler-snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "memmap2",
+ "openprofiler-model",
+ "prost",
+ "prost-build",
+ "protox",
+ "tempfile",
+ "xxhash-rust",
+ "zstd",
+]
 
 [[package]]
 name = "parking_lot"

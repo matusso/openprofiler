@@ -3,7 +3,7 @@ import type { Capability } from "../api/types";
 import { useCurrentSession } from "../api/hooks";
 import { store, useApp, type ViewId } from "../state";
 import {
-  EmberLogo,
+  OpenProfilerLogo,
   IconBean,
   IconCompare,
   IconCpu,
@@ -80,7 +80,7 @@ export function Nav() {
   const caps = s?.capabilities ?? [];
   return (
     <nav className="nav" aria-label="Views">
-      <EmberLogo className="nav-logo" />
+      <OpenProfilerLogo className="nav-logo" />
       {NAV.map((n) => {
         const enabled = n.needs.length === 0 || n.needs.some((c) => caps.includes(c));
         return (

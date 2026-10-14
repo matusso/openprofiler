@@ -2,7 +2,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const api = process.env.EMBER_API ?? "http://127.0.0.1:7878";
+const api = process.env.OPENPROFILER_API ?? "http://127.0.0.1:7878";
 
 export default defineConfig({
   plugins: [react()],

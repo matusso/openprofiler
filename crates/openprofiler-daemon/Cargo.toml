@@ -1,0 +1,34 @@
+[package]
+name = "openprofiler-daemon"
+description = "OpenProfiler query server: session manager, Query API v1 (HTTP + WebSocket), exporters, insights and MCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openprofiler-model.workspace = true
+openprofiler-snapshot.workspace = true
+openprofiler-jfr.workspace = true
+openprofiler-heap.workspace = true
+openprofiler-link.workspace = true
+openprofiler-proto.workspace = true
+openprofiler-attach.workspace = true
+openprofiler-remote.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+hex.workspace = true
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

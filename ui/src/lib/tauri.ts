@@ -9,7 +9,7 @@ export async function pickFile(): Promise<string | null> {
     multiple: false,
     directory: false,
     filters: [
-      { name: "Profiles & heap dumps", extensions: ["ember", "jfr", "hprof", "gz", "emberlink"] },
+      { name: "Profiles & heap dumps", extensions: ["opsnap", "jfr", "hprof", "gz", "oplink"] },
       { name: "All files", extensions: ["*"] },
     ],
   });
@@ -35,7 +35,7 @@ export async function onFileDrop(
   return unlisten;
 }
 
-const RECENT_KEY = "ember.recent";
+const RECENT_KEY = "openprofiler.recent";
 
 export function recentPaths(): string[] {
   try {
