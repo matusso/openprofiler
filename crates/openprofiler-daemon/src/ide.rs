@@ -7,6 +7,9 @@
 //! - `gutterData {session?, classes: [..]}` → per-line CPU self/total percentages for the given
 //!   top-level classes (nested classes included)
 //! - `profiledPackages {session?}` → packages with samples, by weight
+//! - `agent {}` → `{path, options}`: the native agent and the options to launch a JVM with
+//!   (`-agentpath:<path>=<options>,infofile=<file>`)
+//! - `attachLaunched {infofile}` → session, once the launched JVM's agent publishes `infofile`
 //!
 //! Daemon → IDE notifications:
 //! - `navigate {class, method?, line?}` (sent when the UI asks to "go to source")
@@ -117,6 +120,30 @@ pub fn profiled_packages(s: &Session) -> Result<Vec<(String, u64)>> {
     Ok(v)
 }
 
+/// Handles one JSON-RPC request from an IDE, including the ones that wait on a JVM.
+pub async fn handle_async(engine: Arc<Engine>, msg: Value) -> Option<Value> {
+    if msg["method"] != "attachLaunched" {
+        return tokio::task::spawn_blocking(move || handle(&engine, &msg)).await.ok().flatten();
+    }
+    let id = msg.get("id").cloned()?;
+    let r = async {
+        let infofile = msg["params"]["infofile"].as_str().ok_or_else(|| anyhow!("missing infofile"))?;
+        let req = crate::live::AttachRequest { pid: None, options: None, infofile: Some(infofile.into()) };
+        Ok::<_, anyhow::Error>(serde_json::to_value(crate::live::attach(&engine, req).await?.info())?)
+    }
+    .await;
+    Some(rpc_response(id, r))
+}
+
+fn rpc_response(id: Value, r: Result<Value>) -> Value {
+    match r {
+        Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
+        Err(e) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": format!("{e:#}") } })
+        }
+    }
+}
+
 /// Handles one JSON-RPC request from an IDE.
 pub fn handle(engine: &Arc<Engine>, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned()?;
@@ -134,18 +161,17 @@ pub fn handle(engine: &Arc<Engine>, msg: &Value) -> Option<Value> {
             let kind = params["kind"].as_str().and_then(SampleKind::parse).unwrap_or(SampleKind::Cpu);
             Ok(json!({ "session": s.id, "unit": Unit::Percent, "lines": gutter_data(&s, &classes, kind)? }))
         }
+        "agent" => Ok(json!({
+            "path": crate::live::find_agent()?,
+            "options": crate::live::launch_options(),
+        })),
         "profiledPackages" => {
             let s = pick_session(engine, &params)?;
             Ok(json!({ "session": s.id, "packages": profiled_packages(&s)? }))
         }
         m => Err(anyhow!("method not found: {m}")),
     })();
-    Some(match r {
-        Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
-        Err(e) => {
-            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": format!("{e:#}") } })
-        }
-    })
+    Some(rpc_response(id, r))
 }
 
 #[cfg(test)]

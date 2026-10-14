@@ -21,7 +21,7 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start or exit. |
 | **Remote and containers** | Attach over ssh, `docker exec` and `kubectl exec`, including ephemeral debug containers for distroless images. The agent port is never exposed. (Daemon API today; UI and CLI support planned.) |
 | **Automation** | A CLI, a CI regression gate (`--fail-if "cpu.total > +10%"`), and an MCP server so AI agents can profile and read results. |
-| **IDE** | VS Code extension with CPU heat in the gutter and navigation to source. |
+| **IDE** | IntelliJ IDEA plugin and VS Code / VSCodium extension: CPU heat in the editor, navigation to source, launch with the agent. |
 | **Security** | The agent link uses TLS 1.3 with a pinned fingerprint and a mandatory random token. |
 
 Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, `.opsnap` snapshots and
@@ -95,6 +95,24 @@ Register the command with any MCP client. Tools include `list_jvms`, `attach`, `
 `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`, `compare`, `thread_dump` and
 `set_triggers`.
 
+### Use it from your IDE
+
+Both plugins find a running `openprofiler daemon` through `~/.openprofiler/daemon.json`. They tint
+hot lines with their share of total CPU time, open the source when you pick a frame in the
+profiler UI, and launch Java programs with the agent. A launched JVM opens in the daemon as a live
+session, and the heat refreshes while it runs.
+
+- **IntelliJ IDEA** (2025.3+): build with `(cd ide/intellij && ./gradlew buildPlugin)` and install
+  `build/distributions/openprofiler-intellij-*.zip` with *Settings | Plugins | Install Plugin from
+  Disk*. Use **Run | Profile with OpenProfiler** on any Java run configuration (application, JUnit,
+  Spring Boot, …). Settings are under *Tools | OpenProfiler*, actions under *Tools | OpenProfiler*.
+- **VS Code / VSCodium**: build with `(cd ide/vscode && npm ci && npm run package)` and install the
+  `.vsix` (*Extensions: Install from VSIX…*). Launching needs the Debugger for Java extension (on
+  the VS Code Marketplace and Open VSX). Run **OpenProfiler: Launch with Agent**, or add
+  `"openprofiler": true` to a Java launch configuration in `launch.json`.
+
+Both use the agent next to the daemon; set the agent path in the plugin settings to use another one.
+
 ## How it works
 
 ```
@@ -155,7 +173,8 @@ MAT_HOME=/path/to/mat cargo test -p openprofiler-heap --test mat_parity  # retai
 | `crates/openprofiler-cli` | The `openprofiler` binary |
 | `java/` | Boot classes, public `openprofiler-api`, test workload |
 | `ui/` | React + TypeScript UI, Tauri desktop shell |
-| `ide/vscode` | VS Code extension |
+| `ide/intellij` | IntelliJ IDEA plugin (Kotlin) |
+| `ide/vscode` | VS Code / VSCodium extension |
 
 ## Project status
 

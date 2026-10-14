@@ -26,7 +26,7 @@ Conventions:
 |---|---|---|
 | `GET /api/v1/sessions` | | `Session[]` |
 | `POST /api/v1/sessions/open` | `{ "path": string }` | `Session` |
-| `POST /api/v1/sessions/attach` | `{ "pid": number, "options"?: AttachOptions }` | `Session` |
+| `POST /api/v1/sessions/attach` | `{ "pid"?: number, "options"?: AttachOptions, "infofile"?: string }` | `Session` |
 | `DELETE /api/v1/sessions/{id}` | | `{}` |
 | `GET /api/v1/jvms` | | `LocalJvm[]` |
 | `GET /api/v1/sessions/{id}/summary` | | `Summary` |
@@ -263,6 +263,12 @@ WebSocket `/api/v1/ide?token=…`, JSON-RPC 2.0.
 - Requests: `hello`, `sessions`, `openFile {path}`, `gutterData {session?, classes[], kind?}`
   (returns `{lines: {class, method, line, self_percent, total_percent}[]}`) and
   `profiledPackages {session?}`.
+- `agent {}` returns `{path, options}`: the native agent the daemon uses and the options to launch a
+  JVM with, as `-agentpath:<path>=<options>,infofile=<file>`.
+- `attachLaunched {infofile}` waits up to 60 s for the agent of a JVM launched that way to publish
+  `infofile`, connects to it and returns the new live `Session`. `POST /api/v1/sessions/attach`
+  accepts the same `infofile` instead of a `pid`.
+- Requests are handled concurrently, so a pending `attachLaunched` does not delay other requests.
 - The daemon sends a `navigate {class, method?, line?}` notification when a client calls
   `POST /api/v1/ide/navigate` with the same body. The response is `{delivered: number}`.
 - The daemon publishes its URL and token in `~/.openprofiler/daemon.json` (mode 0600) for IDE plugins.

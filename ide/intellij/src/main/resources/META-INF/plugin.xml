@@ -1,0 +1,46 @@
+<idea-plugin>
+    <id>dev.openprofiler</id>
+    <name>OpenProfiler</name>
+    <vendor url="https://github.com/matusso/openprofiler">OpenProfiler</vendor>
+    <description><![CDATA[
+    <p>Integration with the <a href="https://github.com/matusso/openprofiler">OpenProfiler</a> JVM profiler.</p>
+    <ul>
+      <li>CPU heat in the editor: hot lines are tinted and show their share of total CPU time.</li>
+      <li>Go to source from the profiler UI.</li>
+      <li><b>Run | Profile with OpenProfiler</b> starts a Java run configuration with the agent and opens it in the daemon.</li>
+    </ul>
+    <p>The plugin finds a running <code>openprofiler daemon</code> through <code>~/.openprofiler/daemon.json</code>.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <executor implementation="dev.openprofiler.intellij.ProfileExecutor"/>
+        <programRunner implementation="dev.openprofiler.intellij.ProfileRunner"/>
+        <runConfigurationExtension implementation="dev.openprofiler.intellij.AgentRunConfigurationExtension"/>
+        <postStartupActivity implementation="dev.openprofiler.intellij.OpenProfilerStartup"/>
+        <applicationConfigurable parentId="tools" instance="dev.openprofiler.intellij.OpenProfilerConfigurable"
+                                 id="dev.openprofiler.intellij.settings" displayName="OpenProfiler"/>
+        <notificationGroup id="OpenProfiler" displayType="BALLOON"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="dev.openprofiler.intellij.HeatFileListener"
+                  topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
+
+    <actions>
+        <group id="OpenProfiler.Tools" text="OpenProfiler" popup="true" icon="/icons/openprofiler.svg">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="OpenProfiler.Connect" class="dev.openprofiler.intellij.ConnectAction"
+                    text="Connect to Daemon"/>
+            <action id="OpenProfiler.RefreshHeat" class="dev.openprofiler.intellij.RefreshHeatAction"
+                    text="Refresh CPU Heat"/>
+            <action id="OpenProfiler.OpenProfile" class="dev.openprofiler.intellij.OpenProfileAction"
+                    text="Open Profile in Daemon…"/>
+            <action id="OpenProfiler.CopyAgentOption" class="dev.openprofiler.intellij.CopyAgentOptionAction"
+                    text="Copy -agentpath Option"/>
+        </group>
+    </actions>
+</idea-plugin>

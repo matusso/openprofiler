@@ -94,7 +94,8 @@ crates/
 java/openprofiler-boot/    boot classes: telemetry sampler, dumps, Controller
 java/openprofiler-api/     public Controller API
 ui/                        React UI and Tauri desktop shell
-ide/vscode/                VS Code extension
+ide/intellij/              IntelliJ IDEA plugin
+ide/vscode/                VS Code / VSCodium extension
 docs/spec/                 agent-link, Query API, snapshot format
 ```
 
@@ -225,9 +226,11 @@ across all indexes, on disk and mmap'd.
 
 ### 3.12 IDE bridge
 
-A WebSocket JSON-RPC endpoint on localhost with a token: `navigate`, `gutterData`, `hello`. The
-daemon writes `~/.openprofiler/daemon.json` so plugins can find it. A VS Code extension exists; an
-IntelliJ plugin is planned.
+A WebSocket JSON-RPC endpoint on localhost with a token: `navigate`, `gutterData`, `hello`, `agent`,
+`attachLaunched`. The daemon writes `~/.openprofiler/daemon.json` so plugins can find it. The
+IntelliJ plugin and the VS Code / VSCodium extension show CPU heat, navigate to source, and launch
+Java programs with `-agentpath:<agent>=tls,infofile=<tmp file>`; `attachLaunched` waits for the
+agent to publish that file and opens a live session.
 
 ## 4. Roadmap
 

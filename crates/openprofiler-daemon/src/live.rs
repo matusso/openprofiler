@@ -78,6 +78,10 @@ pub struct AttachRequest {
     pub pid: Option<u32>,
     #[serde(default)]
     pub options: Option<AttachOptions>,
+    /// Connect to an agent that was started with `infofile=<path>` (e.g. by an IDE launching a JVM
+    /// with `-agentpath`), waiting until the agent publishes the file.
+    #[serde(default)]
+    pub infofile: Option<PathBuf>,
 }
 
 fn lib_name() -> &'static str {
@@ -100,6 +104,28 @@ pub fn find_agent() -> Result<PathBuf> {
     candidates.into_iter().find(|p| p.exists()).map(|p| p.canonicalize().unwrap_or(p)).ok_or_else(|| {
         anyhow!("cannot find {} (set OPENPROFILER_AGENT_PATH or build openprofiler-agent)", lib_name())
     })
+}
+
+/// How long to wait for a freshly launched JVM to publish its agent info file.
+const INFOFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Polls `path` until the agent has published it (it writes a temp file and renames it).
+async fn wait_for_info(path: &Path, timeout: std::time::Duration) -> Result<AgentInfo> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(info) = AgentInfo::read(path) {
+            return Ok(info);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("the agent did not publish {} within {}s", path.display(), timeout.as_secs());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Agent options for a JVM launched with `-agentpath` by an IDE, before its `infofile=`.
+pub fn launch_options() -> &'static str {
+    "tls"
 }
 
 fn bundle_dir(opts: &AttachOptions) -> PathBuf {
@@ -143,6 +169,8 @@ pub async fn attach(engine: &Arc<Engine>, req: AttachRequest) -> Result<Arc<Sess
             fingerprint: c.fingerprint.clone(),
             ..LinkOptions::new(c.addr.clone(), c.token.clone())
         }
+    } else if let Some(path) = &req.infofile {
+        LinkOptions::from_info(&wait_for_info(path, INFOFILE_TIMEOUT).await?)
     } else if let Some(target) = opts.remote.clone() {
         let pid = req.pid.ok_or_else(|| anyhow!("missing pid"))?;
         remote = true;
@@ -357,5 +385,29 @@ pub async fn remote_discover(req: Value) -> Result<Value> {
             openprofiler_remote::list_jvms(&target, &bundle.relay).await
         }
         w => bail!("unknown discovery kind {w}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn waits_for_infofile() {
+        let path = std::env::temp_dir().join(format!("openprofiler-ide-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(wait_for_info(&path, Duration::from_millis(150)).await.is_err());
+        let writer = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::fs::write(&path, r#"{"pid":42,"port":1234,"bind":"127.0.0.1","token":"t"}"#).unwrap();
+            })
+        };
+        let info = wait_for_info(&path, Duration::from_secs(5)).await.unwrap();
+        writer.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((info.pid, info.addr().as_str()), (42, "127.0.0.1:1234"));
     }
 }

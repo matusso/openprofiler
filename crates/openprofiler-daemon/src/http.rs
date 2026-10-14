@@ -348,6 +348,8 @@ async fn ide_ws(State(st): State<AppState>, ws: WebSocketUpgrade) -> Response {
 async fn ide_session(mut socket: WebSocket, engine: Arc<Engine>) {
     use tokio::sync::broadcast::error::RecvError;
     let mut rx = engine.subscribe_ide();
+    // Requests run concurrently (`attachLaunched` waits for a JVM to start); responses come back here.
+    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
@@ -359,16 +361,20 @@ async fn ide_session(mut socket: WebSocket, engine: Arc<Engine>) {
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => return,
             },
+            Some(r) = resp_rx.recv() => {
+                if socket.send(Message::Text(r.to_string().into())).await.is_err() {
+                    return;
+                }
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(t))) => {
                     let Ok(req) = serde_json::from_str::<Value>(&t) else { continue };
-                    let e = engine.clone();
-                    let resp = tokio::task::spawn_blocking(move || crate::ide::handle(&e, &req)).await.ok().flatten();
-                    if let Some(r) = resp
-                        && socket.send(Message::Text(r.to_string().into())).await.is_err()
-                    {
-                        return;
-                    }
+                    let (e, tx) = (engine.clone(), resp_tx.clone());
+                    tokio::spawn(async move {
+                        if let Some(r) = crate::ide::handle_async(e, req).await {
+                            let _ = tx.send(r);
+                        }
+                    });
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 _ => {}
