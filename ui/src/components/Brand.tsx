@@ -5,6 +5,7 @@ export function OpenProfilerLogo({ className = "", ...props }: SVGProps<SVGSVGEl
   return (
     <svg
       viewBox="0 0 64 64"
+      fill="none"
       width={32}
       height={32}
       className={`brand-mark ${className}`.trim()}

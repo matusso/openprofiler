@@ -34,6 +34,8 @@ pub struct ChunkHeader {
     pub start_ticks: i64,
     pub ticks_per_second: i64,
     pub compressed: bool,
+    /// The header declares more bytes than the file holds (cut-off copy or crashed writer).
+    pub truncated: bool,
 }
 
 impl ChunkHeader {
@@ -56,9 +58,9 @@ impl ChunkHeader {
         let ticks_per_second = r.be_i64()?;
         let flags = *data.get(offset + 67).context("truncated chunk header")?;
         let remaining = data.len() - offset;
+        let truncated = size > HEADER_SIZE as i64 && size as usize > remaining;
         // A chunk still being written may carry a zero or stale size; clamp to the file.
-        let size =
-            if size <= HEADER_SIZE as i64 || size as usize > remaining { remaining } else { size as usize };
+        let size = if size <= HEADER_SIZE as i64 || truncated { remaining } else { size as usize };
         Ok(ChunkHeader {
             offset,
             size,
@@ -71,6 +73,7 @@ impl ChunkHeader {
             start_ticks,
             ticks_per_second: ticks_per_second.max(1),
             compressed: flags & 1 != 0,
+            truncated,
         })
     }
 }

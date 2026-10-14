@@ -41,6 +41,13 @@ pub fn parse_bytes(data: &[u8]) -> Result<Profile> {
     let mut merger = convert::Merger::new();
     let batch = rayon::current_num_threads().max(1) * 2;
     let mut first_error = None;
+    for h in headers.iter().filter(|h| h.truncated) {
+        merger.warn(format!("chunk at {}: truncated to {} bytes", h.offset, h.size));
+    }
+    let covered = headers.last().map_or(0, |h| h.offset + h.size);
+    if covered < data.len() {
+        merger.warn(format!("ignored {} trailing bytes at offset {covered}", data.len() - covered));
+    }
     for (b, group) in headers.chunks(batch).enumerate() {
         let outs: Vec<Result<convert::ChunkOut>> = group
             .par_iter()

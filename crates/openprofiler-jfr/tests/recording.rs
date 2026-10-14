@@ -213,5 +213,11 @@ fn bytes_match_file_and_truncation_is_safe() {
             assert!(p.meta.properties.contains_key("jfr.warnings"));
         }
     }
+    // Cuts just past a chunk boundary (inside, or right after, the next chunk's header).
+    let two = [data.as_slice(), data.as_slice()].concat();
+    for extra in [1, 40, 68, 200] {
+        let p = parse_bytes(&two[..data.len() + extra]).unwrap();
+        assert!(p.meta.properties.contains_key("jfr.warnings"), "cut {extra} bytes into 2nd chunk");
+    }
     assert!(parse_bytes(b"not a jfr file at all, definitely not").is_err());
 }
