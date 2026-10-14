@@ -434,7 +434,7 @@ async fn attach_live(
     let options = openprofiler_daemon::live::AttachOptions { interval, ..Default::default() };
     openprofiler_daemon::live::attach(
         engine,
-        openprofiler_daemon::live::AttachRequest { pid: Some(pid), options: Some(options) },
+        openprofiler_daemon::live::AttachRequest { pid: Some(pid), options: Some(options), infofile: None },
     )
     .await
 }

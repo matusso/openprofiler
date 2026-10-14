@@ -192,7 +192,7 @@ impl McpServer {
                 let pid = args["pid"].as_u64().ok_or_else(|| anyhow!("missing pid"))? as u32;
                 let s = crate::live::attach(
                     &engine,
-                    crate::live::AttachRequest { pid: Some(pid), options: None },
+                    crate::live::AttachRequest { pid: Some(pid), options: None, infofile: None },
                 )
                 .await?;
                 Ok(json!({ "session": s.id, "info": s.info(),
