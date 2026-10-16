@@ -72,6 +72,7 @@ export const IconBean = base(
     <path d="M9 10c1.5 2 4.5 2 6 0" />
   </>,
 );
+export const IconCode = base(<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16" />);
 export const IconCompare = base(<path d="M8 3v18M16 3v18M3 8h5M16 16h5M3 16h5M16 8h5" />);
 export const IconChevron = base(<path d="M9 5l7 7-7 7" />);
 export const IconSearch = base(

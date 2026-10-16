@@ -10,6 +10,7 @@ export async function pickFile(): Promise<string | null> {
     directory: false,
     filters: [
       { name: "Profiles & heap dumps", extensions: ["opsnap", "jfr", "hprof", "gz", "oplink"] },
+      { name: "Android apps", extensions: ["apk", "xapk", "apks", "apkm", "aab", "dex"] },
       { name: "All files", extensions: ["*"] },
     ],
   });

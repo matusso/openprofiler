@@ -52,7 +52,7 @@ pub fn tools() -> Vec<Value> {
         tool("status", "List open sessions with their state and capabilities.", json!({}), &[]),
         tool(
             "load_snapshot",
-            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap). Optionally open a baseline for comparison.",
+            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap), or an Android app for the decompiler (.apk, .dex, .xapk, .apks, .aab). Optionally open a baseline for comparison.",
             json!({ "path": { "type": "string" }, "baseline": { "type": "string" } }),
             &["path"],
         ),
@@ -112,6 +112,29 @@ pub fn tools() -> Vec<Value> {
             &["session", "triggers"],
         ),
         tool(
+            "decompile",
+            "Decompiled Java source (or smali) of a class in a decompiler session (.apk/.dex). Without `class`, lists the packages and classes directly under `package` (default: top level).",
+            json!({ "session": session, "class": { "type": "string", "description": "Fully qualified class name" },
+                    "package": { "type": "string" },
+                    "view": { "type": "string", "enum": ["java", "smali"], "default": "java" },
+                    "max_chars": { "type": "integer", "default": 60000 } }),
+            &["session"],
+        ),
+        tool(
+            "search_code",
+            "Search a decompiler session. scope=names matches class, method and field names (fast); scope=code searches decompiled source text, e.g. for strings, URLs or API keys (slower, time-bounded). Name results carry a node id for `find_usages`.",
+            json!({ "session": session, "query": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["names", "code"], "default": "names" },
+                    "limit": { "type": "integer", "default": 50 } }),
+            &["session", "query"],
+        ),
+        tool(
+            "find_usages",
+            "Places in the decompiled code that use a class, method or field (node id from search_code).",
+            json!({ "session": session, "node": { "type": "integer" }, "limit": { "type": "integer", "default": 100 } }),
+            &["session", "node"],
+        ),
+        tool(
             "probe_events",
             "Probe events (JDBC, HTTP, ...) of a session. Requires a live agent with probes enabled.",
             json!({ "session": session, "probe": { "type": "string" } }),
@@ -151,7 +174,7 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "openprofiler", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "OpenProfiler is a JVM profiler. Start with load_snapshot (files) or list_jvms + attach (live), then insights, hotspots and expand. Node and object ids are stable within a session.",
+                "instructions": "OpenProfiler is a JVM profiler. Start with load_snapshot (files) or list_jvms + attach (live), then insights, hotspots and expand. Node and object ids are stable within a session. Android apps (.apk, .dex) opened with load_snapshot are browsed with decompile, search_code and find_usages.",
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),
@@ -211,6 +234,10 @@ impl McpServer {
                         let bs = engine.open_blocking(std::path::Path::new(&b))?;
                         out["baseline_session"] = json!(bs.id);
                         out["suggested_next"] = json!(format!("compare a={} b={}", bs.id, s.id));
+                    } else if s.decompiler().is_some() {
+                        out["code"] = crate::decompile::handle(&s, "summary", json!({}))?;
+                        out["suggested_next"] =
+                            json!("decompile (lists packages), search_code, then decompile class=...");
                     } else {
                         out["suggested_next"] = json!("insights, then hotspots");
                     }
@@ -374,6 +401,41 @@ impl McpServer {
                     o.insert("suggested_next".into(), json!("heap_data view=biggest object=<id> to drill into the dominator tree; path_to_roots to see why an object is alive"));
                 }
                 Ok(v)
+            }
+            "decompile" => {
+                let s = self.session(args, "session")?;
+                let Some(class) = args["class"].as_str() else {
+                    let parent = args["package"].as_str().unwrap_or_default();
+                    let mut v = crate::decompile::handle(&s, "packages", json!({ "parent": parent }))?;
+                    v["suggested_next"] = json!("decompile with package=<full> to descend, or class=<full>");
+                    return Ok(v);
+                };
+                let view = args["view"].as_str().unwrap_or("java");
+                let v = crate::decompile::handle(&s, "class", json!({ "name": class, "view": view }))?;
+                let max = args["max_chars"].as_u64().unwrap_or(60_000) as usize;
+                let code = v["code"].as_str().unwrap_or_default();
+                let cut = code.char_indices().nth(max).map(|(i, _)| i);
+                Ok(json!({
+                    "class": v["name"],
+                    "view": view,
+                    "code": &code[..cut.unwrap_or(code.len())],
+                    "truncated": cut.is_some(),
+                    "suggested_next": "search_code for names or strings, find_usages for a node id",
+                }))
+            }
+            "search_code" => {
+                let s = self.session(args, "session")?;
+                let req = json!({
+                    "query": args["query"],
+                    "scope": args["scope"].as_str().unwrap_or("names"),
+                    "limit": args["limit"].as_u64().unwrap_or(50),
+                });
+                crate::decompile::handle(&s, "search", req)
+            }
+            "find_usages" => {
+                let s = self.session(args, "session")?;
+                let req = json!({ "node": args["node"], "limit": args["limit"].as_u64().unwrap_or(100) });
+                crate::decompile::handle(&s, "usages", req)
             }
             "heap_dump" | "probe_events" | "set_triggers" => {
                 let s = self.session(args, "session")?;

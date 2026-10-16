@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#FF6200EE</color>
+    <color name="accent">#03DAC5</color>
+    <dimen name="margin">16dp</dimen>
+    <dimen name="text_size">14sp</dimen>
+    <dimen name="frac">1.5px</dimen>
+    <integer name="max_items">10</integer>
+    <bool name="enabled">true</bool>
+    <item name="extra_id" type="id" />
+    <attr name="customAttr" format="dimension" />
+    <attr name="mode">
+        <enum name="fast" value="0" />
+        <enum name="slow" value="1" />
+    </attr>
+    <style name="AppTheme" parent="android:Theme.Material.Light">
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="customAttr">8dp</item>
+    </style>
+</resources>

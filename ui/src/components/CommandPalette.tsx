@@ -4,6 +4,7 @@ import { sk, useCurrentSession, useSessions } from "../api/hooks";
 import {
   client,
   focusMethod,
+  openCode,
   selectSession,
   setPalette,
   setTheme,
@@ -64,6 +65,12 @@ export function CommandPalette() {
     queryKey: sk(sid, "palette-classes", q),
     queryFn: () => client.heapClasses(sid!, { filter: q, limit: 30, sort: "retained" }),
     enabled: open && !!sid && caps.includes("heap") && q.length >= 2,
+  });
+  const code = useQuery({
+    queryKey: sk(sid, "palette-code", q),
+    queryFn: () => client.codeSearch(sid!, { query: q, scope: "names", limit: 30 }),
+    enabled: open && !!sid && caps.includes("decompile") && q.length >= 2,
+    staleTime: 60_000,
   });
 
   useEffect(() => {
@@ -179,8 +186,21 @@ export function CommandPalette() {
         });
       }
     }
+    if (q.length >= 2 && code.data) {
+      for (const r of code.data.results) {
+        if (!("id" in r) || !r.cls) continue;
+        const cls = r.cls;
+        scored.push({
+          id: `code-${r.id}`,
+          group: "Decompiled code",
+          label: r.full,
+          hint: r.kind,
+          run: () => openCode({ type: "class", cls, view: "java", node: r.id }),
+        });
+      }
+    }
     return scored.slice(0, 80);
-  }, [q, sessions, current, methods.data, classes.data, theme, palette, sid]);
+  }, [q, sessions, current, methods.data, classes.data, code.data, theme, palette, sid]);
 
   if (!open) return null;
 

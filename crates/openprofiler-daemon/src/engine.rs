@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
+use crate::decompile::DecompileHandle;
 use crate::heap::HeapHandle;
 use crate::live::LiveHandle;
 
@@ -22,6 +23,8 @@ pub enum SessionKind {
     Jfr,
     Snapshot,
     Live,
+    /// An Android app (`.apk`, `.dex`, ...) opened in the decompiler.
+    Dex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,6 +91,7 @@ pub struct Session {
     profile: RwLock<Option<SharedProfile>>,
     heap: RwLock<Option<HeapHandle>>,
     live: RwLock<Option<LiveHandle>>,
+    decompiler: RwLock<Option<DecompileHandle>>,
     cache: Mutex<(u64, HashMap<String, Arc<dyn Any + Send + Sync>>)>,
     events: broadcast::Sender<ServerEvent>,
 }
@@ -142,6 +146,9 @@ impl Session {
         if self.live().is_some() {
             caps.push("recording".into());
         }
+        if self.decompiler().is_some() {
+            caps.push("decompile".into());
+        }
         caps
     }
 
@@ -155,6 +162,10 @@ impl Session {
 
     pub fn live(&self) -> Option<LiveHandle> {
         self.live.read().clone()
+    }
+
+    pub fn decompiler(&self) -> Option<DecompileHandle> {
+        self.decompiler.read().clone()
     }
 
     pub fn require_profile(&self) -> Result<SharedProfile> {
@@ -180,6 +191,11 @@ impl Session {
     pub fn set_heap(&self, h: HeapHandle) {
         *self.heap.write() = Some(h);
         self.bump(vec!["heap".into()]);
+    }
+
+    pub fn set_decompiler(&self, d: DecompileHandle) {
+        *self.decompiler.write() = Some(d);
+        self.bump(vec!["code".into()]);
     }
 
     pub fn set_live(&self, l: LiveHandle) {
@@ -248,7 +264,14 @@ pub enum FileFormat {
     Jfr,
     Snapshot,
     Recording,
+    /// Dalvik executable.
+    Dex,
+    /// Android app container with `classes*.dex`: `.apk`, `.xapk`, `.apks`, `.aab`, ...
+    Archive,
 }
+
+/// Zip-based Android containers the decompiler accepts.
+const ARCHIVE_EXTENSIONS: &[&str] = &["apk", "apks", "apkm", "xapk", "aab", "zip"];
 
 pub fn detect_format(path: &Path) -> Result<FileFormat> {
     use std::io::Read;
@@ -271,8 +294,21 @@ pub fn detect_format(path: &Path) -> Result<FileFormat> {
     if head.starts_with(&[0x1f, 0x8b]) {
         return Ok(FileFormat::HprofGz);
     }
+    if head.starts_with(b"dex\n") {
+        return Ok(FileFormat::Dex);
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if head.starts_with(b"PK\x03\x04") && ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
+        return Ok(FileFormat::Archive);
+    }
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    bail!("unrecognized file format: {name} (expected .hprof, .hprof.gz, .jfr or .opsnap)")
+    if matches!(ext.as_str(), "jar" | "aar" | "class" | "war") {
+        bail!("{name}: JVM bytecode is not supported; the decompiler reads Android .apk and .dex files");
+    }
+    bail!(
+        "unrecognized file format: {name} (expected .hprof, .hprof.gz, .jfr, .opsnap, \
+         or .apk / .dex for the decompiler)"
+    )
 }
 
 /// Pluggable loaders so the engine can be built and tested without every format crate.
@@ -356,6 +392,7 @@ impl Engine {
             profile: RwLock::new(None),
             heap: RwLock::new(None),
             live: RwLock::new(None),
+            decompiler: RwLock::new(None),
             cache: Mutex::new((0, HashMap::new())),
             events: self.events.clone(),
         });
@@ -405,6 +442,7 @@ impl Engine {
             FileFormat::Hprof | FileFormat::HprofGz => SessionKind::Hprof,
             FileFormat::Jfr => SessionKind::Jfr,
             FileFormat::Snapshot | FileFormat::Recording => SessionKind::Snapshot,
+            FileFormat::Dex | FileFormat::Archive => SessionKind::Dex,
         };
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let session = self.new_session(kind, &name, Some(path.clone()));

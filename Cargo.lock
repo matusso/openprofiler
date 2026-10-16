@@ -1010,8 +1010,10 @@ dependencies = [
  "clap",
  "openprofiler-attach",
  "openprofiler-daemon",
+ "openprofiler-dex",
  "openprofiler-model",
  "openprofiler-snapshot",
+ "rayon",
  "serde",
  "serde_json",
  "tokio",
@@ -1029,6 +1031,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "openprofiler-attach",
+ "openprofiler-dex",
  "openprofiler-heap",
  "openprofiler-jfr",
  "openprofiler-link",
@@ -1044,6 +1047,20 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "openprofiler-dex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "memmap2",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

@@ -33,6 +33,7 @@ const KIND_LABEL: Record<Session["kind"], string> = {
   jfr: "JFR",
   snapshot: "Snapshot",
   live: "Live",
+  dex: "Decompiler",
 };
 
 export function SessionBadge({ s }: { s: Session }) {

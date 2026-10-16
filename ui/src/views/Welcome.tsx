@@ -37,7 +37,8 @@ export function Welcome() {
               <IconOpen width={14} /> Open a file
             </h3>
             <div className="muted">
-              .opsnap snapshots, JFR recordings, HPROF heap dumps. Drop a file anywhere.
+              .opsnap snapshots, JFR recordings, HPROF heap dumps, or an Android app to decompile. Drop a file
+              anywhere.
             </div>
           </button>
           <button

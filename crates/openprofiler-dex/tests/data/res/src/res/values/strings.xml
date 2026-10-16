@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Demo</string>
+    <string name="greeting">Hello &amp; welcome</string>
+    <string name="quote">It\'s \"quoted\"\nnext line</string>
+    <string name="at_sign">\@not_a_ref</string>
+    <string-array name="planets">
+        <item>Mercury</item>
+        <item>Venus</item>
+    </string-array>
+    <integer-array name="numbers">
+        <item>1</item>
+        <item>2</item>
+    </integer-array>
+    <plurals name="apples">
+        <item quantity="one">%d apple</item>
+        <item quantity="other">%d apples</item>
+    </plurals>
+</resources>

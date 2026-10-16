@@ -1,6 +1,6 @@
 // Types mirroring docs/spec/query-api.md. Keep in sync with the spec.
 
-export type SessionKind = "hprof" | "jfr" | "snapshot" | "live";
+export type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
 export type Capability =
   | "cpu"
   | "wall"
@@ -14,7 +14,8 @@ export type Capability =
   | "heap"
   | "gc"
   | "thread_dumps"
-  | "recording";
+  | "recording"
+  | "decompile";
 
 export type SessionState = "loading" | "ready" | "live" | "detached" | "failed";
 
@@ -436,4 +437,104 @@ export interface NavigateRequest {
   class: string;
   method?: string;
   line?: number;
+}
+
+// ---------- Decompiler ----------
+
+export interface CodeSummary {
+  /** Decompiler name and version (`openprofiler-dex 0.1.0`). */
+  engine: string;
+  classes: number;
+  packages: number;
+  resources: number;
+  dex_files: { name: string; version: number; classes: number }[];
+  /** Problems found while loading (unreadable dex files, ...). */
+  warnings: string[];
+}
+
+export interface CodePackageDto {
+  /** Display name; single-child package chains are compacted (`com.example.app`). */
+  name: string;
+  full: string;
+  classes: number;
+}
+
+export interface CodeClassRef {
+  name: string;
+  full: string;
+  kind: "class" | "interface" | "enum" | "annotation" | "abstract";
+}
+
+export interface CodePackagesResponse {
+  packages: CodePackageDto[];
+  classes: CodeClassRef[];
+}
+
+export interface CodeNodeDto {
+  id: number;
+  kind: "class" | "method" | "field" | "other";
+  name: string;
+  full: string;
+  /** Top-level class whose source holds the node. */
+  cls?: string;
+}
+
+/** `[start, length, node id, 1 if declaration else 0]`, sorted by start. */
+export type CodeLink = [number, number, number, 0 | 1];
+
+export interface CodeClassResponse {
+  name: string;
+  package: string;
+  view: "java" | "smali";
+  code: string;
+  links: CodeLink[];
+  nodes: Record<string, CodeNodeDto>;
+  /** Definition offset of the requested node. */
+  focus?: number;
+}
+
+export interface CodeUsage {
+  cls: string;
+  pos: number;
+  line: number;
+  snippet: string;
+  in?: string;
+}
+
+export interface CodeUsagesResponse {
+  target: CodeNodeDto;
+  usages: CodeUsage[];
+  truncated: boolean;
+}
+
+export interface CodeTextMatch {
+  kind: "code";
+  cls: string;
+  pos: number;
+  line: number;
+  snippet: string;
+}
+
+export interface CodeSearchResponse {
+  results: (CodeNodeDto | CodeTextMatch)[];
+  truncated: boolean;
+  scanned: number;
+  total: number;
+}
+
+export interface CodeResourceRow {
+  name: string;
+  type: string;
+  size?: number;
+}
+
+export interface CodeResourceResponse {
+  name: string;
+  type: string;
+  text?: string;
+  /** Base64 image bytes. */
+  image?: string;
+  binary?: boolean;
+  /** Files decoded from a container such as resources.arsc. */
+  files?: string[];
 }

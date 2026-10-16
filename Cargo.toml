@@ -21,6 +21,7 @@ openprofiler-remote = { path = "crates/openprofiler-remote" }
 openprofiler-daemon = { path = "crates/openprofiler-daemon" }
 openprofiler-link = { path = "crates/openprofiler-link" }
 openprofiler-agent = { path = "crates/openprofiler-agent" }
+openprofiler-dex = { path = "crates/openprofiler-dex" }
 jvmti-sys = { path = "crates/jvmti-sys" }
 anyhow = "1"
 thiserror = "2"

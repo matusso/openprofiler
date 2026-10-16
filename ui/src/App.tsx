@@ -12,6 +12,7 @@ import { formatCount, formatNanos } from "./lib/format";
 import { onFileDrop } from "./lib/tauri";
 import { client, queryClient, selectSession, store, useApp } from "./state";
 import { CompareView } from "./views/CompareView";
+import { CodeView } from "./views/CodeView";
 import { CpuView } from "./views/CpuView";
 import { EventsView } from "./views/EventsView";
 import { HeapView } from "./views/HeapView";
@@ -59,6 +60,17 @@ function useAutoSelect() {
     const pick = data.find((s) => s.state === "live") ?? data.find((s) => s.state === "ready") ?? data[0];
     selectSession(pick?.id ?? null);
   }, [data, sid]);
+}
+
+/** Decompiler sessions only have the Code view; profiling sessions have everything else. */
+function useViewForSession() {
+  const s = useCurrentSession();
+  const view = useApp((st) => st.view);
+  useEffect(() => {
+    if (!s) return;
+    if (s.kind === "dex" && view !== "code") store.set({ view: "code" });
+    else if (s.kind !== "dex" && view === "code") store.set({ view: "overview" });
+  }, [s, view]);
 }
 
 function useShortcuts() {
@@ -186,6 +198,8 @@ function Main() {
       return <LocksView />;
     case "events":
       return <EventsView />;
+    case "code":
+      return <CodeView />;
     case "compare":
       return <CompareView />;
     case "probes":
@@ -224,6 +238,7 @@ export function App() {
   }, [theme, palette]);
   useServerEvents();
   useAutoSelect();
+  useViewForSession();
   useShortcuts();
   const dropping = useDrop();
   return (

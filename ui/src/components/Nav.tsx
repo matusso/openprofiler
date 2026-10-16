@@ -5,6 +5,7 @@ import { store, useApp, type ViewId } from "../state";
 import {
   OpenProfilerLogo,
   IconBean,
+  IconCode,
   IconCompare,
   IconCpu,
   IconEvents,
@@ -71,6 +72,14 @@ export const NAV: NavEntry[] = [
     needs: ["gc", "telemetry"],
   },
   { id: "mbeans", label: "MBeans", short: "MBeans", icon: <IconBean />, key: "9", needs: [] },
+  {
+    id: "code",
+    label: "Code (decompiler)",
+    short: "Code",
+    icon: <IconCode />,
+    key: "j",
+    needs: ["decompile"],
+  },
   { id: "compare", label: "Compare", short: "Compare", icon: <IconCompare />, key: "0", needs: [] },
 ];
 
@@ -82,7 +91,9 @@ export function Nav() {
     <nav className="nav" aria-label="Views">
       <OpenProfilerLogo className="nav-logo" />
       {NAV.map((n) => {
-        const enabled = n.needs.length === 0 || n.needs.some((c) => caps.includes(c));
+        // Decompiler sessions carry no profiling data: only the Code view applies.
+        const enabled =
+          s?.kind === "dex" ? n.id === "code" : n.needs.length === 0 || n.needs.some((c) => caps.includes(c));
         return (
           <button
             key={n.id}

@@ -12,6 +12,8 @@ formats are specified separately:
 **Product goals**
 - A complete JVM profiler: CPU, memory, heap analysis, threads, locks, probes, telemetry, snapshots,
   comparisons, remote and container attach, and an MCP server for AI agents.
+- A native decompiler for Android apps (`.apk`, `.dex`) in the same UI, so the code behind a hot
+  spot or a third-party library can be read without another tool.
 - **Fast.** Open a 10 GB HPROF in under 3 minutes cold on a laptop with 16 GB RAM, and in under
   5 s on reopen. The agent should add at most 2% overhead with async sampling.
 - **Modern UX.** Dark and light themes, a command palette, keyboard-first navigation, fast flame
@@ -37,10 +39,10 @@ NetBeans plugins.
 | Graph layout | `elkjs` in a web worker | Call graphs and reference graphs. |
 | Tables and trees | Virtualized lazy tree-table | Millions of rows with lazy expansion. |
 | Relay / attach helper | Static musl Rust binary `openprofiler-relay` (x86_64, aarch64, armhf) | Runs inside remote hosts and containers without a JVM. |
-| CLI | Rust `clap` binary `openprofiler` | open, export, compare, analyze, attach, record, dump, mcp. |
+| CLI | Rust `clap` binary `openprofiler` | open, export, compare, analyze, attach, record, dump, decompile, mcp. |
+| Decompiler | **Rust** (`openprofiler-dex`) | No JVM or external tool; lazy per-class decompilation in process, with navigation metadata from the code generator. |
 
-A single Rust workspace covers everything except the Java shim and the TypeScript UI, so the
-analysis crates are shared by the daemon, the CLI and the agent.
+A single Rust workspace covers everything except the Java shim and the TypeScript UI, so the analysis crates are shared by the daemon, the CLI and the agent.
 
 ## 3. Architecture
 
@@ -53,7 +55,8 @@ analysis crates are shared by the daemon, the CLI and the agent.
  │ Engine ─┬─ live session  ◄── agent-link (TLS + token, zstd frames) ──────────┼──► target JVM
  │         ├─ .opsnap / .oplink session ─┐                                      │
  │         ├─ HPROF session ─────────────┼─► openprofiler-heap (mmap CSR, dominators)
- │         └─ JFR session ───────────────┘   openprofiler-model (trees, hot spots, diff)
+ │         ├─ JFR session ───────────────┘   openprofiler-model (trees, hot spots, diff)
+ │         └─ dex session (.apk/.dex) ──────► openprofiler-dex (decompiler, resources)
  │ Exporters (HTML/CSV/JSON/SVG) · Compare · MCP server · IDE bridge             │
  │ Remote: ssh · docker/kubectl exec · openprofiler-relay upload + stdio tunnel  │
  └──────────────────────────────────────────────────────────────────────────────┘
@@ -89,6 +92,7 @@ crates/
   openprofiler-link/       daemon side of the agent-link protocol, .oplink replay
   openprofiler-remote/     ssh, docker and kubectl transports
   openprofiler-relay/      static helper binary (relay, list, attach, dump, pty)
+  openprofiler-dex/        DEX/APK reader, smali, Dalvik-to-Java decompiler, Android resources
   openprofiler-daemon/     Query API server, sessions, exporters, insights, MCP, IDE bridge
   openprofiler-cli/        the `openprofiler` binary
 java/openprofiler-boot/    boot classes: telemetry sampler, dumps, Controller
@@ -208,8 +212,11 @@ across all indexes, on disk and mmap'd.
 
 ### 3.10 UI
 
-- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Events, Compare), a top session
-  bar with recording controls and a timeline scrubber, and an inspector panel.
+- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Events, Code, Compare), a top
+  session bar with recording controls and a timeline scrubber, and an inspector panel.
+- The Code view (decompiler sessions only): a lazy package tree and search on the left, a
+  virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
+  smali tabs, back/forward history, and a usages panel; a Resources tab shows decoded resources.
 - A global time range: brushing the timeline filters every view.
 - A command palette (⌘K) for actions, views, classes and methods, with go-to-source through the IDE
   bridge.
@@ -221,7 +228,7 @@ across all indexes, on disk and mmap'd.
 
 - `openprofiler mcp` runs an MCP server on stdio. Tools include `list_jvms`, `attach`,
   `prepare_profiling`, `load_snapshot`, `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`,
-  `compare` and `thread_dump`. Responses carry stable node IDs and `suggested_next` hints.
+  `compare` and `thread_dump`; `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge
@@ -232,6 +239,53 @@ IntelliJ plugin and the VS Code / VSCodium extension show CPU heat, navigate to 
 Java programs with `-agentpath:<agent>=tls,infofile=<tmp file>`; `attachLaunched` waits for the
 agent to publish that file and opens a live session.
 
+### 3.13 Decompiler (`openprofiler-dex`, daemon `decompile` module)
+
+A native Dalvik-to-Java decompiler. The daemon holds one `Program` per `dex` session and serves
+it through the `/code/*` Query API; the CLI (`openprofiler decompile`) and MCP use the same calls.
+
+- **Input.** `.dex` files (`dex\n` magic) and zip containers (`.apk`, `.xapk`, `.apks`, `.apkm`,
+  `.aab`): `classes*.dex` at the root, `*/dex/classes*.dex` in bundles, or inside nested APKs.
+  Zip entries are found through the central directory (APK protectors corrupt local headers).
+  Every read is bounds-checked; malformed input produces errors, never panics.
+- **Pipeline per method** (`method.rs`, `structure.rs`, `java.rs`):
+  1. Decode instructions (`insn.rs`), split basic blocks at branches, switch targets and try
+     boundaries; exception edges only leave blocks that can throw.
+  2. **Variables.** Reaching definitions over registers (wide pairs included) give def-use webs;
+     each web is one local. Definitions inside one debug-info local's range are merged so source
+     variables keep one name. Uses that read the same constant on every path become literals,
+     because d8 shares constant registers between unrelated values.
+  3. **IR** with expressions over those variables; `new-instance` + `<init>` become `new T(...)`,
+     `new-array` + element stores become array literals, `StringBuilder` chains become `+`.
+  4. **Types** from definitions, uses and debug info; constants print by the type expected where
+     they are used (`false`, `'a'`, `1.5f`, `null`).
+  5. **Inlining.** Single-use temporaries are substituted into their user when evaluation order
+     allows: decisions run last statement first and iterate to a fixpoint; a move is valid when
+     every conflicting statement in between still runs after it in the final evaluation order.
+     `StringBuilder` appends of strings and primitives are treated as reorderable.
+  6. **Conditions.** `cmp` + `if` become comparisons; `if` chains merge into `&&`/`||`; jumps
+     through empty blocks are threaded.
+  7. **Structuring.** Dominators (over normal and exception edges) and post-dominators drive a
+     region walk that emits `if`/`else`, `while`/`do-while`/`for`, labeled `break`/`continue`,
+     `switch` (cases ordered by key, fallthrough chains kept), nested `try`/`catch`
+     (regions nest when a handler list is a suffix of another), and `synchronized`. Joins fall
+     back to the block where branches really meet when one branch returns early; small shared
+     exit blocks may be duplicated. Cleanups invert early exits, build ternaries, merge boolean
+     returns and turn index and iterator loops into for-each.
+  8. **Java.** Imports, generics from `Signature` annotations, enums (constants recovered from
+     `<clinit>`), member, anonymous and inner classes (the outer instance becomes `Outer.this`),
+     annotations, variable declarations placed in the innermost scope that covers all uses.
+  Methods that can't be structured are still printed, with a warning comment; a method that
+  fails to decompile (or panics) falls back to a comment and an `UnsupportedOperationException`.
+- **Navigation.** The printer records links (reference or declaration, byte offset → UTF-16) to
+  class, method and field nodes; nodes get small ids per session. Usages come from a cross
+  reference index built by scanning bytecode, then decompiling only the classes that use a node.
+- **Resources** (`res/`). Binary XML (manifest, layouts) and `resources.arsc` (values files per
+  configuration, `public.xml`), with names resolved through the table and a framework name list.
+- **Quality checks.** `tests/corpus.rs` decompiles a corpus built with javac + d8 (with and
+  without debug info), recompiles the output with javac and runs a harness that must print the
+  same as the original classes.
+
 ## 4. Roadmap
 
 | Phase | Scope | State |
@@ -241,7 +295,7 @@ agent to publish that file and opens a live session.
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
 | 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes | Not started |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, web mode, CI gate | Mostly done |
-| 5 Polish and ecosystem | Native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Windows agent, PHD import, Arrow IPC sections | Partial |
+| 5 Polish and ecosystem | Native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
 
@@ -275,3 +329,6 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 - **Eclipse MAT** (EPL): dominator and inspection semantics; the correctness oracle.
 - **JDK Mission Control** (UPL): JFR semantics. **hprof-slurp**: streaming HPROF parsing.
 - **Pyroscope, speedscope**: flame graph UX. **elkjs**: graph layout.
+- **jadx** (Apache-2.0): the reference Dex decompiler; its output conventions (`AnonymousClass1`,
+  restructure warnings) and jadx-gui's navigation model informed the Code view. No code is shared.
+- **apktool**: the layout of decoded `res/values*` files.
