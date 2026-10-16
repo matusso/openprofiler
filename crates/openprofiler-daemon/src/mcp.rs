@@ -112,6 +112,35 @@ pub fn tools() -> Vec<Value> {
             &["session", "triggers"],
         ),
         tool(
+            "list_mbeans",
+            "List the MBeans of a live JVM (platform MBean server), optionally filtered by an ObjectName pattern such as java.lang:* or *:type=GarbageCollector,*. Also returns the attributes sampled as telemetry.",
+            json!({ "session": session, "pattern": { "type": "string" } }),
+            &["session"],
+        ),
+        tool(
+            "get_mbean",
+            "Attributes (with current values) and operations of one MBean in a live JVM.",
+            json!({ "session": session, "name": { "type": "string", "description": "ObjectName, e.g. java.lang:type=Memory" } }),
+            &["session", "name"],
+        ),
+        tool(
+            "invoke_mbean",
+            "Invoke an MBean operation in a live JVM. signature lists the parameter types (from get_mbean), args the values as strings.",
+            json!({ "session": session, "name": { "type": "string" }, "operation": { "type": "string" },
+                    "signature": { "type": "array", "items": { "type": "string" } },
+                    "args": { "type": "array", "items": { "type": "string" } } }),
+            &["session", "name", "operation"],
+        ),
+        tool(
+            "track_mbean",
+            "Sample a numeric MBean attribute (or an item of a composite attribute, e.g. HeapMemoryUsage.used) once per second as a telemetry series; enabled=false stops it. The series key can be used in telemetry queries and threshold triggers.",
+            json!({ "session": session, "name": { "type": "string" }, "attribute": { "type": "string" },
+                    "item": { "type": "string" }, "label": { "type": "string" },
+                    "unit": { "type": "string", "enum": ["count", "bytes", "nanos", "percent", "per_second"] },
+                    "enabled": { "type": "boolean", "default": true } }),
+            &["session", "name", "attribute"],
+        ),
+        tool(
             "decompile",
             "Decompiled Java source (or smali) of a class in a decompiler session (.apk/.dex). Without `class`, lists the packages and classes directly under `package` (default: top level).",
             json!({ "session": session, "class": { "type": "string", "description": "Fully qualified class name" },
@@ -437,12 +466,17 @@ impl McpServer {
                 let req = json!({ "node": args["node"], "limit": args["limit"].as_u64().unwrap_or(100) });
                 crate::decompile::handle(&s, "usages", req)
             }
-            "heap_dump" | "probe_events" | "set_triggers" => {
+            "heap_dump" | "probe_events" | "set_triggers" | "list_mbeans" | "get_mbean" | "invoke_mbean"
+            | "track_mbean" => {
                 let s = self.session(args, "session")?;
                 let engine = self.engine.clone();
                 let action = match name {
                     "heap_dump" => "heap-dump",
                     "set_triggers" => "triggers",
+                    "list_mbeans" => "mbeans",
+                    "get_mbean" => "mbean",
+                    "invoke_mbean" => "mbean-invoke",
+                    "track_mbean" => "mbean-track",
                     _ => "probe-events",
                 };
                 tokio::runtime::Handle::current()

@@ -2,8 +2,8 @@
 //!
 //! * [`LinkClient`] connects to a live agent, applies its pushed data batches into a shared
 //!   [`Profile`], acknowledges them, exposes a generation counter for UI invalidation, sends
-//!   control requests (thread dump, heap dump, recording toggles, GC, bookmarks) and reconnects
-//!   with watermark resume.
+//!   control requests (thread dump, heap dump, recording toggles, GC, bookmarks, MBeans) and
+//!   reconnects with watermark resume.
 //! * [`replay_recording`] loads an offline `.oplink` recording written by the agent.
 //! * [`AgentInfo`] reads the `openprofiler-<pid>.json` file an agent publishes.
 
@@ -349,6 +349,44 @@ impl LinkClient {
     pub async fn save_recording(&self, path: &str) -> Result<()> {
         let s = v1::SaveSnapshot { path: path.into() };
         self.request(v1::request::Kind::SaveSnapshot(s), None).await.map(|_| ())
+    }
+
+    /// Lists MBeans matching an ObjectName `pattern` (empty = all) and the tracked attributes.
+    pub async fn mbean_list(&self, pattern: &str) -> Result<v1::MBeanList> {
+        let r = v1::MBeanListRequest { pattern: pattern.into() };
+        match self.request(v1::request::Kind::MbeanList(r), None).await?.response.result {
+            Some(v1::response::Result::MbeanList(l)) => Ok(l),
+            _ => bail!("unexpected MBean list response"),
+        }
+    }
+
+    /// An MBean's attributes (with current values) and operations.
+    pub async fn mbean_get(&self, name: &str) -> Result<v1::MBeanInfo> {
+        let r = v1::MBeanGetRequest { name: name.into() };
+        match self.request(v1::request::Kind::MbeanGet(r), None).await?.response.result {
+            Some(v1::response::Result::MbeanInfo(i)) => Ok(i),
+            _ => bail!("unexpected MBean response"),
+        }
+    }
+
+    /// Invokes an operation; returns its result as JSON.
+    pub async fn mbean_invoke(&self, req: v1::MBeanInvokeRequest) -> Result<String> {
+        match self.request(v1::request::Kind::MbeanInvoke(req), None).await?.response.result {
+            Some(v1::response::Result::MbeanInvoke(r)) => Ok(r.value_json),
+            _ => bail!("unexpected MBean invoke response"),
+        }
+    }
+
+    pub async fn mbean_set(&self, req: v1::MBeanSetRequest) -> Result<()> {
+        self.request(v1::request::Kind::MbeanSet(req), None).await.map(|_| ())
+    }
+
+    /// Starts or stops sampling an attribute as telemetry; returns the tracked attributes.
+    pub async fn mbean_track(&self, req: v1::MBeanTrackRequest) -> Result<Vec<v1::TrackedAttribute>> {
+        match self.request(v1::request::Kind::MbeanTrack(req), None).await?.response.result {
+            Some(v1::response::Result::MbeanList(l)) => Ok(l.tracked),
+            _ => bail!("unexpected MBean track response"),
+        }
     }
 
     pub async fn close(&self) {

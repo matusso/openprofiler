@@ -71,7 +71,7 @@ export const NAV: NavEntry[] = [
     key: "8",
     needs: ["gc", "telemetry"],
   },
-  { id: "mbeans", label: "MBeans", short: "MBeans", icon: <IconBean />, key: "9", needs: [] },
+  { id: "mbeans", label: "MBeans", short: "MBeans", icon: <IconBean />, key: "9", needs: ["mbeans"] },
   {
     id: "code",
     label: "Code (decompiler)",

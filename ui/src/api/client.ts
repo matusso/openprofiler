@@ -24,6 +24,10 @@ import type {
   HotspotsResponse,
   Insight,
   LocalJvm,
+  MBeanDetail,
+  MBeanListResponse,
+  MBeanTrackRequest,
+  TrackedAttribute,
   MonitorEventDto,
   MonitorStat,
   ObjectDetail,
@@ -215,6 +219,17 @@ export class OpenProfilerClient {
   saveSnapshot = (id: string, path: string) => this.post(`/sessions/${id}/snapshot`, { path });
   bookmark = (id: string, label: string) => this.post(`/sessions/${id}/bookmark`, { label });
   gc = (id: string) => this.post(`/sessions/${id}/gc`);
+
+  // MBeans (live)
+  mbeans = (id: string, pattern?: string) =>
+    this.post<MBeanListResponse>(`/sessions/${id}/mbeans`, { pattern });
+  mbean = (id: string, name: string) => this.post<MBeanDetail>(`/sessions/${id}/mbean`, { name });
+  mbeanInvoke = (id: string, req: { name: string; operation: string; signature: string[]; args: string[] }) =>
+    this.post<{ value: unknown }>(`/sessions/${id}/mbean-invoke`, req);
+  mbeanSet = (id: string, req: { name: string; attribute: string; value: string }) =>
+    this.post(`/sessions/${id}/mbean-set`, req);
+  mbeanTrack = (id: string, req: MBeanTrackRequest) =>
+    this.post<{ tracked: TrackedAttribute[] }>(`/sessions/${id}/mbean-track`, req);
 
   /** URL for a file export (GET-able via a form POST is not possible, so we fetch + blob). */
   async export(id: string, body: { view: string; format: string; request: unknown }): Promise<Blob> {

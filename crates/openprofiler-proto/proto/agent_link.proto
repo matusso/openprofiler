@@ -34,7 +34,7 @@ message Hello {
   JvmInfo jvm = 3;
   // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "monitor_usage" (owners of
   // contended monitors), "park" (j.u.c lock hooks), "threads", "telemetry", "heap_dump",
-  // "thread_dump", "virtual_threads", "triggers", ...
+  // "thread_dump", "virtual_threads", "triggers", "mbeans", ...
   repeated string capabilities = 4;
   // Echo of the daemon's token (daemon -> agent direction uses Auth below).
   string token = 5;
@@ -353,6 +353,109 @@ message SetTriggers {
   repeated Trigger triggers = 1;
 }
 
+// ---------------------------------------------------------------------------------------------
+// MBean browser: the platform MBean server. Values are JSON (see agent-link.md).
+// ---------------------------------------------------------------------------------------------
+
+// Lists MBeans whose ObjectName matches `pattern` (an ObjectName pattern; empty = all).
+message MBeanListRequest {
+  string pattern = 1;
+}
+
+message MBeanSummary {
+  string name = 1;
+  string class_name = 2;
+  string description = 3;
+}
+
+// A numeric MBean attribute sampled as a telemetry series (key `mbean:<name>#<attribute>[.<item>]`).
+message TrackedAttribute {
+  string key = 1;
+  string label = 2;
+  // openprofiler_model::Unit, as in TelemetrySeriesDelta.
+  uint32 unit = 3;
+  string mbean = 4;
+  string attribute = 5;
+  // Item of a CompositeData attribute (e.g. "used" of HeapMemoryUsage); empty for plain numbers.
+  string item = 6;
+}
+
+message MBeanList {
+  repeated MBeanSummary beans = 1;
+  // Attributes currently sampled as telemetry.
+  repeated TrackedAttribute tracked = 2;
+}
+
+message MBeanGetRequest {
+  string name = 1;
+}
+
+message MBeanAttribute {
+  string name = 1;
+  string type = 2;
+  string description = 3;
+  bool readable = 4;
+  bool writable = 5;
+  // The current value as JSON; empty if it could not be read (see `error`).
+  string value_json = 6;
+  string error = 7;
+}
+
+message MBeanParameter {
+  string name = 1;
+  string type = 2;
+  string description = 3;
+}
+
+message MBeanOperation {
+  string name = 1;
+  string return_type = 2;
+  string description = 3;
+  // "info", "action", "action_info" or "unknown".
+  string impact = 4;
+  repeated MBeanParameter params = 5;
+}
+
+message MBeanInfo {
+  string name = 1;
+  string class_name = 2;
+  string description = 3;
+  repeated MBeanAttribute attributes = 4;
+  repeated MBeanOperation operations = 5;
+}
+
+// Arguments are strings converted to the parameter types (primitives, their boxes, String,
+// ObjectName, and arrays of those as JSON arrays or comma-separated lists).
+message MBeanInvokeRequest {
+  string name = 1;
+  string operation = 2;
+  // Parameter types, selecting the overload.
+  repeated string signature = 3;
+  repeated string args = 4;
+}
+
+message MBeanInvokeResult {
+  string value_json = 1;
+}
+
+// Sets a writable attribute; `value` is converted like an MBeanInvokeRequest argument.
+message MBeanSetRequest {
+  string name = 1;
+  string attribute = 2;
+  string value = 3;
+}
+
+// Starts (`enabled`) or stops sampling a numeric attribute as telemetry, once per second.
+message MBeanTrackRequest {
+  string name = 1;
+  string attribute = 2;
+  string item = 3;
+  // Defaults to "<attribute>[.<item>] (<bean>)".
+  string label = 4;
+  uint32 unit = 5;
+  bool enabled = 6;
+}
+
 message Request {
   uint64 id = 1;
   oneof kind {
@@ -364,6 +467,11 @@ message Request {
     RunGc run_gc = 7;
     AddBookmark bookmark = 8;
     SetTriggers set_triggers = 9;
+    MBeanListRequest mbean_list = 10;
+    MBeanGetRequest mbean_get = 11;
+    MBeanInvokeRequest mbean_invoke = 12;
+    MBeanSetRequest mbean_set = 13;
+    MBeanTrackRequest mbean_track = 14;
   }
 }
 
@@ -404,6 +512,10 @@ message Response {
     ThreadDump thread_dump = 4;
     HeapDumpResult heap_dump = 5;
     SnapshotResult snapshot = 6;
+    // MBeanList and MBeanTrack (the latter with `tracked` only).
+    MBeanList mbean_list = 7;
+    MBeanInfo mbean_info = 8;
+    MBeanInvokeResult mbean_invoke = 9;
   }
 }
 

@@ -1,7 +1,7 @@
 //! JNI glue to the boot classes (`dev.openprofiler.boot.*`): native method bindings and upcalls.
 
 use crate::collector::now_nanos;
-use crate::jvm::{jni, jstring_to_string, new_string, string_array, take_exception};
+use crate::jvm::{jni, jstring_to_string, new_string, new_string_array, string_array, take_exception};
 use crate::{agent, log};
 use jvmti_sys::*;
 use openprofiler_model::{Bookmark, GcEvent};
@@ -17,6 +17,11 @@ pub struct JavaHelpers {
     m_dump_heap: jmethodID,
     m_thread_dump: jmethodID,
     m_register_park: jmethodID,
+    m_mbean_list: jmethodID,
+    m_mbean_get: jmethodID,
+    m_mbean_invoke: jmethodID,
+    m_mbean_set: jmethodID,
+    m_mbean_track: jmethodID,
     pub m_thread_id: jmethodID,
 }
 
@@ -113,6 +118,20 @@ pub fn init(jni: *mut JNIEnv) -> Result<JavaHelpers, String> {
         m_dump_heap: sm(c"dumpHeap", c"(Ljava/lang/String;Z)Ljava/lang/String;"),
         m_thread_dump: sm(c"threadDump", c"()[Ljava/lang/String;"),
         m_register_park: sm(c"registerPark", c"(Ljava/lang/Class;)Z"),
+        m_mbean_list: sm(c"mbeanList", c"(Ljava/lang/String;)[Ljava/lang/String;"),
+        m_mbean_get: sm(c"mbeanGet", c"(Ljava/lang/String;)[Ljava/lang/String;"),
+        m_mbean_invoke: sm(
+            c"mbeanInvoke",
+            c"(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)[Ljava/lang/String;",
+        ),
+        m_mbean_set: sm(
+            c"mbeanSet",
+            c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;",
+        ),
+        m_mbean_track: sm(
+            c"mbeanTrack",
+            c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IZ)[Ljava/lang/String;",
+        ),
         m_thread_id,
     })
 }
@@ -200,6 +219,148 @@ impl JavaHelpers {
         dump.threads = parse_thread_dump(&lines);
         dump
     }
+}
+
+/// An upcall argument for [`JavaHelpers::lines`].
+enum Arg<'a> {
+    Str(&'a str),
+    Strs(&'a [String]),
+    Int(i32),
+    Bool(bool),
+}
+
+impl JavaHelpers {
+    /// Calls a static `String[]`-returning helper and returns its lines; a single `E\tmessage`
+    /// line (the helpers' failure format) becomes an error.
+    fn lines(&self, jni: *mut JNIEnv, m: jmethodID, args: &[Arg<'_>]) -> Result<Vec<String>, String> {
+        if m.is_null() {
+            return Err("MBean helper unavailable".into());
+        }
+        let mut refs = vec![];
+        let values: Vec<jvalue> = args
+            .iter()
+            .map(|a| match a {
+                Arg::Str(s) => {
+                    let r = new_string(jni, s);
+                    refs.push(r);
+                    jvalue { l: r }
+                }
+                Arg::Strs(v) => {
+                    let r = new_string_array(jni, v);
+                    refs.push(r);
+                    jvalue { l: r }
+                }
+                Arg::Int(i) => jvalue { i: *i },
+                Arg::Bool(b) => jvalue { z: *b as jboolean },
+            })
+            .collect();
+        let arr = jni!(jni, CallStaticObjectMethodA, self.agent_class, m, values.as_ptr());
+        let exc = take_exception(jni);
+        let lines = string_array(jni, arr);
+        jni!(jni, DeleteLocalRef, arr);
+        for r in refs {
+            jni!(jni, DeleteLocalRef, r);
+        }
+        if let Some(e) = exc {
+            return Err(e);
+        }
+        match lines.first().and_then(|l| l.strip_prefix("E\t")) {
+            Some(e) if lines.len() == 1 => Err(e.to_string()),
+            _ => Ok(lines),
+        }
+    }
+
+    pub fn mbean_list(&self, jni: *mut JNIEnv, pattern: &str) -> Result<v1::MBeanList, String> {
+        self.lines(jni, self.m_mbean_list, &[Arg::Str(pattern)]).map(|l| parse_mbean_list(&l))
+    }
+
+    pub fn mbean_get(&self, jni: *mut JNIEnv, name: &str) -> Result<v1::MBeanInfo, String> {
+        self.lines(jni, self.m_mbean_get, &[Arg::Str(name)]).map(|l| parse_mbean_info(&l))
+    }
+
+    pub fn mbean_invoke(&self, jni: *mut JNIEnv, r: &v1::MBeanInvokeRequest) -> Result<String, String> {
+        let args = [Arg::Str(&r.name), Arg::Str(&r.operation), Arg::Strs(&r.signature), Arg::Strs(&r.args)];
+        let lines = self.lines(jni, self.m_mbean_invoke, &args)?;
+        Ok(lines.first().and_then(|l| l.strip_prefix("R\t")).unwrap_or("null").to_string())
+    }
+
+    pub fn mbean_set(&self, jni: *mut JNIEnv, r: &v1::MBeanSetRequest) -> Result<(), String> {
+        let args = [Arg::Str(&r.name), Arg::Str(&r.attribute), Arg::Str(&r.value)];
+        self.lines(jni, self.m_mbean_set, &args).map(|_| ())
+    }
+
+    pub fn mbean_track(&self, jni: *mut JNIEnv, r: &v1::MBeanTrackRequest) -> Result<v1::MBeanList, String> {
+        let args = [
+            Arg::Str(&r.name),
+            Arg::Str(&r.attribute),
+            Arg::Str(&r.item),
+            Arg::Str(&r.label),
+            Arg::Int(r.unit as i32),
+            Arg::Bool(r.enabled),
+        ];
+        self.lines(jni, self.m_mbean_track, &args).map(|l| parse_mbean_list(&l))
+    }
+}
+
+/// Parses `MBeans.list()` / `MBeans.track()` output.
+pub fn parse_mbean_list(lines: &[String]) -> v1::MBeanList {
+    let mut out = v1::MBeanList::default();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        let at = |i: usize| f.get(i).copied().unwrap_or("").to_string();
+        match f[0] {
+            "B" => out.beans.push(v1::MBeanSummary { name: at(1), class_name: at(2), description: at(3) }),
+            "T" => out.tracked.push(v1::TrackedAttribute {
+                key: at(1),
+                label: at(2),
+                unit: at(3).parse().unwrap_or(2),
+                mbean: at(4),
+                attribute: at(5),
+                item: at(6),
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Parses `MBeans.get()` output.
+pub fn parse_mbean_info(lines: &[String]) -> v1::MBeanInfo {
+    let mut out = v1::MBeanInfo::default();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        let at = |i: usize| f.get(i).copied().unwrap_or("").to_string();
+        match f[0] {
+            "I" => {
+                out.name = at(1);
+                out.class_name = at(2);
+                out.description = at(3);
+            }
+            "A" => out.attributes.push(v1::MBeanAttribute {
+                name: at(1),
+                r#type: at(2),
+                description: at(3),
+                readable: at(4).contains('r'),
+                writable: at(4).contains('w'),
+                value_json: at(5),
+                error: at(6),
+            }),
+            "O" => out.operations.push(v1::MBeanOperation {
+                name: at(1),
+                return_type: at(2),
+                description: at(3),
+                impact: at(4),
+                params: vec![],
+            }),
+            "P" => {
+                if let Some(o) = out.operations.last_mut() {
+                    o.params.push(v1::MBeanParameter { name: at(1), r#type: at(2), description: at(3) });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Parses the line format produced by `Dumps.threadDump()`.
@@ -360,5 +521,29 @@ mod tests {
         assert_eq!(t[0].frames.len(), 1);
         assert_eq!(t[0].waiting_on, "x@2");
         assert!(t[1].is_virtual);
+    }
+
+    #[test]
+    fn parses_mbean_lines() {
+        let lines: Vec<String> = [
+            "I\tjava.lang:type=Memory\tsun.management.MemoryImpl\tMemory",
+            "A\tHeapMemoryUsage\tjavax.management.openmbean.CompositeData\t\tr\t{\"used\":5}\t",
+            "A\tVerbose\tboolean\t\trw\tfalse\t",
+            "O\tgc\tvoid\t\taction",
+            "P\tp0\tint\t",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let i = parse_mbean_info(&lines);
+        assert_eq!(i.class_name, "sun.management.MemoryImpl");
+        assert_eq!(i.attributes.len(), 2);
+        assert!(i.attributes[1].writable && i.attributes[1].readable && !i.attributes[0].writable);
+        assert_eq!(i.attributes[0].value_json, "{\"used\":5}");
+        assert_eq!(i.operations[0].params[0].r#type, "int");
+        let l =
+            parse_mbean_list(&["B\ta:type=X\tC\t".into(), "T\tmbean:a:type=X#N\tN\t1\ta:type=X\tN\t".into()]);
+        assert_eq!(l.beans[0].name, "a:type=X");
+        assert_eq!(l.tracked[0].unit, 1);
     }
 }

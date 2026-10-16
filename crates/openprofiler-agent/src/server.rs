@@ -355,6 +355,29 @@ fn handle_request<S: Write>(
                 fail(&mut resp, &e);
             }
         }
+        Some(Kind::MbeanList(r)) => match mbeans(a, |h| h.mbean_list(jni, &r.pattern)) {
+            Ok(l) => resp.result = Some(v1::response::Result::MbeanList(l)),
+            Err(e) => fail(&mut resp, &e),
+        },
+        Some(Kind::MbeanGet(r)) => match mbeans(a, |h| h.mbean_get(jni, &r.name)) {
+            Ok(i) => resp.result = Some(v1::response::Result::MbeanInfo(i)),
+            Err(e) => fail(&mut resp, &e),
+        },
+        Some(Kind::MbeanInvoke(r)) => match mbeans(a, |h| h.mbean_invoke(jni, &r)) {
+            Ok(value_json) => {
+                resp.result = Some(v1::response::Result::MbeanInvoke(v1::MBeanInvokeResult { value_json }))
+            }
+            Err(e) => fail(&mut resp, &e),
+        },
+        Some(Kind::MbeanSet(r)) => {
+            if let Err(e) = mbeans(a, |h| h.mbean_set(jni, &r)) {
+                fail(&mut resp, &e);
+            }
+        }
+        Some(Kind::MbeanTrack(r)) => match mbeans(a, |h| h.mbean_track(jni, &r)) {
+            Ok(l) => resp.result = Some(v1::response::Result::MbeanList(l)),
+            Err(e) => fail(&mut resp, &e),
+        },
         None => fail(&mut resp, "empty request"),
     }
     send(s, FrameType::Response, &resp)?;
@@ -364,6 +387,10 @@ fn handle_request<S: Write>(
         r?;
     }
     Ok(())
+}
+
+fn mbeans<T>(a: &Agent, f: impl FnOnce(&crate::java::JavaHelpers) -> Result<T, String>) -> Result<T, String> {
+    a.java.get().ok_or_else(|| "MBeans unavailable (no boot classes)".to_string()).and_then(f)
 }
 
 fn fail(resp: &mut v1::Response, msg: &str) {

@@ -248,3 +248,19 @@ pub fn string_array(env: *mut JNIEnv, arr: jobjectArray) -> Vec<String> {
     }
     out
 }
+
+/// Builds a `String[]` from Rust strings.
+pub fn new_string_array(env: *mut JNIEnv, items: &[String]) -> jobjectArray {
+    let cls = jni!(env, FindClass, c"java/lang/String".as_ptr());
+    let arr = jni!(env, NewObjectArray, items.len() as jsize, cls, ptr::null_mut());
+    jni!(env, DeleteLocalRef, cls);
+    if arr.is_null() {
+        return arr;
+    }
+    for (i, s) in items.iter().enumerate() {
+        let js = new_string(env, s);
+        jni!(env, SetObjectArrayElement, arr, i as jsize, js);
+        jni!(env, DeleteLocalRef, js);
+    }
+    arr
+}

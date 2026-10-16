@@ -162,6 +162,69 @@ async fn check_triggers(client: &LinkClient) {
     assert!(client.set_triggers(vec![bad]).await.is_err(), "a trigger without condition is rejected");
 }
 
+/// MBean list/get/invoke/set, and an attribute tracked as telemetry.
+async fn check_mbeans(client: &LinkClient) {
+    use openprofiler_proto::v1;
+    assert!(client.hello().capabilities.iter().any(|c| c == "mbeans"));
+    let l = client.mbean_list("java.lang:*").await.unwrap();
+    assert!(l.beans.iter().any(|b| b.name == "java.lang:type=Memory"), "platform beans are listed");
+    assert!(l.beans.iter().all(|b| b.name.starts_with("java.lang:")), "pattern filters");
+    assert!(client.mbean_list("not a pattern").await.is_err());
+
+    let mem = client.mbean_get("java.lang:type=Memory").await.unwrap();
+    let heap = mem.attributes.iter().find(|a| a.name == "HeapMemoryUsage").expect("HeapMemoryUsage");
+    let v: serde_json::Value = serde_json::from_str(&heap.value_json).unwrap();
+    assert!(v["used"].as_f64().is_some_and(|u| u > 0.0), "composite value as JSON: {v}");
+    assert!(mem.attributes.iter().any(|a| a.name == "Verbose" && a.writable));
+    assert!(mem.operations.iter().any(|o| o.name == "gc" && o.params.is_empty()));
+
+    let threading = client.mbean_get("java.lang:type=Threading").await.unwrap();
+    let op = threading
+        .operations
+        .iter()
+        .find(|o| o.name == "getThreadCpuTime" && o.params.len() == 1 && o.params[0].r#type == "long")
+        .expect("getThreadCpuTime(long)");
+    let r = v1::MBeanInvokeRequest {
+        name: "java.lang:type=Threading".into(),
+        operation: op.name.clone(),
+        signature: vec!["long".into()],
+        args: vec!["1".into()],
+    };
+    let out: serde_json::Value = serde_json::from_str(&client.mbean_invoke(r).await.unwrap()).unwrap();
+    assert!(out.is_number(), "invoke returns JSON: {out}");
+    let bad = v1::MBeanInvokeRequest {
+        name: "java.lang:type=Threading".into(),
+        operation: "getThreadCpuTime".into(),
+        signature: vec!["long".into()],
+        args: vec!["nope".into()],
+    };
+    assert!(client.mbean_invoke(bad).await.unwrap_err().to_string().contains("NumberFormatException"));
+
+    let set = |value: &str| v1::MBeanSetRequest {
+        name: "java.lang:type=Memory".into(),
+        attribute: "Verbose".into(),
+        value: value.into(),
+    };
+    client.mbean_set(set("false")).await.unwrap();
+    assert!(client.mbean_set(set("maybe")).await.is_err());
+
+    let track = |enabled| v1::MBeanTrackRequest {
+        name: "java.lang:type=Memory".into(),
+        attribute: "HeapMemoryUsage".into(),
+        item: "used".into(),
+        label: String::new(),
+        unit: 1,
+        enabled,
+    };
+    let tracked = client.mbean_track(track(true)).await.unwrap();
+    let key = "mbean:java.lang:type=Memory#HeapMemoryUsage.used";
+    assert!(tracked.iter().any(|t| t.key == key && t.label == "HeapMemoryUsage.used (Memory)"));
+    wait_for(client, "tracked MBean telemetry", |p| p.telemetry(key).is_some_and(|s| !s.value.is_empty()))
+        .await;
+    assert!(client.mbean_track(track(false)).await.unwrap().is_empty());
+    assert!(client.mbean_list("").await.unwrap().tracked.is_empty());
+}
+
 async fn wait_for(client: &LinkClient, what: &str, cond: impl Fn(&Profile) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -190,6 +253,7 @@ async fn exercise(client: &LinkClient, dir: &Path) {
     wait_for(client, "monitor contention", |p| has_frame(p, SampleKind::Monitor, "Workload.contend")).await;
     check_locks_and_virtual_threads(client).await;
     check_triggers(client).await;
+    check_mbeans(client).await;
     {
         let p = client.profile();
         let p = p.read();

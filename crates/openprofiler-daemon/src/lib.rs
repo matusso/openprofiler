@@ -17,6 +17,7 @@ pub mod ide;
 pub mod insights;
 pub mod live;
 pub mod loaders;
+pub mod mbeans;
 pub mod mcp;
 pub mod query;
 pub mod save;

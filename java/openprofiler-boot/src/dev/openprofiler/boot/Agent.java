@@ -96,6 +96,29 @@ public final class Agent {
         return Dumps.threadDump();
     }
 
+    // ---- MBean browser (line formats documented in MBeans) -------------------------------------
+
+    public static String[] mbeanList(String pattern) {
+        return MBeans.list(pattern);
+    }
+
+    public static String[] mbeanGet(String name) {
+        return MBeans.get(name);
+    }
+
+    public static String[] mbeanInvoke(String name, String operation, String[] signature, String[] args) {
+        return MBeans.invoke(name, operation, signature, args);
+    }
+
+    public static String[] mbeanSet(String name, String attribute, String value) {
+        return MBeans.set(name, attribute, value);
+    }
+
+    public static String[] mbeanTrack(String name, String attribute, String item, String label, int unit,
+                                      boolean enabled) {
+        return MBeans.track(name, attribute, item, label, unit, enabled);
+    }
+
     // ---- used by the Controller API ------------------------------------------------------------
 
     static void bookmark(String label, String color) {

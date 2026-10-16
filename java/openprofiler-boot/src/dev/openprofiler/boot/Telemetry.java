@@ -8,6 +8,7 @@ import java.lang.management.MemoryUsage;
 import java.lang.management.OperatingSystemMXBean;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.List;
 
 /** Once-per-second MXBean sampler that pushes rows into the native telemetry ring. */
@@ -35,6 +36,7 @@ final class Telemetry implements Runnable {
     private long lastGcTime = -1;
     private long lastWall;
     private long lastAllocated = -1;
+    private int declaredVersion = -1;
 
     static void startThread() {
         Thread t = new Thread(new Telemetry(), "OpenProfiler Telemetry");
@@ -82,7 +84,7 @@ final class Telemetry implements Runnable {
     @Override
     public void run() {
         try {
-            Agent.telemetryKeys0(KEYS, LABELS, UNITS);
+            declare();
         } catch (Throwable t) {
             return;
         }
@@ -103,7 +105,28 @@ final class Telemetry implements Runnable {
         }
     }
 
+    /** Declares the fixed columns followed by the tracked MBean attributes (append-only). */
+    private void declare() {
+        List<MBeans.Tracked> tracked = MBeans.TRACKED;
+        int version = MBeans.version;
+        int n = KEYS.length + tracked.size();
+        String[] keys = Arrays.copyOf(KEYS, n);
+        String[] labels = Arrays.copyOf(LABELS, n);
+        int[] units = Arrays.copyOf(UNITS, n);
+        for (int i = KEYS.length; i < n; i++) {
+            MBeans.Tracked t = tracked.get(i - KEYS.length);
+            keys[i] = t.key;
+            labels[i] = t.label;
+            units[i] = t.unit;
+        }
+        Agent.telemetryKeys0(keys, labels, units);
+        declaredVersion = version;
+    }
+
     private void sample() {
+        if (declaredVersion != MBeans.version) {
+            declare();
+        }
         long now = System.currentTimeMillis() * 1_000_000L;
         long wall = System.nanoTime();
         MemoryUsage heap = memory.getHeapMemoryUsage();
@@ -135,6 +158,15 @@ final class Telemetry implements Runnable {
             threads.getThreadCount(), threads.getDaemonThreadCount(), classes.getLoadedClassCount(),
             pcpu >= 0 ? pcpu * 100.0 : Double.NaN, scpu >= 0 ? scpu * 100.0 : Double.NaN, allocRate,
         };
+        List<MBeans.Tracked> tracked = MBeans.TRACKED;
+        if (!tracked.isEmpty()) {
+            int base = row.length;
+            row = Arrays.copyOf(row, base + tracked.size());
+            for (int i = 0; i < tracked.size(); i++) {
+                MBeans.Tracked t = tracked.get(i);
+                row[base + i] = t.active ? t.sample() : Double.NaN;
+            }
+        }
         Agent.telemetry0(now, row);
     }
 }
