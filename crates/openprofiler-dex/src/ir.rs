@@ -26,6 +26,49 @@ impl MethodRef {
     }
 }
 
+/// A lambda or method reference created by `invokedynamic` through `LambdaMetafactory`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Lambda {
+    /// Functional interface descriptor.
+    pub iface: Arc<str>,
+    /// Name of the interface method the lambda implements.
+    pub method: Arc<str>,
+    /// Parameter descriptors of that method (as instantiated at the call site).
+    pub params: Arc<[String]>,
+    /// Its return descriptor, as instantiated.
+    pub ret: Arc<str>,
+    /// The implementation method (a synthetic `lambda$...` method or a referenced one).
+    pub target: MethodRef,
+    /// Method handle kind of the target (JVMS §4.4.8): 5 virtual, 6 static, 7 special, 8 new,
+    /// 9 interface.
+    pub kind: u8,
+}
+
+impl Lambda {
+    pub const NEW: u8 = 8;
+    pub const STATIC: u8 = 6;
+
+    /// Whether the target takes a receiver (the first captured value or lambda parameter).
+    pub fn has_receiver(&self) -> bool {
+        matches!(self.kind, 5 | 7 | 9)
+    }
+}
+
+/// A resolved `invokedynamic` call site.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallSite {
+    Lambda(Arc<Lambda>),
+    /// Any other bootstrap method: printed as a call of `name`.
+    Dynamic {
+        name: Arc<str>,
+        /// Descriptor of the class declaring the bootstrap method.
+        owner: Arc<str>,
+        bootstrap: Arc<str>,
+        params: Arc<[String]>,
+        ret: Arc<str>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvokeKind {
     Virtual,
@@ -172,6 +215,8 @@ pub enum Expr {
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     /// The caught exception at a handler entry.
     CaughtException(Option<Arc<str>>),
+    /// A lambda or method reference with its captured values.
+    Lambda(Arc<Lambda>, Vec<Expr>),
 }
 
 impl Expr {
@@ -208,7 +253,10 @@ impl Expr {
             | Expr::ArrayLen(a)
             | Expr::IGet(a, _)
             | Expr::NewArray(_, a) => a.visit(f),
-            Expr::Invoke(_, _, args) | Expr::New(_, args) | Expr::ArrayLit(_, args) => {
+            Expr::Invoke(_, _, args)
+            | Expr::New(_, args)
+            | Expr::ArrayLit(_, args)
+            | Expr::Lambda(_, args) => {
                 for a in args {
                     a.visit(f);
                 }
@@ -237,7 +285,10 @@ impl Expr {
             | Expr::ArrayLen(a)
             | Expr::IGet(a, _)
             | Expr::NewArray(_, a) => a.visit_mut(f),
-            Expr::Invoke(_, _, args) | Expr::New(_, args) | Expr::ArrayLit(_, args) => {
+            Expr::Invoke(_, _, args)
+            | Expr::New(_, args)
+            | Expr::ArrayLit(_, args)
+            | Expr::Lambda(_, args) => {
                 for a in args {
                     a.visit_mut(f);
                 }
@@ -265,6 +316,7 @@ impl Expr {
                     | Expr::NewArray(..)
                     | Expr::ArrayLit(..)
                     | Expr::CaughtException(_)
+                    | Expr::Lambda(..)
                     | Expr::Bin(BinOp::Div | BinOp::Rem, ..)
             ) {
                 pure = false;
@@ -287,6 +339,7 @@ impl Expr {
             | Expr::NewArray(..)
             | Expr::ArrayLit(..)
             | Expr::CaughtException(_)
+            | Expr::Lambda(..)
             | Expr::Bin(BinOp::Div | BinOp::Rem, ..) => free = false,
             _ => {}
         });

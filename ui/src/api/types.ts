@@ -445,6 +445,8 @@ export interface NavigateRequest {
 export interface CodeSummary {
   /** Decompiler name and version (`openprofiler-dex 0.1.0`). */
   engine: string;
+  /** `jvm` for class files (the low-level view is JVM bytecode), `dex` for Android code. */
+  format?: "dex" | "jvm";
   classes: number;
   packages: number;
   resources: number;

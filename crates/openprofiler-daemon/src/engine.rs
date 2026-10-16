@@ -23,7 +23,8 @@ pub enum SessionKind {
     Jfr,
     Snapshot,
     Live,
-    /// An Android app (`.apk`, `.dex`, ...) opened in the decompiler.
+    /// Code opened in the decompiler: an Android app (`.apk`, `.dex`, ...) or JVM bytecode
+    /// (`.jar`, `.class`, ...).
     Dex,
 }
 
@@ -269,12 +270,17 @@ pub enum FileFormat {
     Recording,
     /// Dalvik executable.
     Dex,
-    /// Android app container with `classes*.dex`: `.apk`, `.xapk`, `.apks`, `.aab`, ...
+    /// JVM class file.
+    Class,
+    /// Zip container of code for the decompiler: Android apps with `classes*.dex` (`.apk`,
+    /// `.xapk`, `.apks`, `.aab`, ...) or JVM archives with class files (`.jar`, `.war`, `.ear`,
+    /// `.jmod`, `.aar`).
     Archive,
 }
 
-/// Zip-based Android containers the decompiler accepts.
-const ARCHIVE_EXTENSIONS: &[&str] = &["apk", "apks", "apkm", "xapk", "aab", "zip"];
+/// Zip-based containers the decompiler accepts.
+const ARCHIVE_EXTENSIONS: &[&str] =
+    &["apk", "apks", "apkm", "xapk", "aab", "zip", "jar", "war", "ear", "aar", "jmod"];
 
 pub fn detect_format(path: &Path) -> Result<FileFormat> {
     use std::io::Read;
@@ -300,17 +306,20 @@ pub fn detect_format(path: &Path) -> Result<FileFormat> {
     if head.starts_with(b"dex\n") {
         return Ok(FileFormat::Dex);
     }
+    if openprofiler_dex::jvm::is_class(head) {
+        return Ok(FileFormat::Class);
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if head.starts_with(b"PK\x03\x04") && ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
+    // A .jmod is a zip behind a `JM` header.
+    if (head.starts_with(b"PK\x03\x04") || head.starts_with(b"JM\x01\x00"))
+        && ARCHIVE_EXTENSIONS.contains(&ext.as_str())
+    {
         return Ok(FileFormat::Archive);
     }
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    if matches!(ext.as_str(), "jar" | "aar" | "class" | "war") {
-        bail!("{name}: JVM bytecode is not supported; the decompiler reads Android .apk and .dex files");
-    }
     bail!(
         "unrecognized file format: {name} (expected .hprof, .hprof.gz, .jfr, .opsnap, \
-         or .apk / .dex for the decompiler)"
+         or for the decompiler .apk / .dex / .jar / .class)"
     )
 }
 
@@ -445,7 +454,7 @@ impl Engine {
             FileFormat::Hprof | FileFormat::HprofGz => SessionKind::Hprof,
             FileFormat::Jfr => SessionKind::Jfr,
             FileFormat::Snapshot | FileFormat::Recording => SessionKind::Snapshot,
-            FileFormat::Dex | FileFormat::Archive => SessionKind::Dex,
+            FileFormat::Dex | FileFormat::Class | FileFormat::Archive => SessionKind::Dex,
         };
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let session = self.new_session(kind, &name, Some(path.clone()));

@@ -102,18 +102,21 @@ enum Cmd {
         #[arg(short, long, default_value = "demo.opsnap")]
         output: PathBuf,
     },
-    /// Decompile an Android app (.apk, .dex, .xapk, .apks, .aab) to Java.
+    /// Decompile an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war,
+    /// .ear, .jmod, .class) to Java.
     ///
     /// Without CLASS, lists all classes; with --output, writes every class to a directory.
     Decompile {
         file: PathBuf,
-        /// Write all classes (`.java`, or `.smali` with --smali) under this directory.
+        /// Write all classes (`.java`, or `.smali` / `.bytecode` with --smali) under this
+        /// directory.
         #[arg(short, long, conflicts_with_all = ["class", "search"])]
         output: Option<PathBuf>,
         /// Fully qualified class name to print.
         class: Option<String>,
-        /// Print smali (Dalvik bytecode) instead of Java.
-        #[arg(long)]
+        /// Print the low-level view instead of Java: smali for Android code, JVM bytecode for
+        /// class files.
+        #[arg(long, visible_alias = "bytecode")]
         smali: bool,
         /// Search class, method and field names instead.
         #[arg(long, conflicts_with = "class")]
@@ -447,7 +450,11 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
             if let Some(dir) = output {
                 let program = s.decompiler().context("not a decompiler session")?.program;
                 let view = if smali { openprofiler_dex::View::Smali } else { openprofiler_dex::View::Java };
-                let ext = if smali { "smali" } else { "java" };
+                let ext = match (smali, program.is_jvm()) {
+                    (false, _) => "java",
+                    (true, false) => "smali",
+                    (true, true) => "bytecode",
+                };
                 let started = std::time::Instant::now();
                 let written: Result<Vec<usize>> = program
                     .top_levels

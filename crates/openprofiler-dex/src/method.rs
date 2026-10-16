@@ -152,7 +152,34 @@ fn def_use(dex: &DexFile, i: &Insn) -> (Option<Def>, Uses) {
             }
             (None, uses)
         }
-        0xfc | 0xfd => (None, r.iter().map(|&x| (x, false)).collect()),
+        0xfc | 0xfd => match dex.call_site(i.index) {
+            Some(cs) => {
+                let params: Vec<&str> = match cs {
+                    CallSite::Lambda(l) => {
+                        // Captured values: the receiver (if any) and leading target parameters.
+                        let mut p: Vec<&str> = vec![];
+                        if l.has_receiver() {
+                            p.push(&l.target.class);
+                        }
+                        p.extend(l.target.params.iter().map(String::as_str));
+                        p
+                    }
+                    CallSite::Dynamic { params, .. } => params.iter().map(String::as_str).collect(),
+                };
+                let mut uses = vec![];
+                let mut k = 0;
+                for p in params {
+                    if k >= r.len() {
+                        break;
+                    }
+                    let wide = types::is_wide(p);
+                    uses.push((r[k], wide));
+                    k += if wide { 2 } else { 1 };
+                }
+                (None, uses)
+            }
+            None => (None, r.iter().map(|&x| (x, false)).collect()),
+        },
         0x7b..=0x8f => {
             // (def wide, use wide) per unary op.
             let (dw, uw) = match i.op {
@@ -282,22 +309,23 @@ impl UnionFind {
 #[allow(clippy::needless_range_loop)]
 pub fn lift(m: &MethodInput<'_>) -> Result<Body> {
     let dex = m.dex;
-    if m.code.insns.len() > MAX_CODE_UNITS {
-        bail!("method too large ({} code units)", m.code.insns.len());
+    let units = m.code.units();
+    if units > MAX_CODE_UNITS {
+        bail!("method too large ({units} code units)");
     }
-    let (insns, payloads) = insn::decode_all(&m.code.insns)?;
+    let (insns, payloads) = m.code.decode()?;
     if insns.is_empty() {
         bail!("empty method body");
     }
     let payload_at: HashMap<u32, &Payload> = payloads.iter().map(|(a, p)| (*a, p)).collect();
-    let mut index_of = vec![u32::MAX; m.code.insns.len() + 1];
+    let mut index_of = vec![u32::MAX; units + 1];
     for (k, i) in insns.iter().enumerate() {
         index_of[i.addr as usize] = k as u32;
     }
     let at = |addr: u32| -> Option<usize> {
         index_of.get(addr as usize).copied().filter(|&k| k != u32::MAX).map(|k| k as usize)
     };
-    let next_addr = |k: usize| insns.get(k + 1).map_or(m.code.insns.len() as u32, |i| i.addr);
+    let next_addr = |k: usize| insns.get(k + 1).map_or(units as u32, |i| i.addr);
 
     // ---- basic blocks
     let mut leader = vec![false; insns.len()];
@@ -861,7 +889,28 @@ pub fn lift(m: &MethodInput<'_>) -> Result<Body> {
                     pending = Some(Expr::Invoke(kind, method_ref(dex, i.index), args));
                 }
                 0xfc | 0xfd => {
-                    let args = (0..use_var[k].len()).map(u).collect();
+                    let args: Vec<Expr> = (0..use_var[k].len()).map(u).collect();
+                    match dex.call_site(i.index) {
+                        Some(CallSite::Lambda(l)) => {
+                            pending = Some(Expr::Lambda(l.clone(), args));
+                            continue;
+                        }
+                        Some(CallSite::Dynamic { name, owner, params, ret, .. }) => {
+                            let mref = MethodRef {
+                                class: if owner.is_empty() {
+                                    "Ljava/lang/invoke/CallSite;".into()
+                                } else {
+                                    owner.clone()
+                                },
+                                name: name.clone(),
+                                params: params.clone(),
+                                ret: ret.clone(),
+                            };
+                            pending = Some(Expr::Invoke(InvokeKind::Custom, mref, args));
+                            continue;
+                        }
+                        None => {}
+                    }
                     let mref = MethodRef {
                         class: "Ljava/lang/invoke/CallSite;".into(),
                         name: format!("callSite{}", i.index).into(),
@@ -926,6 +975,8 @@ pub fn lift(m: &MethodInput<'_>) -> Result<Body> {
     }
 
     let mut body = Body { blocks, entry: 0, vars, params, this, tries, ret };
+    propagate_copies(&mut body);
+    remove_dead(&mut body);
     merge_constructors(&mut body);
     infer_types(&mut body);
     propagate_constants(&mut body);
@@ -1095,6 +1146,7 @@ pub fn expr_type(e: &Expr, vars: &[VarInfo]) -> Option<String> {
         Expr::New(m, _) => m.class.to_string(),
         Expr::NewArray(t, _) | Expr::ArrayLit(t, _) => t.to_string(),
         Expr::CaughtException(t) => t.as_deref().unwrap_or("Ljava/lang/Throwable;").to_owned(),
+        Expr::Lambda(l, _) => l.iface.to_string(),
     })
 }
 
@@ -1160,9 +1212,18 @@ fn use_hints(e: &Expr, hints: &mut [Hints]) {
                 want(a, p, hints);
             }
         }
-        Expr::Invoke(kind, m, args) if *kind != InvokeKind::Custom => {
+        Expr::Lambda(l, caps) => {
+            let mut params: Vec<&str> = l.target.params.iter().map(String::as_str).collect();
+            if l.has_receiver() {
+                params.insert(0, &l.target.class);
+            }
+            for (a, p) in caps.iter().zip(params) {
+                want(a, p, hints);
+            }
+        }
+        Expr::Invoke(kind, m, args) => {
             let mut params: Vec<&str> = m.params.iter().map(String::as_str).collect();
-            if *kind != InvokeKind::Static {
+            if !matches!(kind, InvokeKind::Static | InvokeKind::Custom) {
                 params.insert(0, &m.class);
             }
             for (a, p) in args.iter().zip(params) {
@@ -1368,6 +1429,26 @@ fn after(a: &EvalPath, b: &EvalPath) -> bool {
 /// definition is allowed when every conflicting statement in between still runs after it.
 fn inline(body: &mut Body) {
     let st = stats(body);
+    // Values captured by lambdas whose bodies are printed inline stay variables: the body refers
+    // to them by name.
+    let mut captured = std::collections::HashSet::new();
+    for blk in &body.blocks {
+        for s in &blk.stmts {
+            s.visit_exprs(&mut |e| {
+                e.visit(&mut |x| {
+                    if let Expr::Lambda(l, caps) = x
+                        && l.target.name.starts_with("lambda$")
+                    {
+                        for c in caps {
+                            if let Expr::Var(v) = c {
+                                captured.insert(*v);
+                            }
+                        }
+                    }
+                })
+            });
+        }
+    }
     let keep = |v: VarId, body: &Body| {
         let vi = &body.vars[v as usize];
         vi.name.is_some() || vi.is_this || vi.param.is_some()
@@ -1411,7 +1492,14 @@ fn inline(body: &mut Body) {
                     let Stmt::Assign(_, e) = &body.blocks[b].stmts[d] else { continue };
                     // `it.next()` may only merge into a cast of it (`x = (T) it.next()`).
                     let into_cast = matches!(body.blocks[b].stmts.get(u), Some(Stmt::Assign(_, Expr::Cast(_, x))) if **x == Expr::Var(v));
+                    // A captured copy may only become its source when that is effectively final.
+                    let final_source = |x: VarId| {
+                        let xv = &body.vars[x as usize];
+                        st[x as usize].defs == 1
+                            || (st[x as usize].defs == 0 && (xv.is_this || xv.param.is_some()))
+                    };
                     if matches!(e, Expr::CaughtException(_))
+                        || (captured.contains(&v) && !matches!(e, Expr::Var(x) if final_source(*x)))
                         || is_placeholder(e).is_some()
                         || (is_iterator_next(e) && !into_cast)
                     {
@@ -1603,6 +1691,94 @@ fn merge_array_init(body: &mut Body) {
     }
 }
 
+/// A temporary that only copies another variable (stack `dup`s, register moves) is replaced by
+/// that variable when the source can't change in between: a parameter or `this` that is never
+/// assigned, or a single definition earlier in the same block.
+fn propagate_copies(body: &mut Body) {
+    for _round in 0..4 {
+        let st = stats(body);
+        let source_like = |x: VarId| {
+            let vi = &body.vars[x as usize];
+            vi.is_this || vi.param.is_some()
+        };
+        let mut repl: HashMap<VarId, VarId> = HashMap::new();
+        for (b, blk) in body.blocks.iter().enumerate() {
+            for (k, s) in blk.stmts.iter().enumerate() {
+                let Stmt::Assign(t, Expr::Var(x)) = s else { continue };
+                let (t, x) = (*t, *x);
+                let tv = &body.vars[t as usize];
+                if t == x || st[t as usize].defs != 1 || tv.name.is_some() || tv.is_this || tv.param.is_some()
+                {
+                    continue;
+                }
+                let xs = &st[x as usize];
+                let ok = match xs.defs {
+                    0 => source_like(x),
+                    1 => xs.def_at.is_some_and(|(xb, xk)| xb == b && xk < k),
+                    _ => false,
+                };
+                if ok {
+                    repl.insert(t, x);
+                }
+            }
+        }
+        if repl.is_empty() {
+            return;
+        }
+        let resolve = |mut v: VarId| {
+            for _ in 0..16 {
+                match repl.get(&v) {
+                    Some(&x) => v = x,
+                    None => break,
+                }
+            }
+            v
+        };
+        let mut f = |e: &mut Expr| {
+            if let Expr::Var(v) = e {
+                *v = resolve(*v);
+            }
+        };
+        for blk in &mut body.blocks {
+            blk.stmts.retain(|s| !matches!(s, Stmt::Assign(t, Expr::Var(_)) if repl.contains_key(t)));
+            for s in &mut blk.stmts {
+                s.visit_exprs_mut(&mut |x| x.visit_mut(&mut f));
+            }
+            blk.term.visit_exprs_mut(&mut |x| x.visit_mut(&mut f));
+        }
+    }
+}
+
+/// Drops assignments to unnamed temporaries nobody reads; a call whose result is unused stays as
+/// a statement.
+fn remove_dead(body: &mut Body) {
+    for _round in 0..4 {
+        let st = stats(body);
+        let mut changed = false;
+        for blk in &mut body.blocks {
+            blk.stmts.retain_mut(|s| {
+                let Stmt::Assign(v, e) = s else { return true };
+                let vi = &body.vars[*v as usize];
+                if st[*v as usize].uses != 0 || vi.name.is_some() || vi.is_this || vi.param.is_some() {
+                    return true;
+                }
+                if e.is_pure() {
+                    changed = true;
+                    return false;
+                }
+                if matches!(e, Expr::Invoke(..)) {
+                    *s = Stmt::Expr(std::mem::replace(e, Expr::lit(0)));
+                    changed = true;
+                }
+                true
+            });
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
 /// Local rewrites that need types: `b ^ 1` → `!b`, `x + -1` → `x - 1`.
 fn simplify(body: &mut Body) {
     let vars = body.vars.clone();
@@ -1611,6 +1787,10 @@ fn simplify(body: &mut Body) {
             match (*op, &**b) {
                 (BinOp::Xor, Expr::Lit { bits: 1, .. }) if expr_type(a, &vars).as_deref() == Some("Z") => {
                     *e = Expr::Not(a.clone());
+                }
+                // javac has no `not`: `~x` is `x ^ -1`.
+                (BinOp::Xor, Expr::Lit { bits: -1, .. }) if matches!(t, Some("I" | "J")) => {
+                    *e = Expr::BitNot(a.clone());
                 }
                 (BinOp::Add | BinOp::Sub, Expr::Lit { bits, wide })
                     if *bits < 0 && *bits != i64::MIN && matches!(t, Some("I" | "J")) =>
@@ -1800,11 +1980,30 @@ fn simplify_cond(cond: &mut Expr) {
         && matches!(**r, Expr::Lit { bits: 0, .. })
         && let Expr::Cmp(kind, a, b) = &**l
     {
-        let ty = match *kind {
-            "cmp-long" => "J",
-            "cmpl-float" | "cmpg-float" => "F",
-            _ => "D",
+        // Three-way result for NaN operands: cmpl gives -1, cmpg 1.
+        let (ty, nan) = match *kind {
+            "cmp-long" => ("J", None),
+            "cmpl-float" => ("F", Some(-1)),
+            "cmpg-float" => ("F", Some(1)),
+            "cmpl-double" => ("D", Some(-1)),
+            _ => ("D", Some(1)),
         };
-        *cond = Expr::Bin(*op, a.clone(), b.clone(), Some(ty));
+        let holds = |op: BinOp, x: i32| match op {
+            BinOp::Lt => x < 0,
+            BinOp::Le => x <= 0,
+            BinOp::Gt => x > 0,
+            BinOp::Ge => x >= 0,
+            BinOp::Eq => x == 0,
+            _ => x != 0,
+        };
+        // Java's float comparisons are false for NaN, except `!=`. When the bytecode's test
+        // disagrees for NaN, it is the negation of the opposite comparison.
+        let direct = nan.is_none_or(|n| holds(*op, n) == (*op == BinOp::Ne));
+        *cond = if direct {
+            Expr::Bin(*op, a.clone(), b.clone(), Some(ty))
+        } else {
+            let opp = op.negate().unwrap_or(*op);
+            Expr::Not(Box::new(Expr::Bin(opp, a.clone(), b.clone(), Some(ty))))
+        };
     }
 }

@@ -1,9 +1,12 @@
 //! DEX file parser: the index tables, class data, code items, debug info, encoded values and
 //! annotations (https://source.android.com/docs/core/runtime/dex-format).
 
+use crate::insn::{Insn, Payload};
+use crate::ir::CallSite;
 use crate::read::{Reader, u32_at};
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub const NO_INDEX: u32 = 0xffff_ffff;
 
@@ -102,6 +105,32 @@ pub struct CodeItem {
     pub insns: Vec<u16>,
     pub tries: Vec<TryItem>,
     pub debug_off: u32,
+    /// Code translated from another bytecode (JVM class files): already decoded instructions
+    /// with their debug info, used instead of `insns`.
+    pub prebuilt: Option<Arc<Prebuilt>>,
+}
+
+#[derive(Debug, Default)]
+pub struct Prebuilt {
+    pub insns: Vec<Insn>,
+    pub payloads: Vec<(u32, Payload)>,
+    pub debug: DebugInfo,
+    /// Code size in units (one per instruction and payload).
+    pub units: u32,
+}
+
+impl CodeItem {
+    pub fn decode(&self) -> Result<(Vec<Insn>, Vec<(u32, Payload)>)> {
+        match &self.prebuilt {
+            Some(p) => Ok((p.insns.clone(), p.payloads.clone())),
+            None => crate::insn::decode_all(&self.insns),
+        }
+    }
+
+    /// Code size in units; addresses are below it.
+    pub fn units(&self) -> usize {
+        self.prebuilt.as_ref().map_or(self.insns.len(), |p| p.units as usize)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +208,10 @@ pub struct DexFile {
     pub fields: Vec<FieldId>,
     pub methods: Vec<MethodId>,
     pub classes: Vec<ClassDef>,
+    /// Resolved `invokedynamic` call sites (JVM class files only).
+    pub call_sites: Vec<CallSite>,
+    /// Class files this program model was built from; offsets then index its tables.
+    pub(crate) jvm: Option<Box<crate::jvm::Classes>>,
 }
 
 fn table(data: &[u8], header_off: usize) -> Result<(usize, usize)> {
@@ -262,7 +295,47 @@ impl DexFile {
                 static_values_off: r.u32()?,
             });
         }
-        Ok(Self { data, name: name.to_owned(), version, strings, types, protos, fields, methods, classes })
+        Ok(Self {
+            data,
+            name: name.to_owned(),
+            version,
+            strings,
+            types,
+            protos,
+            fields,
+            methods,
+            classes,
+            call_sites: vec![],
+            jvm: None,
+        })
+    }
+
+    /// A program model built from JVM class files (see [`crate::jvm`]).
+    pub(crate) fn from_jvm(
+        name: &str,
+        pools: crate::jvm::Pools,
+        classes: Vec<ClassDef>,
+        call_sites: Vec<CallSite>,
+        jvm: crate::jvm::Classes,
+    ) -> Self {
+        Self {
+            data: vec![],
+            name: name.to_owned(),
+            version: 0,
+            strings: pools.strings,
+            types: pools.types,
+            protos: pools.protos,
+            fields: pools.fields,
+            methods: pools.methods,
+            classes,
+            call_sites,
+            jvm: Some(Box::new(jvm)),
+        }
+    }
+
+    /// Whether this model was built from JVM class files.
+    pub fn is_jvm(&self) -> bool {
+        self.jvm.is_some()
     }
 
     pub fn string(&self, idx: u32) -> &str {
@@ -298,7 +371,14 @@ impl DexFile {
         s
     }
 
+    pub fn call_site(&self, idx: u32) -> Option<&CallSite> {
+        self.call_sites.get(idx as usize)
+    }
+
     pub fn class_data(&self, c: &ClassDef) -> Result<ClassData> {
+        if let Some(j) = &self.jvm {
+            return Ok(j.class_data(c.class_data_off));
+        }
         if c.class_data_off == 0 {
             return Ok(ClassData::default());
         }
@@ -333,6 +413,9 @@ impl DexFile {
     }
 
     pub fn code(&self, off: u32) -> Result<CodeItem> {
+        if let Some(j) = &self.jvm {
+            return j.code(off);
+        }
         let mut r = Reader::at(&self.data, off as usize)?;
         let registers = r.u16()?;
         let ins = r.u16()?;
@@ -365,10 +448,13 @@ impl DexFile {
                 tries.push(TryItem { start, count, handlers });
             }
         }
-        Ok(CodeItem { registers, ins, outs, insns, tries, debug_off })
+        Ok(CodeItem { registers, ins, outs, insns, tries, debug_off, prebuilt: None })
     }
 
     pub fn debug_info(&self, code: &CodeItem) -> Result<DebugInfo> {
+        if let Some(p) = &code.prebuilt {
+            return Ok(p.debug.clone());
+        }
         if code.debug_off == 0 {
             return Ok(DebugInfo::default());
         }
@@ -442,6 +528,9 @@ impl DexFile {
         if off == 0 {
             return Ok(vec![]);
         }
+        if let Some(j) = &self.jvm {
+            return Ok(j.static_values(off));
+        }
         encoded_array(&mut Reader::at(&self.data, off as usize)?, 0)
     }
 
@@ -449,6 +538,9 @@ impl DexFile {
         let mut out = Annotations::default();
         if c.annotations_off == 0 {
             return Ok(out);
+        }
+        if let Some(j) = &self.jvm {
+            return Ok(j.annotations(c.annotations_off));
         }
         let mut r = Reader::at(&self.data, c.annotations_off as usize)?;
         let class_off = r.u32()?;

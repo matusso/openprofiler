@@ -533,6 +533,13 @@ function ClassPane({
   const [find, setFind] = useState("");
   const [findIndex, setFindIndex] = useState(0);
   const [findCount, setFindCount] = useState(0);
+  const summary = useQuery({
+    queryKey: sk(sid, "code", "summary"),
+    queryFn: () => client.codeSummary(sid),
+    staleTime: Infinity,
+  });
+  // The low-level view is smali for Android code and JVM bytecode for class files.
+  const jvm = summary.data?.format === "jvm";
   const q = useQuery<CodeClassResponse>({
     queryKey: sk(sid, "code", "class", loc.cls, loc.view, loc.view === "java" ? (loc.node ?? null) : null),
     queryFn: () =>
@@ -576,7 +583,7 @@ function ClassPane({
             Java
           </button>
           <button aria-pressed={loc.view === "smali"} onClick={() => setView("smali")}>
-            Smali
+            {jvm ? "Bytecode" : "Smali"}
           </button>
         </span>
         <button
@@ -598,7 +605,9 @@ function ClassPane({
           disabled={!data}
           title="Download source"
           aria-label="Download source"
-          onClick={() => data && download(`${name}.${loc.view}`, data.code)}
+          onClick={() =>
+            data && download(`${name}.${loc.view === "smali" && jvm ? "bytecode.txt" : loc.view}`, data.code)
+          }
         >
           <IconDownload />
         </button>
@@ -753,8 +762,9 @@ export function CodeView() {
       <div className="empty">
         <h2>No code to decompile</h2>
         <p>
-          Open an Android app (<code>.apk</code>, <code>.xapk</code>, <code>.aab</code>) or a{" "}
-          <code>.dex</code> file to browse it as Java source.
+          Open an Android app (<code>.apk</code>, <code>.xapk</code>, <code>.aab</code>), a <code>.dex</code>{" "}
+          file or Java bytecode (<code>.jar</code>, <code>.war</code>, <code>.class</code>) to browse it as
+          Java source.
         </p>
       </div>
     );
@@ -767,8 +777,13 @@ export function CodeView() {
         {sm && (
           <span className="muted">
             {formatCount(sm.classes)} classes · {formatCount(sm.packages)} packages ·{" "}
-            {formatCount(sm.resources)} resources · {sm.dex_files.length} dex{" "}
-            {sm.dex_files.length === 1 ? "file" : "files"}
+            {formatCount(sm.resources)} resources
+            {sm.format !== "jvm" && (
+              <>
+                {" "}
+                · {sm.dex_files.length} dex {sm.dex_files.length === 1 ? "file" : "files"}
+              </>
+            )}
           </span>
         )}
         {sm && sm.warnings.length > 0 && (

@@ -393,7 +393,7 @@ impl S<'_> {
         let usable = j != NONE
             && (Some(j) == ctx.stop
                 || (!self.is_frame_target(j, ctx) && !ctx.region.as_ref().is_some_and(|r| !r[j])));
-        let j = if usable && !(Some(j) != ctx.stop && self.can_duplicate(j, Some(ctx))) {
+        let j = if usable && !(Some(j) != ctx.stop && self.can_duplicate(j, None)) {
             Some(j)
         } else {
             // The post-dominator is missing or just a shared exit (return): look for where the
@@ -482,6 +482,27 @@ impl S<'_> {
         })
     }
 
+    /// Whether a block's code can raise an exception (conservatively: anything but pure
+    /// assignments, stores into `this` and returns of pure values).
+    fn may_throw(&self, b: BlockId) -> bool {
+        let blk = &self.body.blocks[b];
+        let is_this = |e: &Expr| matches!(e, Expr::Var(v) if self.body.vars[*v as usize].is_this);
+        let quiet = blk.stmts.iter().all(|s| match s {
+            Stmt::Assign(_, e) => e.is_pure(),
+            Stmt::IPut(o, _, v) => is_this(o) && v.is_pure(),
+            Stmt::Line(_) => true,
+            _ => false,
+        });
+        let term_quiet = match &blk.term {
+            Term::Return(e) => e.as_ref().is_none_or(Expr::is_pure),
+            Term::Throw(_) => false,
+            Term::Goto(_) => true,
+            Term::If { cond, .. } => cond.is_pure(),
+            Term::Switch { value, .. } => value.is_pure(),
+        };
+        !(quiet && term_quiet)
+    }
+
     /// Blocks reachable from `from` without passing through `avoid`.
     fn reach(&self, from: BlockId, avoid: &[BlockId]) -> Vec<bool> {
         let mut set = vec![false; self.succs.len()];
@@ -506,6 +527,20 @@ impl S<'_> {
         let blk = &self.body.blocks[b];
         if blk.stmts.len() > 2 || self.loops[b].is_some() {
             return false;
+        }
+        // A copy inside a try body that the original isn't covered by would have its exceptions
+        // caught there (`throw t` after a try-with-resources cleanup).
+        let uncovered = ctx.is_some_and(|c| c.tries.iter().any(|&r| !self.body.tries[r].blocks.contains(&b)));
+        if uncovered {
+            let quiet = blk.stmts.iter().all(|s| matches!(s, Stmt::Assign(_, e) if e.is_pure()))
+                && match &blk.term {
+                    Term::Return(e) => e.as_ref().is_none_or(Expr::is_pure),
+                    Term::Goto(_) => true,
+                    _ => false,
+                };
+            if !quiet {
+                return false;
+            }
         }
         match blk.term {
             Term::Return(_) | Term::Throw(_) => true,
@@ -834,7 +869,31 @@ impl S<'_> {
 
     fn try_stmt(&mut self, r: usize, ctx: &Ctx, out: &mut Vec<Node>) -> Option<BlockId> {
         let entry = self.try_entry[r];
-        let exit = Some(self.ipdom_exc[entry]).filter(|&e| e != NONE);
+        let covered = &self.body.tries[r].blocks;
+        // Without a post-dominator (handlers that can throw elsewhere), the try still ends where
+        // normal flow from its entry leaves the region, when that is one place...
+        let mut outs: Vec<BlockId> = vec![];
+        let mut seen = vec![false; self.succs.len()];
+        let mut stack = vec![entry];
+        while let Some(b) = stack.pop() {
+            if std::mem::replace(&mut seen[b], true) {
+                continue;
+            }
+            for &s in &self.succs[b] {
+                if covered.contains(&s) {
+                    stack.push(s);
+                } else if !outs.contains(&s) {
+                    outs.push(s);
+                }
+            }
+        }
+        // That code must stay out of the body when a handler's flow comes back to it, or when
+        // it can throw (the handlers would catch it). Otherwise it reads better as the rest of
+        // the body.
+        let fallout = (outs.len() == 1).then(|| outs[0]).filter(|&o| {
+            self.body.tries[r].handlers.iter().any(|h| self.reaches(h.1, o)) || self.may_throw(o)
+        });
+        let exit = Some(self.ipdom_exc[entry]).filter(|&e| e != NONE).or(fallout);
         let exit = match exit {
             // A merge point that is an enclosing frame's target is handled by break/continue.
             Some(e) if Some(e) == ctx.stop || self.is_frame_target(e, ctx) => Some(e),
@@ -1232,8 +1291,19 @@ fn inline_temps_in(
         let Node::Stmt(Stmt::Assign(_, e)) = &nodes[i] else { continue };
         // A pure value can move anywhere into the next statement; others only into a bare use.
         let pure = e.is_pure();
+        let is_v = |x: &Expr| *x == Expr::Var(v);
+        // The value is the first thing the statement evaluates that could observe a difference.
         let direct = matches!(&nodes[i + 1],
-            Node::Return(Some(Expr::Var(x))) | Node::Throw(Expr::Var(x)) | Node::Stmt(Stmt::Assign(_, Expr::Var(x))) if *x == v);
+            Node::Return(Some(Expr::Var(x))) | Node::Throw(Expr::Var(x)) | Node::Stmt(Stmt::Assign(_, Expr::Var(x))) if *x == v)
+            || match &nodes[i + 1] {
+                Node::Stmt(Stmt::IPut(o, _, x)) => is_v(x) && o.is_pure(),
+                Node::Stmt(Stmt::SPut(_, x)) => is_v(x),
+                Node::Stmt(Stmt::APut(a, k, x, _)) => is_v(x) && a.is_pure() && k.is_pure(),
+                Node::Stmt(Stmt::Expr(Expr::Invoke(_, _, args) | Expr::New(_, args))) => {
+                    args.iter().position(is_v).is_some_and(|p| args[..p].iter().all(Expr::is_pure))
+                }
+                _ => false,
+            };
         let next_simple =
             matches!(&nodes[i + 1], Node::Return(Some(_)) | Node::Throw(_) | Node::Stmt(_) | Node::If { .. });
         let mut used_next = std::collections::HashMap::new();
@@ -1245,6 +1315,23 @@ fn inline_temps_in(
             _ => {}
         }
         if used_next.get(&v) != Some(&1) || !(direct || (pure && next_simple)) {
+            continue;
+        }
+        // Lambda bodies printed inline refer to captured values by name.
+        let mut captured = false;
+        let mut find = |x: &Expr| {
+            x.visit(&mut |y| {
+                if let Expr::Lambda(_, caps) = y {
+                    captured |= caps.contains(&Expr::Var(v));
+                }
+            })
+        };
+        match &nodes[i + 1] {
+            Node::Return(Some(x)) | Node::Throw(x) | Node::If { cond: x, .. } => find(x),
+            Node::Stmt(st) => st.visit_exprs(&mut find),
+            _ => {}
+        }
+        if captured {
             continue;
         }
         let Node::Stmt(Stmt::Assign(_, e)) = std::mem::replace(&mut nodes[i], Node::Comment(String::new()))
@@ -1285,6 +1372,9 @@ pub fn dump(body: &Body) -> String {
             let _ = writeln!(o, "    {s:?}");
         }
         let _ = writeln!(o, "    -> {:?}", b.term);
+    }
+    for (i, v) in body.vars.iter().enumerate() {
+        let _ = writeln!(o, "v{i}: {:?} {:?} reg={}", v.name, v.ty, v.reg);
     }
     for (i, t) in body.tries.iter().enumerate() {
         let _ = writeln!(

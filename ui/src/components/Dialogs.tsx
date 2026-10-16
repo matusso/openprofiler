@@ -70,8 +70,9 @@ export function OpenDialog() {
       <p className="muted" style={{ marginTop: 0 }}>
         Supports <code>.opsnap</code> snapshots, <code>.jfr</code> recordings and <code>.hprof</code> heap
         dumps (optionally gzipped). Android apps (<code>.apk</code>, <code>.xapk</code>, <code>.apks</code>,{" "}
-        <code>.aab</code>) and <code>.dex</code> files open in the decompiler. The path is resolved on the
-        machine running the OpenProfiler daemon.
+        <code>.aab</code>), <code>.dex</code> files and Java bytecode (<code>.jar</code>, <code>.war</code>,{" "}
+        <code>.ear</code>, <code>.jmod</code>, <code>.class</code>) open in the decompiler. The path is
+        resolved on the machine running the OpenProfiler daemon.
       </p>
       <div style={{ display: "flex", gap: 8 }}>
         <input

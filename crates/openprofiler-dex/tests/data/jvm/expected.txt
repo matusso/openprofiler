@@ -1,0 +1,34 @@
+Point[x=3, y=-4] 7 true true
+rejected x < 0
+unknown
+weekend
+weekday
+weekday
+weekday
+weekday
+weekday
+weekend
+unknown
+11 6 2
+12.566370614359172 9.0 0.0
+Hello,
+  "World"
+
+[n6, n4, n2, n10]
+{1=2, 2=2, 3=1}
+25 -3
+[m0, m1]
+-4143 9223371968135298789
+[open a, open b, body ab, close b, close a, finally]
+[open bad, open c, body badc, close c, close bad, caught close failed, finally]
+20 -2 -1
+306
+Optional[x] Optional.empty
+7 12
+olleh
+pos7true neg-1false zero2false
+6
+308
+9 null
+anon12
+c=z l=8589934592 d=0.25 o=null len=3!
