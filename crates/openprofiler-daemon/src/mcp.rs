@@ -29,6 +29,7 @@ fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value
 pub fn tools() -> Vec<Value> {
     let kind = json!({ "type": "string", "enum": ["cpu", "wall", "alloc", "monitor", "wait", "io", "exception"], "default": "cpu" });
     let session = json!({ "type": "string", "description": "Session id from load_snapshot/attach/status" });
+    let mbean_server = json!({ "type": "string", "description": "MBean server id from list_mbean_servers; omit for the platform server" });
     vec![
         tool(
             "list_jvms",
@@ -112,21 +113,35 @@ pub fn tools() -> Vec<Value> {
             &["session", "triggers"],
         ),
         tool(
+            "list_mbean_servers",
+            "MBean servers reachable through a live JVM: the platform server (id \"\"), other MBean servers in the JVM, and remote JMX servers connected with connect_jmx. Pass the id as `server` to the other MBean tools.",
+            json!({ "session": session }),
+            &["session"],
+        ),
+        tool(
+            "connect_jmx",
+            "Connect a live JVM to a remote JMX server (from inside that JVM), or disconnect it with enabled=false. The service URL becomes the server id.",
+            json!({ "session": session, "url": { "type": "string", "description": "e.g. service:jmx:rmi:///jndi/rmi://host:9010/jmxrmi" },
+                    "username": { "type": "string" }, "password": { "type": "string" },
+                    "enabled": { "type": "boolean", "default": true } }),
+            &["session", "url"],
+        ),
+        tool(
             "list_mbeans",
-            "List the MBeans of a live JVM (platform MBean server), optionally filtered by an ObjectName pattern such as java.lang:* or *:type=GarbageCollector,*. Also returns the attributes sampled as telemetry.",
-            json!({ "session": session, "pattern": { "type": "string" } }),
+            "List the MBeans of a live JVM (platform MBean server unless `server` is given), optionally filtered by an ObjectName pattern such as java.lang:* or *:type=GarbageCollector,*. Also returns the attributes sampled as telemetry.",
+            json!({ "session": session, "server": mbean_server, "pattern": { "type": "string" } }),
             &["session"],
         ),
         tool(
             "get_mbean",
-            "Attributes (with current values) and operations of one MBean in a live JVM.",
-            json!({ "session": session, "name": { "type": "string", "description": "ObjectName, e.g. java.lang:type=Memory" } }),
+            "Attributes (with current values), operations and declared notifications of one MBean in a live JVM.",
+            json!({ "session": session, "server": mbean_server, "name": { "type": "string", "description": "ObjectName, e.g. java.lang:type=Memory" } }),
             &["session", "name"],
         ),
         tool(
             "invoke_mbean",
             "Invoke an MBean operation in a live JVM. signature lists the parameter types (from get_mbean), args the values as strings.",
-            json!({ "session": session, "name": { "type": "string" }, "operation": { "type": "string" },
+            json!({ "session": session, "server": mbean_server, "name": { "type": "string" }, "operation": { "type": "string" },
                     "signature": { "type": "array", "items": { "type": "string" } },
                     "args": { "type": "array", "items": { "type": "string" } } }),
             &["session", "name", "operation"],
@@ -134,11 +149,24 @@ pub fn tools() -> Vec<Value> {
         tool(
             "track_mbean",
             "Sample a numeric MBean attribute (or an item of a composite attribute, e.g. HeapMemoryUsage.used) once per second as a telemetry series; enabled=false stops it. The series key can be used in telemetry queries and threshold triggers.",
-            json!({ "session": session, "name": { "type": "string" }, "attribute": { "type": "string" },
+            json!({ "session": session, "server": mbean_server, "name": { "type": "string" }, "attribute": { "type": "string" },
                     "item": { "type": "string" }, "label": { "type": "string" },
                     "unit": { "type": "string", "enum": ["count", "bytes", "nanos", "percent", "per_second"] },
                     "enabled": { "type": "boolean", "default": true } }),
             &["session", "name", "attribute"],
+        ),
+        tool(
+            "subscribe_mbean",
+            "Listen to the notifications of one MBean in a live JVM (e.g. java.lang:type=GarbageCollector,name=G1 Young Generation); enabled=false stops. Read them with mbean_notifications.",
+            json!({ "session": session, "server": mbean_server, "name": { "type": "string" },
+                    "enabled": { "type": "boolean", "default": true } }),
+            &["session", "name"],
+        ),
+        tool(
+            "mbean_notifications",
+            "Notifications received from subscribed MBeans (the agent keeps the last 1000), oldest first, with sequence numbers above `after`. Returns `last` to pass as the next `after`.",
+            json!({ "session": session, "after": { "type": "integer", "default": 0 } }),
+            &["session"],
         ),
         tool(
             "decompile",
@@ -466,8 +494,17 @@ impl McpServer {
                 let req = json!({ "node": args["node"], "limit": args["limit"].as_u64().unwrap_or(100) });
                 crate::decompile::handle(&s, "usages", req)
             }
-            "heap_dump" | "probe_events" | "set_triggers" | "list_mbeans" | "get_mbean" | "invoke_mbean"
-            | "track_mbean" => {
+            "heap_dump"
+            | "probe_events"
+            | "set_triggers"
+            | "list_mbeans"
+            | "get_mbean"
+            | "invoke_mbean"
+            | "track_mbean"
+            | "list_mbean_servers"
+            | "connect_jmx"
+            | "subscribe_mbean"
+            | "mbean_notifications" => {
                 let s = self.session(args, "session")?;
                 let engine = self.engine.clone();
                 let action = match name {
@@ -477,6 +514,10 @@ impl McpServer {
                     "get_mbean" => "mbean",
                     "invoke_mbean" => "mbean-invoke",
                     "track_mbean" => "mbean-track",
+                    "list_mbean_servers" => "mbean-servers",
+                    "connect_jmx" => "mbean-connect",
+                    "subscribe_mbean" => "mbean-subscribe",
+                    "mbean_notifications" => "mbean-notifications",
                     _ => "probe-events",
                 };
                 tokio::runtime::Handle::current()

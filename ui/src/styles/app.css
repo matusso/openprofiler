@@ -1802,3 +1802,38 @@ select {
   max-height: 320px;
   overflow: auto;
 }
+
+.mb-server {
+  max-width: 360px;
+}
+
+.mb-connect {
+  flex-basis: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mb-connect-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mb-notif-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.mb-notif-types {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.mb-row.mb-notif {
+  grid-template-columns: 120px minmax(0, 1fr);
+}

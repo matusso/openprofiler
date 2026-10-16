@@ -1,5 +1,6 @@
-//! MBean browser over the agent link: Query API JSON for `mbeans`, `mbean`, `mbean-invoke`,
-//! `mbean-set` and `mbean-track` (see `docs/spec/query-api.md`).
+//! MBean browser over the agent link: Query API JSON for `mbean-servers`, `mbean-connect`,
+//! `mbeans`, `mbean`, `mbean-invoke`, `mbean-set`, `mbean-track`, `mbean-subscribe` and
+//! `mbean-notifications` (see `docs/spec/query-api.md`).
 
 use anyhow::{Result, anyhow, bail};
 use openprofiler_link::LinkClient;
@@ -10,9 +11,24 @@ const UNITS: [&str; 5] = ["nanos", "bytes", "count", "percent", "per_second"];
 
 pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> {
     let name = || req["name"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("missing name"));
+    let server = req["server"].as_str().unwrap_or("").to_string();
     match action {
+        "mbean-servers" => Ok(json!({ "servers": servers(&c.mbean_servers().await?) })),
+        "mbean-connect" => {
+            let r = v1::MBeanConnectRequest {
+                url: req["url"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| anyhow!("missing url"))?
+                    .into(),
+                username: req["username"].as_str().unwrap_or("").into(),
+                password: req["password"].as_str().unwrap_or("").into(),
+                enabled: req["enabled"].as_bool().unwrap_or(true),
+            };
+            Ok(json!({ "servers": servers(&c.mbean_connect(r).await?) }))
+        }
         "mbeans" => {
-            let l = c.mbean_list(req["pattern"].as_str().unwrap_or("")).await?;
+            let l = c.mbean_list(&server, req["pattern"].as_str().unwrap_or("")).await?;
             Ok(json!({
                 "beans": l.beans.iter().map(|b| json!({
                     "name": b.name,
@@ -24,7 +40,7 @@ pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> 
             }))
         }
         "mbean" => {
-            let i = c.mbean_get(name()?).await?;
+            let i = c.mbean_get(&server, name()?).await?;
             Ok(json!({
                 "name": i.name,
                 "class_name": i.class_name,
@@ -47,6 +63,9 @@ pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> 
                         "name": p.name, "type": p.r#type, "description": p.description,
                     })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
+                "notifications": i.notifications.iter().map(|n| json!({
+                    "name": n.name, "description": n.description, "types": n.types,
+                })).collect::<Vec<_>>(),
             }))
         }
         "mbean-invoke" => {
@@ -58,6 +77,7 @@ pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> 
                 operation: req["operation"].as_str().ok_or_else(|| anyhow!("missing operation"))?.into(),
                 signature: strings("signature"),
                 args: strings("args"),
+                server,
             };
             let v = c.mbean_invoke(r).await?;
             Ok(json!({ "value": parse_value(&v) }))
@@ -67,6 +87,7 @@ pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> 
                 name: name()?.into(),
                 attribute: req["attribute"].as_str().ok_or_else(|| anyhow!("missing attribute"))?.into(),
                 value: arg(&req["value"]),
+                server,
             };
             c.mbean_set(r).await?;
             Ok(json!({}))
@@ -85,11 +106,57 @@ pub async fn handle(c: &LinkClient, action: &str, req: &Value) -> Result<Value> 
                 label: req["label"].as_str().unwrap_or("").into(),
                 unit,
                 enabled: req["enabled"].as_bool().unwrap_or(true),
+                server,
             };
             Ok(json!({ "tracked": tracked(&c.mbean_track(r).await?) }))
         }
+        "mbean-subscribe" => {
+            let r = v1::MBeanSubscribeRequest {
+                server,
+                name: name()?.into(),
+                enabled: req["enabled"].as_bool().unwrap_or(true),
+            };
+            Ok(json!({ "subscriptions": subscriptions(&c.mbean_subscribe(r).await?) }))
+        }
+        "mbean-notifications" => {
+            let n = c.mbean_notifications(req["after"].as_u64().unwrap_or(0)).await?;
+            Ok(json!({
+                "notifications": n.notifications.iter().map(|n| json!({
+                    "seq": n.seq,
+                    "time": n.time,
+                    "server": n.server,
+                    "name": n.source,
+                    "type": n.r#type,
+                    "sequence_number": n.sequence_number,
+                    "message": n.message,
+                    "data": parse_value(&n.data_json),
+                })).collect::<Vec<_>>(),
+                "subscriptions": subscriptions(&n.subscriptions),
+                "last": n.last_seq,
+                "missed": n.missed,
+            }))
+        }
         other => bail!("unknown MBean action: {other}"),
     }
+}
+
+fn servers(s: &[v1::MBeanServerInfo]) -> Vec<Value> {
+    s.iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "kind": s.kind,
+                "label": s.label,
+                "default_domain": s.default_domain,
+                "beans": s.bean_count,
+                "error": (!s.error.is_empty()).then_some(&s.error),
+            })
+        })
+        .collect()
+}
+
+fn subscriptions(s: &[v1::MBeanSubscription]) -> Vec<Value> {
+    s.iter().map(|s| json!({ "server": s.server, "name": s.name })).collect()
 }
 
 fn tracked(t: &[v1::TrackedAttribute]) -> Vec<Value> {
@@ -102,6 +169,7 @@ fn tracked(t: &[v1::TrackedAttribute]) -> Vec<Value> {
                 "name": t.mbean,
                 "attribute": t.attribute,
                 "item": (!t.item.is_empty()).then_some(&t.item),
+                "server": t.server,
             })
         })
         .collect()

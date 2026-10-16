@@ -166,19 +166,19 @@ async fn check_triggers(client: &LinkClient) {
 async fn check_mbeans(client: &LinkClient) {
     use openprofiler_proto::v1;
     assert!(client.hello().capabilities.iter().any(|c| c == "mbeans"));
-    let l = client.mbean_list("java.lang:*").await.unwrap();
+    let l = client.mbean_list("", "java.lang:*").await.unwrap();
     assert!(l.beans.iter().any(|b| b.name == "java.lang:type=Memory"), "platform beans are listed");
     assert!(l.beans.iter().all(|b| b.name.starts_with("java.lang:")), "pattern filters");
-    assert!(client.mbean_list("not a pattern").await.is_err());
+    assert!(client.mbean_list("", "not a pattern").await.is_err());
 
-    let mem = client.mbean_get("java.lang:type=Memory").await.unwrap();
+    let mem = client.mbean_get("", "java.lang:type=Memory").await.unwrap();
     let heap = mem.attributes.iter().find(|a| a.name == "HeapMemoryUsage").expect("HeapMemoryUsage");
     let v: serde_json::Value = serde_json::from_str(&heap.value_json).unwrap();
     assert!(v["used"].as_f64().is_some_and(|u| u > 0.0), "composite value as JSON: {v}");
     assert!(mem.attributes.iter().any(|a| a.name == "Verbose" && a.writable));
     assert!(mem.operations.iter().any(|o| o.name == "gc" && o.params.is_empty()));
 
-    let threading = client.mbean_get("java.lang:type=Threading").await.unwrap();
+    let threading = client.mbean_get("", "java.lang:type=Threading").await.unwrap();
     let op = threading
         .operations
         .iter()
@@ -189,6 +189,7 @@ async fn check_mbeans(client: &LinkClient) {
         operation: op.name.clone(),
         signature: vec!["long".into()],
         args: vec!["1".into()],
+        ..Default::default()
     };
     let out: serde_json::Value = serde_json::from_str(&client.mbean_invoke(r).await.unwrap()).unwrap();
     assert!(out.is_number(), "invoke returns JSON: {out}");
@@ -197,6 +198,7 @@ async fn check_mbeans(client: &LinkClient) {
         operation: "getThreadCpuTime".into(),
         signature: vec!["long".into()],
         args: vec!["nope".into()],
+        ..Default::default()
     };
     assert!(client.mbean_invoke(bad).await.unwrap_err().to_string().contains("NumberFormatException"));
 
@@ -204,6 +206,7 @@ async fn check_mbeans(client: &LinkClient) {
         name: "java.lang:type=Memory".into(),
         attribute: "Verbose".into(),
         value: value.into(),
+        ..Default::default()
     };
     client.mbean_set(set("false")).await.unwrap();
     assert!(client.mbean_set(set("maybe")).await.is_err());
@@ -215,6 +218,7 @@ async fn check_mbeans(client: &LinkClient) {
         label: String::new(),
         unit: 1,
         enabled,
+        ..Default::default()
     };
     let tracked = client.mbean_track(track(true)).await.unwrap();
     let key = "mbean:java.lang:type=Memory#HeapMemoryUsage.used";
@@ -222,7 +226,117 @@ async fn check_mbeans(client: &LinkClient) {
     wait_for(client, "tracked MBean telemetry", |p| p.telemetry(key).is_some_and(|s| !s.value.is_empty()))
         .await;
     assert!(client.mbean_track(track(false)).await.unwrap().is_empty());
-    assert!(client.mbean_list("").await.unwrap().tracked.is_empty());
+    assert!(client.mbean_list("", "").await.unwrap().tracked.is_empty());
+}
+
+/// Other MBean servers, a remote JMX connection, notifications, and a slow operation that must not
+/// hold up the agent link.
+async fn check_mbean_servers(client: &LinkClient) {
+    use openprofiler_proto::v1;
+    let servers = client.mbean_servers().await.unwrap();
+    assert_eq!(servers[0].kind, "platform");
+    let local = servers.iter().find(|s| s.kind == "local").expect("the workload's second MBean server");
+    let l = client.mbean_list(&local.id, "").await.unwrap();
+    assert!(l.beans.iter().any(|b| b.name == "java.lang:type=Memory"), "beans of the second server");
+    assert!(client.mbean_list("no such server", "").await.is_err());
+
+    // The workload's JMX connector, as a remote server.
+    let rt = client.mbean_get("", "java.lang:type=Runtime").await.unwrap();
+    let props = &rt.attributes.iter().find(|a| a.name == "SystemProperties").unwrap().value_json;
+    let props: serde_json::Value = serde_json::from_str(props).unwrap();
+    let url = props
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "openprofiler.test.jmx")
+        .and_then(|p| p["value"].as_str())
+        .expect("the workload's JMX connector URL")
+        .to_string();
+    let connect = |enabled| v1::MBeanConnectRequest { url: url.clone(), enabled, ..Default::default() };
+    let servers = client.mbean_connect(connect(true)).await.unwrap();
+    let remote = servers.iter().find(|s| s.kind == "remote").expect("remote server");
+    assert_eq!(remote.id, url);
+    assert!(remote.error.is_empty() && remote.bean_count >= 2, "{remote:?}");
+    let mem = client.mbean_get(&url, "java.lang:type=Memory").await.unwrap();
+    assert!(mem.attributes.iter().any(|a| a.name == "HeapMemoryUsage" && a.value_json.contains("used")));
+    let track = |enabled| v1::MBeanTrackRequest {
+        server: url.clone(),
+        name: "java.lang:type=Memory".into(),
+        attribute: "HeapMemoryUsage".into(),
+        item: "committed".into(),
+        unit: 1,
+        enabled,
+        ..Default::default()
+    };
+    let tracked = client.mbean_track(track(true)).await.unwrap();
+    let key = format!("mbean:[{url}]java.lang:type=Memory#HeapMemoryUsage.committed");
+    assert!(tracked.iter().any(|t| t.key == key && t.server == url));
+    wait_for(client, "remote tracked telemetry", |p| {
+        p.telemetry(&key).is_some_and(|s| s.value.iter().any(|v| v.is_finite()))
+    })
+    .await;
+    client.mbean_track(track(false)).await.unwrap();
+    let servers = client.mbean_connect(connect(false)).await.unwrap();
+    assert!(servers.iter().all(|s| s.kind != "remote"));
+    assert!(client.mbean_get(&url, "java.lang:type=Memory").await.is_err());
+
+    // GC notifications.
+    let gcs = client.mbean_list("", "java.lang:type=GarbageCollector,*").await.unwrap().beans;
+    assert!(!gcs.is_empty());
+    let after = client.mbean_notifications(0).await.unwrap().last_seq;
+    for b in &gcs {
+        let r = v1::MBeanSubscribeRequest { name: b.name.clone(), enabled: true, ..Default::default() };
+        client.mbean_subscribe(r).await.unwrap();
+    }
+    let bad = v1::MBeanSubscribeRequest {
+        name: "java.lang:type=Runtime".into(),
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(client.mbean_subscribe(bad).await.is_err(), "Runtime emits no notifications");
+    let gc = v1::MBeanInvokeRequest {
+        name: "java.lang:type=Memory".into(),
+        operation: "gc".into(),
+        ..Default::default()
+    };
+    client.mbean_invoke(gc).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let n = client.mbean_notifications(after).await.unwrap();
+        if let Some(n) = n.notifications.iter().find(|n| n.r#type == "com.sun.management.gc.notification") {
+            let data: serde_json::Value = serde_json::from_str(&n.data_json).unwrap();
+            assert!(data["gcName"].is_string(), "GC info as JSON: {data}");
+            assert!(gcs.iter().any(|b| b.name == n.source));
+            break;
+        }
+        assert!(Instant::now() < deadline, "no GC notification");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for b in &gcs {
+        let r = v1::MBeanSubscribeRequest { name: b.name.clone(), enabled: false, ..Default::default() };
+        client.mbean_subscribe(r).await.unwrap();
+    }
+    assert!(client.mbean_notifications(u64::MAX).await.unwrap().subscriptions.is_empty());
+
+    // A slow operation runs off the link thread: other requests are answered meanwhile.
+    let slow = v1::MBeanInvokeRequest {
+        name: "openprofiler.test:type=Slow".into(),
+        operation: "sleep".into(),
+        signature: vec!["long".into()],
+        args: vec!["3000".into()],
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let (r, dump_after) = tokio::join!(client.mbean_invoke(slow), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.thread_dump().await.unwrap();
+        started.elapsed()
+    });
+    r.unwrap();
+    assert!(
+        dump_after < Duration::from_millis(2500),
+        "thread dump waited for the MBean call: {dump_after:?}"
+    );
 }
 
 async fn wait_for(client: &LinkClient, what: &str, cond: impl Fn(&Profile) -> bool) {
@@ -254,6 +368,7 @@ async fn exercise(client: &LinkClient, dir: &Path) {
     check_locks_and_virtual_threads(client).await;
     check_triggers(client).await;
     check_mbeans(client).await;
+    check_mbean_servers(client).await;
     {
         let p = client.profile();
         let p = p.read();

@@ -1,10 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
-import type { MBeanAttribute, MBeanOperation, MBeanSummary, TrackedAttribute, Unit } from "../api/types";
+import type {
+  MBeanAttribute,
+  MBeanDetail,
+  MBeanOperation,
+  MBeanServerInfo,
+  MBeanSummary,
+  TrackedAttribute,
+  Unit,
+} from "../api/types";
 import { useCurrentSession, useSummary, useTelemetry } from "../api/hooks";
 import { IconChevron, IconClose, IconSearch } from "../components/icons";
 import { TimeChart } from "../components/TimeChart";
-import { formatValue } from "../lib/format";
+import { formatClock, formatValue } from "../lib/format";
 import { beanLabel, guessUnit } from "../lib/mbeans";
 import { client, store, toast, useApp } from "../state";
 
@@ -14,11 +22,12 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function useTracked(sid: string) {
+function useBeans(sid: string, server: string) {
   return useQuery({
-    queryKey: ["mbeans", sid],
-    queryFn: () => client.mbeans(sid),
+    queryKey: ["mbeans", sid, server],
+    queryFn: () => client.mbeans(sid, server),
     staleTime: 30_000,
+    retry: false,
   });
 }
 
@@ -27,7 +36,7 @@ function useTrack(sid: string) {
   return useMutation({
     mutationFn: (req: Parameters<typeof client.mbeanTrack>[1]) => client.mbeanTrack(sid, req),
     onSuccess: (r) => {
-      qc.setQueryData(["mbeans", sid], (old: { beans: MBeanSummary[] } | undefined) =>
+      qc.setQueriesData({ queryKey: ["mbeans", sid] }, (old: { beans: MBeanSummary[] } | undefined) =>
         old ? { ...old, tracked: r.tracked } : old,
       );
       qc.invalidateQueries({ queryKey: ["s", sid, "telemetry"] });
@@ -223,11 +232,13 @@ function AttributeEditor({
 
 function Attributes({
   sid,
+  server,
   bean,
   attrs,
   tracked,
 }: {
   sid: string;
+  server: string;
   bean: string;
   attrs: MBeanAttribute[];
   tracked: TrackedAttribute[];
@@ -236,15 +247,22 @@ function Attributes({
   const track = useTrack(sid);
   const [editing, setEditing] = useState<string | null>(null);
   const set = useMutation({
-    mutationFn: (r: { attribute: string; value: string }) => client.mbeanSet(sid, { name: bean, ...r }),
+    mutationFn: (r: { attribute: string; value: string }) =>
+      client.mbeanSet(sid, { server, name: bean, ...r }),
     onSuccess: () => {
       setEditing(null);
-      qc.invalidateQueries({ queryKey: ["mbean", sid, bean] });
+      qc.invalidateQueries({ queryKey: ["mbean", sid, server, bean] });
     },
     onError: (e) => toast(errorText(e), "error"),
   });
   const isTracked = (attribute: string, item?: string) =>
-    tracked.some((t) => t.name === bean && t.attribute === attribute && (t.item ?? "") === (item ?? ""));
+    tracked.some(
+      (t) =>
+        t.server === server &&
+        t.name === bean &&
+        t.attribute === attribute &&
+        (t.item ?? "") === (item ?? ""),
+    );
   const plotButton = (attribute: string, item?: string) => {
     const on = isTracked(attribute, item);
     return (
@@ -254,7 +272,14 @@ function Attributes({
         aria-label={`Plot ${attribute}${item ? `.${item}` : ""}`}
         title={on ? "Stop plotting" : "Plot as telemetry (sampled once per second; also shown in Overview)"}
         onClick={() =>
-          track.mutate({ name: bean, attribute, item, unit: guessUnit(attribute, item), enabled: !on })
+          track.mutate({
+            server,
+            name: bean,
+            attribute,
+            item,
+            unit: guessUnit(attribute, item),
+            enabled: !on,
+          })
         }
       >
         Plot
@@ -305,11 +330,22 @@ function Attributes({
   );
 }
 
-function Operation({ sid, bean, op }: { sid: string; bean: string; op: MBeanOperation }) {
+function Operation({
+  sid,
+  server,
+  bean,
+  op,
+}: {
+  sid: string;
+  server: string;
+  bean: string;
+  op: MBeanOperation;
+}) {
   const [args, setArgs] = useState<string[]>(() => op.params.map(() => ""));
   const invoke = useMutation({
     mutationFn: () =>
       client.mbeanInvoke(sid, {
+        server,
         name: bean,
         operation: op.name,
         signature: op.params.map((p) => p.type),
@@ -354,12 +390,22 @@ function Operation({ sid, bean, op }: { sid: string; bean: string; op: MBeanOper
   );
 }
 
-function BeanDetail({ sid, name, tracked }: { sid: string; name: string; tracked: TrackedAttribute[] }) {
+function BeanDetail({
+  sid,
+  server,
+  name,
+  tracked,
+}: {
+  sid: string;
+  server: string;
+  name: string;
+  tracked: TrackedAttribute[];
+}) {
   const [auto, setAuto] = useState(true);
-  const [tab, setTab] = useState<"attributes" | "operations">("attributes");
+  const [tab, setTab] = useState<"attributes" | "operations" | "notifications">("attributes");
   const q = useQuery({
-    queryKey: ["mbean", sid, name],
-    queryFn: () => client.mbean(sid, name),
+    queryKey: ["mbean", sid, server, name],
+    queryFn: () => client.mbean(sid, server, name),
     refetchInterval: auto ? 2000 : false,
     retry: false,
   });
@@ -395,6 +441,16 @@ function BeanDetail({ sid, name, tracked }: { sid: string; name: string; tracked
         >
           Operations ({b.operations.length})
         </button>
+        {b.notifications.length > 0 && (
+          <button
+            className="tab"
+            role="tab"
+            aria-selected={tab === "notifications"}
+            onClick={() => setTab("notifications")}
+          >
+            Notifications
+          </button>
+        )}
         <span className="grow" />
         {tab === "attributes" && (
           <label className="check" title="Re-read the attributes every 2 seconds">
@@ -405,14 +461,202 @@ function BeanDetail({ sid, name, tracked }: { sid: string; name: string; tracked
       </div>
       <div className="mb-detail-body">
         {tab === "attributes" ? (
-          <Attributes sid={sid} bean={b.name} attrs={b.attributes} tracked={tracked} />
+          <Attributes sid={sid} server={server} bean={b.name} attrs={b.attributes} tracked={tracked} />
+        ) : tab === "notifications" ? (
+          <Notifications sid={sid} server={server} bean={b} />
         ) : b.operations.length ? (
-          b.operations.map((o, i) => <Operation key={`${o.name}/${i}`} sid={sid} bean={b.name} op={o} />)
+          b.operations.map((o, i) => (
+            <Operation key={`${o.name}/${i}`} sid={sid} server={server} bean={b.name} op={o} />
+          ))
         ) : (
           <div className="faint">No operations.</div>
         )}
       </div>
     </div>
+  );
+}
+
+// ---------- notifications ----------
+
+function Notifications({ sid, server, bean }: { sid: string; server: string; bean: MBeanDetail }) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["mbean-notifications", sid],
+    queryFn: () => client.mbeanNotifications(sid),
+    refetchInterval: 2000,
+  });
+  const subscribe = useMutation({
+    mutationFn: (enabled: boolean) => client.mbeanSubscribe(sid, { server, name: bean.name, enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["mbean-notifications", sid] }),
+    onError: (e) => toast(errorText(e), "error"),
+  });
+  const subscribed = !!q.data?.subscriptions.some((s) => s.server === server && s.name === bean.name);
+  const received = (q.data?.notifications ?? [])
+    .filter((n) => n.server === server && n.name === bean.name)
+    .reverse();
+  return (
+    <>
+      <div className="mb-notif-head">
+        <button
+          className={`btn${subscribed ? "" : " primary"}`}
+          disabled={subscribe.isPending}
+          onClick={() => subscribe.mutate(!subscribed)}
+        >
+          {subscribed ? "Unsubscribe" : "Subscribe"}
+        </button>
+        <span className="faint">
+          {subscribed
+            ? "Listening. The agent keeps the last 1000 notifications of all subscribed MBeans."
+            : "Subscribe to receive this MBean's notifications."}
+        </span>
+      </div>
+      <div className="mb-notif-types">
+        {bean.notifications.map((n, i) => (
+          <div key={i} title={n.description}>
+            <span className="mono">{n.types.join(", ") || n.name}</span>
+            {n.description && n.description !== n.name && <span className="faint"> — {n.description}</span>}
+          </div>
+        ))}
+      </div>
+      {q.isError && <div className="mb-error">{errorText(q.error)}</div>}
+      {received.length > 0 && (
+        <div className="mb-table" role="table" aria-label="Notifications">
+          {received.map((n) => (
+            <div key={n.seq} className="mb-row mb-notif" role="row">
+              <div className="mb-name" role="cell">
+                <span className="mono">{formatClock(n.time)}</span>
+                <span className="faint mono mb-type">#{n.sequence_number}</span>
+              </div>
+              <div className="mb-val" role="cell">
+                <div className="mono">{n.type}</div>
+                {n.message && <div className="mb-str">{n.message}</div>}
+                {n.data !== null && n.data !== undefined && <Value v={n.data} depth={1} />}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {subscribed && !received.length && <div className="faint">No notifications yet.</div>}
+    </>
+  );
+}
+
+// ---------- servers ----------
+
+function ServerBar({
+  sid,
+  server,
+  onSelect,
+}: {
+  sid: string;
+  server: string;
+  onSelect: (id: string) => void;
+}) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["mbean-servers", sid],
+    queryFn: () => client.mbeanServers(sid),
+    staleTime: 10_000,
+  });
+  const [form, setForm] = useState<{ url: string; username: string; password: string } | null>(null);
+  const connect = useMutation({
+    mutationFn: (r: { url: string; username?: string; password?: string; enabled: boolean }) =>
+      client.mbeanConnect(sid, r),
+    onSuccess: (r, req) => {
+      qc.setQueryData(["mbean-servers", sid], r);
+      qc.invalidateQueries({ queryKey: ["mbeans", sid] });
+      if (req.enabled) {
+        setForm(null);
+        onSelect(req.url.trim());
+      } else if (req.url === server) onSelect("");
+    },
+    onError: (e) => toast(errorText(e), "error"),
+  });
+  const servers: MBeanServerInfo[] = q.data?.servers ?? [];
+  const current = servers.find((s) => s.id === server);
+  return (
+    <>
+      <select
+        className="select mb-server"
+        aria-label="MBean server"
+        value={server}
+        onChange={(e) => onSelect(e.target.value)}
+      >
+        {servers.length === 0 && <option value="">Platform MBean server</option>}
+        {servers.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.kind === "remote" ? "Remote: " : s.kind === "local" ? "Local: " : ""}
+            {s.label}
+            {s.error ? " (disconnected)" : ""}
+          </option>
+        ))}
+      </select>
+      {current?.kind === "remote" && (
+        <button
+          className="btn ghost"
+          disabled={connect.isPending}
+          onClick={() => connect.mutate({ url: current.id, enabled: false })}
+        >
+          Disconnect
+        </button>
+      )}
+      <button
+        className="btn ghost"
+        aria-expanded={!!form}
+        onClick={() => setForm(form ? null : { url: "", username: "", password: "" })}
+      >
+        Connect JMX…
+      </button>
+      {form && (
+        <form
+          className="card mb-connect"
+          onSubmit={(e) => {
+            e.preventDefault();
+            connect.mutate({ ...form, enabled: true });
+          }}
+        >
+          <div className="faint">
+            The profiled JVM connects to the remote server; credentials are kept in that JVM's memory only.
+          </div>
+          <input
+            className="input mono"
+            placeholder="service:jmx:rmi:///jndi/rmi://host:9010/jmxrmi"
+            aria-label="JMX service URL"
+            autoFocus
+            value={form.url}
+            onChange={(e) => setForm({ ...form, url: e.target.value })}
+          />
+          <div className="mb-connect-row">
+            <input
+              className="input grow"
+              placeholder="Username (optional)"
+              aria-label="Username"
+              autoComplete="off"
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })}
+            />
+            <input
+              className="input grow"
+              type="password"
+              placeholder="Password"
+              aria-label="Password"
+              autoComplete="off"
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+            />
+          </div>
+          <div className="mb-connect-row">
+            <span className="grow" />
+            <button type="button" className="btn ghost" onClick={() => setForm(null)}>
+              Cancel
+            </button>
+            <button className="btn primary" disabled={!form.url.trim() || connect.isPending}>
+              {connect.isPending ? "Connecting…" : "Connect"}
+            </button>
+          </div>
+        </form>
+      )}
+    </>
   );
 }
 
@@ -435,7 +679,10 @@ function TrackedCharts({ sid, tracked }: { sid: string; tracked: TrackedAttribut
         return (
           <div className="card chart-card" key={t.key}>
             <h3>
-              <span title={t.key}>{t.label}</span>
+              <span title={t.key}>
+                {t.label}
+                {t.server && <span className="faint"> @ {t.server}</span>}
+              </span>
               <span className="latest">{last !== undefined ? formatValue(last, t.unit) : ""}</span>
               <select
                 className="select mb-unit"
@@ -443,6 +690,7 @@ function TrackedCharts({ sid, tracked }: { sid: string; tracked: TrackedAttribut
                 value={t.unit}
                 onChange={(e) =>
                   track.mutate({
+                    server: t.server,
                     name: t.name,
                     attribute: t.attribute,
                     item: t.item,
@@ -462,7 +710,13 @@ function TrackedCharts({ sid, tracked }: { sid: string; tracked: TrackedAttribut
                 aria-label={`Stop plotting ${t.label}`}
                 title="Stop plotting"
                 onClick={() =>
-                  track.mutate({ name: t.name, attribute: t.attribute, item: t.item, enabled: false })
+                  track.mutate({
+                    server: t.server,
+                    name: t.name,
+                    attribute: t.attribute,
+                    item: t.item,
+                    enabled: false,
+                  })
                 }
               >
                 <IconClose width={12} />
@@ -493,8 +747,13 @@ function TrackedCharts({ sid, tracked }: { sid: string; tracked: TrackedAttribut
 export function MBeansView() {
   const s = useCurrentSession()!;
   const has = s.capabilities.includes("mbeans");
-  const list = useTracked(s.id);
+  const [server, setServer] = useState("");
+  const list = useBeans(s.id, server);
   const [selected, setSelected] = useState<string | null>(null);
+  const selectServer = (id: string) => {
+    setServer(id);
+    setSelected(null);
+  };
   if (!has)
     return (
       <div className="empty">
@@ -504,34 +763,43 @@ export function MBeansView() {
         </p>
       </div>
     );
-  if (list.isLoading)
-    return (
-      <div className="empty">
-        <div className="spinner" />
-      </div>
-    );
-  if (list.isError) return <div className="error">{errorText(list.error)}</div>;
-  const { beans, tracked } = list.data!;
+  const beans = list.data?.beans ?? [];
+  const tracked = list.data?.tracked ?? [];
   const current = selected ?? beans.find((b) => b.name === "java.lang:type=Memory")?.name ?? null;
   return (
     <div className="view">
       <div className="view-header">
         <h2 className="view-title">MBeans</h2>
-        <span className="faint">{beans.length} beans · platform MBean server</span>
+        <ServerBar sid={s.id} server={server} onSelect={selectServer} />
+        {list.data && <span className="faint">{beans.length} beans</span>}
         <span className="grow" />
         <button className="btn ghost" onClick={() => list.refetch()}>
           Reload list
         </button>
       </div>
       <TrackedCharts sid={s.id} tracked={tracked} />
-      <div className="code-layout">
-        <BeanTree beans={beans} selected={current} onSelect={setSelected} />
-        {current ? (
-          <BeanDetail key={current} sid={s.id} name={current} tracked={tracked} />
-        ) : (
-          <div className="empty">Select an MBean.</div>
-        )}
-      </div>
+      {list.isLoading ? (
+        <div className="empty">
+          <div className="spinner" />
+        </div>
+      ) : list.isError ? (
+        <div className="error">{errorText(list.error)}</div>
+      ) : (
+        <div className="code-layout">
+          <BeanTree beans={beans} selected={current} onSelect={setSelected} />
+          {current ? (
+            <BeanDetail
+              key={`${server}\n${current}`}
+              sid={s.id}
+              server={server}
+              name={current}
+              tracked={tracked}
+            />
+          ) : (
+            <div className="empty">Select an MBean.</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

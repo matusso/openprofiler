@@ -349,7 +349,15 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
             c.set_triggers(triggers).await?;
             Ok(json!({ "installed": n }))
         }
-        "mbeans" | "mbean" | "mbean-invoke" | "mbean-set" | "mbean-track" => {
+        "mbeans"
+        | "mbean"
+        | "mbean-invoke"
+        | "mbean-set"
+        | "mbean-track"
+        | "mbean-servers"
+        | "mbean-connect"
+        | "mbean-subscribe"
+        | "mbean-notifications" => {
             let r = crate::mbeans::handle(c, action, &req).await?;
             if action == "mbean-track" {
                 s.bump(vec!["telemetry".into()]);

@@ -556,6 +556,41 @@ export interface TrackedAttribute {
   name: string;
   attribute: string;
   item?: string;
+  server: string;
+}
+
+export interface MBeanServerInfo {
+  /** "" for the platform server, the MBeanServerId for other local servers, the URL for remote ones. */
+  id: string;
+  kind: "platform" | "local" | "remote";
+  label: string;
+  default_domain: string;
+  beans: number;
+  error?: string;
+}
+
+export interface MBeanSubscription {
+  server: string;
+  name: string;
+}
+
+export interface MBeanNotification {
+  seq: number;
+  /** Epoch nanoseconds. */
+  time: number;
+  server: string;
+  name: string;
+  type: string;
+  sequence_number: number;
+  message: string;
+  data: unknown;
+}
+
+export interface MBeanNotificationsResponse {
+  notifications: MBeanNotification[];
+  subscriptions: MBeanSubscription[];
+  last: number;
+  missed: number;
 }
 
 export interface MBeanListResponse {
@@ -587,9 +622,11 @@ export interface MBeanDetail {
   description: string;
   attributes: MBeanAttribute[];
   operations: MBeanOperation[];
+  notifications: { name: string; description: string; types: string[] }[];
 }
 
 export interface MBeanTrackRequest {
+  server: string;
   name: string;
   attribute: string;
   item?: string;

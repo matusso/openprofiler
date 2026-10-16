@@ -26,6 +26,9 @@ import type {
   LocalJvm,
   MBeanDetail,
   MBeanListResponse,
+  MBeanNotificationsResponse,
+  MBeanServerInfo,
+  MBeanSubscription,
   MBeanTrackRequest,
   TrackedAttribute,
   MonitorEventDto,
@@ -220,14 +223,26 @@ export class OpenProfilerClient {
   bookmark = (id: string, label: string) => this.post(`/sessions/${id}/bookmark`, { label });
   gc = (id: string) => this.post(`/sessions/${id}/gc`);
 
-  // MBeans (live)
-  mbeans = (id: string, pattern?: string) =>
-    this.post<MBeanListResponse>(`/sessions/${id}/mbeans`, { pattern });
-  mbean = (id: string, name: string) => this.post<MBeanDetail>(`/sessions/${id}/mbean`, { name });
-  mbeanInvoke = (id: string, req: { name: string; operation: string; signature: string[]; args: string[] }) =>
-    this.post<{ value: unknown }>(`/sessions/${id}/mbean-invoke`, req);
-  mbeanSet = (id: string, req: { name: string; attribute: string; value: string }) =>
+  // MBeans (live); `server` is an MBeanServerInfo id, "" for the platform server
+  mbeanServers = (id: string) => this.post<{ servers: MBeanServerInfo[] }>(`/sessions/${id}/mbean-servers`);
+  mbeanConnect = (
+    id: string,
+    req: { url: string; username?: string; password?: string; enabled?: boolean },
+  ) => this.post<{ servers: MBeanServerInfo[] }>(`/sessions/${id}/mbean-connect`, req);
+  mbeans = (id: string, server: string, pattern?: string) =>
+    this.post<MBeanListResponse>(`/sessions/${id}/mbeans`, { server, pattern });
+  mbean = (id: string, server: string, name: string) =>
+    this.post<MBeanDetail>(`/sessions/${id}/mbean`, { server, name });
+  mbeanInvoke = (
+    id: string,
+    req: { server: string; name: string; operation: string; signature: string[]; args: string[] },
+  ) => this.post<{ value: unknown }>(`/sessions/${id}/mbean-invoke`, req);
+  mbeanSet = (id: string, req: { server: string; name: string; attribute: string; value: string }) =>
     this.post(`/sessions/${id}/mbean-set`, req);
+  mbeanSubscribe = (id: string, req: { server: string; name: string; enabled: boolean }) =>
+    this.post<{ subscriptions: MBeanSubscription[] }>(`/sessions/${id}/mbean-subscribe`, req);
+  mbeanNotifications = (id: string, after = 0) =>
+    this.post<MBeanNotificationsResponse>(`/sessions/${id}/mbean-notifications`, { after });
   mbeanTrack = (id: string, req: MBeanTrackRequest) =>
     this.post<{ tracked: TrackedAttribute[] }>(`/sessions/${id}/mbean-track`, req);
 

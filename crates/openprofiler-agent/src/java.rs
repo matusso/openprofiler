@@ -17,11 +17,7 @@ pub struct JavaHelpers {
     m_dump_heap: jmethodID,
     m_thread_dump: jmethodID,
     m_register_park: jmethodID,
-    m_mbean_list: jmethodID,
-    m_mbean_get: jmethodID,
-    m_mbean_invoke: jmethodID,
-    m_mbean_set: jmethodID,
-    m_mbean_track: jmethodID,
+    m_mbean: jmethodID,
     pub m_thread_id: jmethodID,
 }
 
@@ -118,20 +114,7 @@ pub fn init(jni: *mut JNIEnv) -> Result<JavaHelpers, String> {
         m_dump_heap: sm(c"dumpHeap", c"(Ljava/lang/String;Z)Ljava/lang/String;"),
         m_thread_dump: sm(c"threadDump", c"()[Ljava/lang/String;"),
         m_register_park: sm(c"registerPark", c"(Ljava/lang/Class;)Z"),
-        m_mbean_list: sm(c"mbeanList", c"(Ljava/lang/String;)[Ljava/lang/String;"),
-        m_mbean_get: sm(c"mbeanGet", c"(Ljava/lang/String;)[Ljava/lang/String;"),
-        m_mbean_invoke: sm(
-            c"mbeanInvoke",
-            c"(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)[Ljava/lang/String;",
-        ),
-        m_mbean_set: sm(
-            c"mbeanSet",
-            c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;",
-        ),
-        m_mbean_track: sm(
-            c"mbeanTrack",
-            c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IZ)[Ljava/lang/String;",
-        ),
+        m_mbean: sm(c"mbean", c"(Ljava/lang/String;[Ljava/lang/String;)[Ljava/lang/String;"),
         m_thread_id,
     })
 }
@@ -221,44 +204,20 @@ impl JavaHelpers {
     }
 }
 
-/// An upcall argument for [`JavaHelpers::lines`].
-enum Arg<'a> {
-    Str(&'a str),
-    Strs(&'a [String]),
-    Int(i32),
-    Bool(bool),
-}
-
 impl JavaHelpers {
-    /// Calls a static `String[]`-returning helper and returns its lines; a single `E\tmessage`
-    /// line (the helpers' failure format) becomes an error.
-    fn lines(&self, jni: *mut JNIEnv, m: jmethodID, args: &[Arg<'_>]) -> Result<Vec<String>, String> {
-        if m.is_null() {
+    /// Calls `Agent.mbean(op, args)` and returns its lines; a single `E\tmessage` line (the
+    /// helper's failure format) becomes an error.
+    fn mbean(&self, jni: *mut JNIEnv, op: &str, args: &[&str]) -> Result<Vec<String>, String> {
+        if self.m_mbean.is_null() {
             return Err("MBean helper unavailable".into());
         }
-        let mut refs = vec![];
-        let values: Vec<jvalue> = args
-            .iter()
-            .map(|a| match a {
-                Arg::Str(s) => {
-                    let r = new_string(jni, s);
-                    refs.push(r);
-                    jvalue { l: r }
-                }
-                Arg::Strs(v) => {
-                    let r = new_string_array(jni, v);
-                    refs.push(r);
-                    jvalue { l: r }
-                }
-                Arg::Int(i) => jvalue { i: *i },
-                Arg::Bool(b) => jvalue { z: *b as jboolean },
-            })
-            .collect();
-        let arr = jni!(jni, CallStaticObjectMethodA, self.agent_class, m, values.as_ptr());
+        let jop = new_string(jni, op);
+        let jargs = new_string_array(jni, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let values = [jvalue { l: jop }, jvalue { l: jargs }];
+        let arr = jni!(jni, CallStaticObjectMethodA, self.agent_class, self.m_mbean, values.as_ptr());
         let exc = take_exception(jni);
         let lines = string_array(jni, arr);
-        jni!(jni, DeleteLocalRef, arr);
-        for r in refs {
+        for r in [arr, jop, jargs] {
             jni!(jni, DeleteLocalRef, r);
         }
         if let Some(e) = exc {
@@ -270,36 +229,106 @@ impl JavaHelpers {
         }
     }
 
-    pub fn mbean_list(&self, jni: *mut JNIEnv, pattern: &str) -> Result<v1::MBeanList, String> {
-        self.lines(jni, self.m_mbean_list, &[Arg::Str(pattern)]).map(|l| parse_mbean_list(&l))
+    /// Runs one MBean request (they all go through `MBeans.call`).
+    pub fn mbean_request(
+        &self,
+        jni: *mut JNIEnv,
+        kind: &v1::request::Kind,
+    ) -> Result<Option<v1::response::Result>, String> {
+        use v1::request::Kind;
+        use v1::response::Result as R;
+        let flag = |b: bool| if b { "true" } else { "false" };
+        let r = match kind {
+            Kind::MbeanServers(_) => {
+                self.mbean(jni, "servers", &[]).map(|l| R::MbeanServers(parse_mbean_servers(&l)))
+            }
+            Kind::MbeanConnect(r) => {
+                let args = [r.url.as_str(), &r.username, &r.password, flag(r.enabled)];
+                self.mbean(jni, "connect", &args).map(|l| R::MbeanServers(parse_mbean_servers(&l)))
+            }
+            Kind::MbeanList(r) => {
+                self.mbean(jni, "list", &[&r.server, &r.pattern]).map(|l| R::MbeanList(parse_mbean_list(&l)))
+            }
+            Kind::MbeanGet(r) => {
+                self.mbean(jni, "get", &[&r.server, &r.name]).map(|l| R::MbeanInfo(parse_mbean_info(&l)))
+            }
+            Kind::MbeanInvoke(r) => {
+                let n = r.signature.len().to_string();
+                let mut args = vec![r.server.as_str(), &r.name, &r.operation, &n];
+                args.extend(r.signature.iter().map(String::as_str));
+                args.extend(r.args.iter().map(String::as_str));
+                let lines = self.mbean(jni, "invoke", &args)?;
+                let value_json =
+                    lines.first().and_then(|l| l.strip_prefix("R\t")).unwrap_or("null").to_string();
+                Ok(R::MbeanInvoke(v1::MBeanInvokeResult { value_json }))
+            }
+            Kind::MbeanSet(r) => {
+                return self.mbean(jni, "set", &[&r.server, &r.name, &r.attribute, &r.value]).map(|_| None);
+            }
+            Kind::MbeanTrack(r) => {
+                let unit = r.unit.to_string();
+                let args =
+                    [r.server.as_str(), &r.name, &r.attribute, &r.item, &r.label, &unit, flag(r.enabled)];
+                self.mbean(jni, "track", &args).map(|l| R::MbeanList(parse_mbean_list(&l)))
+            }
+            Kind::MbeanSubscribe(r) => self
+                .mbean(jni, "subscribe", &[&r.server, &r.name, flag(r.enabled)])
+                .map(|l| R::MbeanNotifications(parse_mbean_notifications(&l))),
+            Kind::MbeanNotifications(r) => self
+                .mbean(jni, "notifications", &[&r.after.to_string()])
+                .map(|l| R::MbeanNotifications(parse_mbean_notifications(&l))),
+            _ => Err("not an MBean request".into()),
+        };
+        r.map(Some)
     }
+}
 
-    pub fn mbean_get(&self, jni: *mut JNIEnv, name: &str) -> Result<v1::MBeanInfo, String> {
-        self.lines(jni, self.m_mbean_get, &[Arg::Str(name)]).map(|l| parse_mbean_info(&l))
-    }
+/// Parses `MBeans.servers()` output.
+pub fn parse_mbean_servers(lines: &[String]) -> v1::MBeanServerList {
+    let servers = lines
+        .iter()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            let at = |i: usize| f.get(i).copied().unwrap_or("").to_string();
+            (f[0] == "S").then(|| v1::MBeanServerInfo {
+                id: at(1),
+                kind: at(2),
+                label: at(3),
+                default_domain: at(4),
+                bean_count: at(5).parse().unwrap_or(0),
+                error: at(6),
+            })
+        })
+        .collect();
+    v1::MBeanServerList { servers }
+}
 
-    pub fn mbean_invoke(&self, jni: *mut JNIEnv, r: &v1::MBeanInvokeRequest) -> Result<String, String> {
-        let args = [Arg::Str(&r.name), Arg::Str(&r.operation), Arg::Strs(&r.signature), Arg::Strs(&r.args)];
-        let lines = self.lines(jni, self.m_mbean_invoke, &args)?;
-        Ok(lines.first().and_then(|l| l.strip_prefix("R\t")).unwrap_or("null").to_string())
+/// Parses `MBeans.notifications()` / `MBeans.subscribe()` output.
+pub fn parse_mbean_notifications(lines: &[String]) -> v1::MBeanNotifications {
+    let mut out = v1::MBeanNotifications::default();
+    for line in lines {
+        let f: Vec<&str> = line.splitn(9, '\t').collect();
+        let at = |i: usize| f.get(i).copied().unwrap_or("").to_string();
+        match f[0] {
+            "N" => out.notifications.push(v1::MBeanNotification {
+                seq: at(1).parse().unwrap_or(0),
+                time: at(2).parse::<i64>().unwrap_or(0).saturating_mul(1_000_000),
+                server: at(3),
+                source: at(4),
+                r#type: at(5),
+                sequence_number: at(6).parse().unwrap_or(0),
+                message: at(7),
+                data_json: at(8),
+            }),
+            "U" => out.subscriptions.push(v1::MBeanSubscription { server: at(1), name: at(2) }),
+            "L" => {
+                out.last_seq = at(1).parse().unwrap_or(0);
+                out.missed = at(2).parse().unwrap_or(0);
+            }
+            _ => {}
+        }
     }
-
-    pub fn mbean_set(&self, jni: *mut JNIEnv, r: &v1::MBeanSetRequest) -> Result<(), String> {
-        let args = [Arg::Str(&r.name), Arg::Str(&r.attribute), Arg::Str(&r.value)];
-        self.lines(jni, self.m_mbean_set, &args).map(|_| ())
-    }
-
-    pub fn mbean_track(&self, jni: *mut JNIEnv, r: &v1::MBeanTrackRequest) -> Result<v1::MBeanList, String> {
-        let args = [
-            Arg::Str(&r.name),
-            Arg::Str(&r.attribute),
-            Arg::Str(&r.item),
-            Arg::Str(&r.label),
-            Arg::Int(r.unit as i32),
-            Arg::Bool(r.enabled),
-        ];
-        self.lines(jni, self.m_mbean_track, &args).map(|l| parse_mbean_list(&l))
-    }
+    out
 }
 
 /// Parses `MBeans.list()` / `MBeans.track()` output.
@@ -317,6 +346,7 @@ pub fn parse_mbean_list(lines: &[String]) -> v1::MBeanList {
                 mbean: at(4),
                 attribute: at(5),
                 item: at(6),
+                server: at(7),
             }),
             _ => {}
         }
@@ -357,6 +387,13 @@ pub fn parse_mbean_info(lines: &[String]) -> v1::MBeanInfo {
                     o.params.push(v1::MBeanParameter { name: at(1), r#type: at(2), description: at(3) });
                 }
             }
+            "N" => out.notifications.push(v1::MBeanNotificationInfo {
+                name: at(1),
+                description: at(2),
+                types: f
+                    .get(3)
+                    .map_or(vec![], |t| t.split(',').filter(|t| !t.is_empty()).map(String::from).collect()),
+            }),
             _ => {}
         }
     }
@@ -545,5 +582,21 @@ mod tests {
             parse_mbean_list(&["B\ta:type=X\tC\t".into(), "T\tmbean:a:type=X#N\tN\t1\ta:type=X\tN\t".into()]);
         assert_eq!(l.beans[0].name, "a:type=X");
         assert_eq!(l.tracked[0].unit, 1);
+    }
+
+    #[test]
+    fn parses_mbean_servers_and_notifications() {
+        let s = parse_mbean_servers(&["S\t\tplatform\tPlatform\tDefaultDomain\t42\t".into()]);
+        assert_eq!(s.servers[0].bean_count, 42);
+        assert_eq!(s.servers[0].kind, "platform");
+        let n = parse_mbean_notifications(&[
+            "N\t3\t1700000000000\t\ta:type=X\tjmx.attribute.change\t7\tchanged\t{\"a\":\"x\ty\"}".into(),
+            "U\t\ta:type=X".into(),
+            "L\t3\t2".into(),
+        ]);
+        assert_eq!(n.notifications[0].time, 1_700_000_000_000_000_000);
+        assert_eq!(n.notifications[0].data_json, "{\"a\":\"x\ty\"}");
+        assert_eq!(n.subscriptions[0].name, "a:type=X");
+        assert_eq!((n.last_seq, n.missed), (3, 2));
     }
 }

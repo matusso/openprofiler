@@ -351,9 +351,27 @@ impl LinkClient {
         self.request(v1::request::Kind::SaveSnapshot(s), None).await.map(|_| ())
     }
 
-    /// Lists MBeans matching an ObjectName `pattern` (empty = all) and the tracked attributes.
-    pub async fn mbean_list(&self, pattern: &str) -> Result<v1::MBeanList> {
-        let r = v1::MBeanListRequest { pattern: pattern.into() };
+    /// The MBean servers: platform, others in the JVM, connected remote JMX servers.
+    pub async fn mbean_servers(&self) -> Result<Vec<v1::MBeanServerInfo>> {
+        let kind = v1::request::Kind::MbeanServers(v1::MBeanServersRequest {});
+        match self.request(kind, None).await?.response.result {
+            Some(v1::response::Result::MbeanServers(l)) => Ok(l.servers),
+            _ => bail!("unexpected MBean servers response"),
+        }
+    }
+
+    /// Connects the JVM to a remote JMX server, or disconnects it; returns the servers.
+    pub async fn mbean_connect(&self, req: v1::MBeanConnectRequest) -> Result<Vec<v1::MBeanServerInfo>> {
+        match self.request(v1::request::Kind::MbeanConnect(req), None).await?.response.result {
+            Some(v1::response::Result::MbeanServers(l)) => Ok(l.servers),
+            _ => bail!("unexpected MBean connect response"),
+        }
+    }
+
+    /// Lists MBeans of `server` (empty = platform) matching an ObjectName `pattern` (empty = all)
+    /// and the tracked attributes.
+    pub async fn mbean_list(&self, server: &str, pattern: &str) -> Result<v1::MBeanList> {
+        let r = v1::MBeanListRequest { pattern: pattern.into(), server: server.into() };
         match self.request(v1::request::Kind::MbeanList(r), None).await?.response.result {
             Some(v1::response::Result::MbeanList(l)) => Ok(l),
             _ => bail!("unexpected MBean list response"),
@@ -361,8 +379,8 @@ impl LinkClient {
     }
 
     /// An MBean's attributes (with current values) and operations.
-    pub async fn mbean_get(&self, name: &str) -> Result<v1::MBeanInfo> {
-        let r = v1::MBeanGetRequest { name: name.into() };
+    pub async fn mbean_get(&self, server: &str, name: &str) -> Result<v1::MBeanInfo> {
+        let r = v1::MBeanGetRequest { name: name.into(), server: server.into() };
         match self.request(v1::request::Kind::MbeanGet(r), None).await?.response.result {
             Some(v1::response::Result::MbeanInfo(i)) => Ok(i),
             _ => bail!("unexpected MBean response"),
@@ -386,6 +404,26 @@ impl LinkClient {
         match self.request(v1::request::Kind::MbeanTrack(req), None).await?.response.result {
             Some(v1::response::Result::MbeanList(l)) => Ok(l.tracked),
             _ => bail!("unexpected MBean track response"),
+        }
+    }
+
+    /// Adds or removes a notification listener; returns the subscriptions.
+    pub async fn mbean_subscribe(
+        &self,
+        req: v1::MBeanSubscribeRequest,
+    ) -> Result<Vec<v1::MBeanSubscription>> {
+        match self.request(v1::request::Kind::MbeanSubscribe(req), None).await?.response.result {
+            Some(v1::response::Result::MbeanNotifications(n)) => Ok(n.subscriptions),
+            _ => bail!("unexpected MBean subscribe response"),
+        }
+    }
+
+    /// Buffered notifications with a sequence number above `after`.
+    pub async fn mbean_notifications(&self, after: u64) -> Result<v1::MBeanNotifications> {
+        let kind = v1::request::Kind::MbeanNotifications(v1::MBeanNotificationsRequest { after });
+        match self.request(kind, None).await?.response.result {
+            Some(v1::response::Result::MbeanNotifications(n)) => Ok(n),
+            _ => bail!("unexpected MBean notifications response"),
         }
     }
 
