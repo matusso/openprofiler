@@ -9,6 +9,7 @@ use openprofiler_daemon::query::*;
 use openprofiler_daemon::{DaemonConfig, Engine};
 use openprofiler_model::SampleKind;
 use openprofiler_model::views::Aggregation;
+use rayon::prelude::*;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -100,6 +101,26 @@ enum Cmd {
     Demo {
         #[arg(short, long, default_value = "demo.opsnap")]
         output: PathBuf,
+    },
+    /// Decompile an Android app (.apk, .dex, .xapk, .apks, .aab) to Java.
+    ///
+    /// Without CLASS, lists all classes; with --output, writes every class to a directory.
+    Decompile {
+        file: PathBuf,
+        /// Write all classes (`.java`, or `.smali` with --smali) under this directory.
+        #[arg(short, long, conflicts_with_all = ["class", "search"])]
+        output: Option<PathBuf>,
+        /// Fully qualified class name to print.
+        class: Option<String>,
+        /// Print smali (Dalvik bytecode) instead of Java.
+        #[arg(long)]
+        smali: bool,
+        /// Search class, method and field names instead.
+        #[arg(long, conflicts_with = "class")]
+        search: Option<String>,
+        /// With --search: search the decompiled source text (slower).
+        #[arg(long, requires = "search")]
+        code: bool,
     },
     /// Run the MCP server on stdio.
     Mcp,
@@ -314,6 +335,16 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
             if let Some(h) = &sum.heap {
                 println!("  Heap       {}", serde_json::to_string(h)?);
             }
+            if let Some(d) = s.decompiler() {
+                let sum = d.program.summary();
+                println!(
+                    "  Code       {} classes in {} packages, {} resources, {} dex files",
+                    sum["classes"],
+                    sum["packages"],
+                    sum["resources"],
+                    sum["dex_files"].as_array().map_or(0, Vec::len)
+                );
+            }
             println!("  Capabilities: {}", s.capabilities().join(", "));
             Ok(())
         }
@@ -408,6 +439,75 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
         Cmd::Demo { output } => {
             openprofiler_snapshot_write(&output)?;
             println!("Wrote {}", output.display());
+            Ok(())
+        }
+        Cmd::Decompile { file, output, class, smali, search, code } => {
+            let s = engine.open_blocking(&file)?;
+            let q = |op: &str, req: serde_json::Value| openprofiler_daemon::decompile::handle(&s, op, req);
+            if let Some(dir) = output {
+                let program = s.decompiler().context("not a decompiler session")?.program;
+                let view = if smali { openprofiler_dex::View::Smali } else { openprofiler_dex::View::Java };
+                let ext = if smali { "smali" } else { "java" };
+                let started = std::time::Instant::now();
+                let written: Result<Vec<usize>> = program
+                    .top_levels
+                    .par_iter()
+                    .map(|top| {
+                        let code = program.class_code_desc(top, view)?;
+                        let rel = top.trim_start_matches('L').trim_end_matches(';');
+                        let path = dir.join(format!("{rel}.{ext}"));
+                        std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
+                        std::fs::write(&path, &code.code)?;
+                        Ok(1)
+                    })
+                    .collect();
+                let n = written?.len();
+                eprintln!("Wrote {n} classes to {} in {:.1?}", dir.display(), started.elapsed());
+                return Ok(());
+            }
+            if let Some(query) = search {
+                let scope = if code { "code" } else { "names" };
+                let r = q(
+                    "search",
+                    json!({ "query": query, "scope": scope, "limit": 1000, "budget_ms": 600_000 }),
+                )?;
+                for row in r["results"].as_array().into_iter().flatten() {
+                    match row["kind"].as_str() {
+                        Some("code") => println!(
+                            "{}:{}  {}",
+                            row["cls"].as_str().unwrap_or_default(),
+                            row["line"],
+                            row["snippet"].as_str().unwrap_or_default()
+                        ),
+                        k => println!(
+                            "{:<7} {}",
+                            k.unwrap_or_default(),
+                            row["full"].as_str().unwrap_or_default()
+                        ),
+                    }
+                }
+                if r["truncated"] == true {
+                    eprintln!("(results truncated)");
+                }
+            } else if let Some(class) = class {
+                let view = if smali { "smali" } else { "java" };
+                let r = q("class", json!({ "name": class, "view": view }))?;
+                print!("{}", r["code"].as_str().unwrap_or_default());
+            } else {
+                // Depth-first walk of the package tree.
+                let mut stack = vec![String::new()];
+                while let Some(pkg) = stack.pop() {
+                    let r = q("packages", json!({ "parent": pkg }))?;
+                    for c in r["classes"].as_array().into_iter().flatten() {
+                        println!("{}", c["full"].as_str().unwrap_or_default());
+                    }
+                    let subs = r["packages"].as_array().into_iter().flatten();
+                    let mut subs: Vec<String> =
+                        subs.filter_map(|p| p["full"].as_str().map(str::to_owned)).collect();
+                    subs.reverse();
+                    stack.extend(subs);
+                }
+            }
             Ok(())
         }
         Cmd::List => {

@@ -13,7 +13,22 @@ import type {
 import { createStore } from "./lib/store";
 
 export type ViewId =
-  "overview" | "cpu" | "memory" | "heap" | "threads" | "locks" | "probes" | "events" | "mbeans" | "compare";
+  | "overview"
+  | "cpu"
+  | "memory"
+  | "heap"
+  | "threads"
+  | "locks"
+  | "probes"
+  | "events"
+  | "mbeans"
+  | "code"
+  | "compare";
+
+/** What the decompiler view shows: a class (optionally at a node or offset) or a resource file. */
+export type CodeLocation =
+  | { type: "class"; cls: string; view: "java" | "smali"; node?: number; pos?: number }
+  | { type: "resource"; name: string };
 
 export type Theme = "dark" | "light" | "contrast";
 
@@ -81,6 +96,10 @@ export interface AppState {
   heapInspection: string | null;
   compareA: string | null;
   compareB: string | null;
+  code: CodeLocation | null;
+  codeBack: CodeLocation[];
+  codeForward: CodeLocation[];
+  codeSide: "classes" | "resources";
   focus: FocusRequest | null;
   connected: boolean;
   toasts: Toast[];
@@ -120,6 +139,10 @@ export const store = createStore<AppState>({
   heapInspection: null,
   compareA: null,
   compareB: null,
+  code: null,
+  codeBack: [],
+  codeForward: [],
+  codeSide: "classes",
   focus: null,
   connected: false,
   toasts: [],
@@ -171,6 +194,32 @@ export function selectSession(id: string | null) {
     heapSet: null,
     heapTrail: [],
     heapObject: null,
+    code: null,
+    codeBack: [],
+    codeForward: [],
+  });
+}
+
+/** Opens a location in the decompiler view, recording history for back/forward. */
+export function openCode(loc: CodeLocation) {
+  store.set((s) => ({
+    view: "code",
+    code: loc,
+    codeBack: s.code ? [...s.codeBack.slice(-99), s.code] : s.codeBack,
+    codeForward: [],
+    codeSide: loc.type === "resource" ? "resources" : s.codeSide,
+  }));
+}
+
+export function codeHistory(dir: -1 | 1) {
+  store.set((s) => {
+    const from = dir < 0 ? s.codeBack : s.codeForward;
+    if (!from.length || !s.code) return {};
+    const target = from[from.length - 1];
+    const rest = from.slice(0, -1);
+    return dir < 0
+      ? { code: target, codeBack: rest, codeForward: [...s.codeForward, s.code] }
+      : { code: target, codeForward: rest, codeBack: [...s.codeBack, s.code] };
   });
 }
 

@@ -266,7 +266,9 @@ const TITLES: Record<InspectorItem["type"], string> = {
 export function Inspector() {
   const item = useApp((s) => s.inspector);
   const open = useApp((s) => s.inspectorOpen);
-  if (!open) return null;
+  // The decompiler has nothing to inspect and needs the width for code.
+  const code = useApp((s) => s.view === "code");
+  if (!open || code) return null;
   return (
     <aside className="inspector" aria-label="Inspector">
       <div className="inspector-head">

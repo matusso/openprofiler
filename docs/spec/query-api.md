@@ -2,7 +2,8 @@
 
 The Query API is the single contract between `openprofiler-daemon` and every client: the desktop/web UI,
 the `openprofiler` CLI exporter, the MCP server and the IDE bridge. It behaves identically for live
-sessions, `.opsnap` snapshots, HPROF heap dumps and JFR recordings.
+sessions, `.opsnap` snapshots, HPROF heap dumps and JFR recordings. Android apps (`.apk`, `.dex`, …)
+open as `dex` sessions served by the [decompiler](#decompiler) endpoints.
 
 Transport: JSON over HTTP (`/api/v1/...`) plus a WebSocket (`/api/v1/events`) that pushes
 invalidations. All requests carry `Authorization: Bearer <token>` (or `?token=` for the
@@ -32,9 +33,10 @@ Conventions:
 | `GET /api/v1/sessions/{id}/summary` | | `Summary` |
 
 ```ts
-type SessionKind = "hprof" | "jfr" | "snapshot" | "live";
+type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
 type Capability = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception"
-                | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording";
+                | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording"
+                | "decompile";
 interface Session {
   id: string; kind: SessionKind; name: string; path?: string;
   state: "loading" | "ready" | "live" | "detached" | "failed";
@@ -49,8 +51,9 @@ interface LocalJvm {
 }
 interface Summary {
   session: Session;
-  jvm: { name, vm_name, vm_version, vm_vendor, java_version, jvm_args: string[], main_class, os, arch,
-         cpus?: number, max_heap?: number, pid?: number };
+  // Absent for heap-only and dex sessions.
+  jvm?: { name, vm_name, vm_version, vm_vendor, java_version, jvm_args: string[], main_class, os, arch,
+          cpus?: number, max_heap?: number, pid?: number };
   start: number; end: number;
   sample_counts: { [kind: string]: number };
   threads: number;
@@ -200,6 +203,54 @@ interface Insight { kind: string; title: string; severity: "info" | "warning" | 
 Inspection kinds: `duplicate_strings`, `duplicate_arrays`, `empty_collections`,
 `sparse_arrays`, `zero_arrays`, `bad_hash_distribution`, `thread_locals`,
 `classloader_leaks`, `big_collections`, `inner_class_retention`.
+
+## Decompiler
+
+Available when the session has the `decompile` capability: `POST /sessions/open` with an `.apk`
+(also `.xapk`, `.apks`, `.apkm`, `.aab`) or `.dex` file. The daemon decompiles in process with
+`openprofiler-dex`; opening indexes the dex files, and each class is decompiled on first request
+and cached. The session stays `loading` while the input is indexed and goes `failed` with an
+`error` for unreadable input (JVM `.jar`/`.class` files are rejected).
+
+Paths are under `/api/v1/sessions/{id}/code/`. Node ids are small integers assigned by the
+daemon when a class, method or field first appears in a response; they are stable for the life of
+the session.
+
+| Method & path | Body | Result |
+|---|---|---|
+| `GET .../code/summary` | | `{ engine, classes, packages, resources, dex_files: { name, version, classes }[], warnings: string[] }` |
+| `POST .../code/packages` | `{ parent?: string }` (`""` = top level) | `{ packages: { name, full, classes }[], classes: ClassRef[] }` |
+| `POST .../code/class` | `{ name: string, view?: "java"\|"smali" }` or `{ node: number }` | `ClassCode` |
+| `POST .../code/usages` | `{ node: number, limit?: number }` | `{ target: CodeNode, usages: Usage[], truncated }` |
+| `POST .../code/search` | `{ query: string, scope?: "names"\|"code", limit?, budget_ms? }` | `{ results: (CodeNode \| TextMatch)[], truncated, scanned, total }` |
+| `GET .../code/resources` | | `{ resources: { name, type, size }[] }` |
+| `POST .../code/resource` | `{ name: string }` (`"resources.arsc!res/values/strings.xml"` for decoded sub-files) | `Resource` |
+
+```ts
+interface ClassRef { name: string; full: string; kind: "class" | "interface" | "enum" | "annotation" | "abstract" }
+interface CodeNode { id: number; kind: "class" | "method" | "field"; name: string; full: string;
+                     cls?: string /* top-level class whose source declares it */ }
+interface ClassCode {
+  name: string; package: string; view: "java" | "smali"; code: string;
+  links: [start: number, length: number, node: number, decl: 0 | 1][];  // offsets into code, sorted
+  nodes: { [id: string]: CodeNode };
+  focus?: number;  // with { node }: offset of that node's declaration
+}
+interface Usage { cls: string; pos: number; line: number; snippet: string; in?: string /* enclosing member */ }
+interface TextMatch { kind: "code"; cls: string; pos: number; line: number; snippet: string }
+interface Resource { name: string; type: string; text?: string; image?: string /* base64 */;
+                     binary?: boolean; files?: string[] /* decoded sub-files */ }
+```
+
+- Package chains with a single child and no classes are compacted (`com.example.app`); `full` is
+  the package to pass as `parent` next.
+- `links` mark references (`decl: 0`, click → declaration) and declarations (`decl: 1`, click →
+  usages). Smali has no links.
+- `search` with `scope: "names"` matches class, method and field names without decompiling. With
+  `scope: "code"` it decompiles classes in parallel and searches their text until `limit` results
+  or `budget_ms` (default 20 000) are reached; `truncated` then reports an incomplete scan.
+- `AndroidManifest.xml` and binary XML are decoded to text; `resources.arsc` returns its public
+  ids plus the list of decoded `res/values*/...` files; images up to 4 MB come back as base64.
 
 ## Compare
 

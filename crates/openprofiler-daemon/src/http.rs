@@ -92,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/events", post(events_h))
         .route("/sessions/{id}/export", post(export_h))
         .route("/sessions/{id}/heap/{*rest}", any(heap_h))
+        .route("/sessions/{id}/code/{*rest}", any(code_h))
         .route("/sessions/{id}/recording", post(live_h))
         .route("/sessions/{id}/heap-dump", post(live_h))
         .route("/sessions/{id}/snapshot", post(live_h))
@@ -271,6 +272,16 @@ async fn heap_h(
     let req: Value = body(&b)?;
     let post = method == Method::POST;
     to_json(blocking(move || crate::heap::handle(&engine, &s, &rest, post, req)).await?)
+}
+
+async fn code_h(
+    State(st): State<AppState>,
+    Path((id, rest)): Path<(String, String)>,
+    b: axum::body::Bytes,
+) -> ApiResult {
+    let s = session(&st, &id)?;
+    let req: Value = body(&b)?;
+    to_json(blocking(move || crate::decompile::handle(&s, &rest, req)).await?)
 }
 
 async fn live_h(State(st): State<AppState>, Path(id): Path<String>, req: Request) -> ApiResult {

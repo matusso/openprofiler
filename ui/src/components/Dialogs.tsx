@@ -39,7 +39,7 @@ export function useOpenFile() {
       rememberPath(path);
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       selectSession(s.id);
-      store.set({ dialog: null, view: "overview" });
+      store.set({ dialog: null, view: s.kind === "dex" ? "code" : "overview" });
     },
   });
 }
@@ -54,7 +54,7 @@ export function OpenDialog() {
   const submit = (p = path) => p.trim() && open.mutate(p.trim());
   return (
     <Modal
-      title="Open snapshot, recording or heap dump"
+      title="Open a profile, heap dump or app to decompile"
       onClose={close}
       footer={
         <>
@@ -69,7 +69,9 @@ export function OpenDialog() {
     >
       <p className="muted" style={{ marginTop: 0 }}>
         Supports <code>.opsnap</code> snapshots, <code>.jfr</code> recordings and <code>.hprof</code> heap
-        dumps (optionally gzipped). The path is resolved on the machine running the OpenProfiler daemon.
+        dumps (optionally gzipped). Android apps (<code>.apk</code>, <code>.xapk</code>, <code>.apks</code>,{" "}
+        <code>.aab</code>) and <code>.dex</code> files open in the decompiler. The path is resolved on the
+        machine running the OpenProfiler daemon.
       </p>
       <div style={{ display: "flex", gap: 8 }}>
         <input

@@ -1,0 +1,48 @@
+-263 -2147483395
+12009 3001
+false true
+string of 5 chars | object 42 #42
+[0, 1, 4, 9, 16]
+[[1, 0], [0, 0], [0, 0]]
+[a, b, basics]
+b 44
+10 6 1 0.5
+x, yz
+-1
+0
+1
+2
+true false false false
+true true false
+69 725 -1
+1 -1
+many
+zero
+one
+few
+few
+many
+1
+2
+3
+0
+1 2 0
+2 [, a, , b]
+9 9
+z null
+12 -1
+def | bad: Range [3, 2) out of bounds for length 2 | bad: Cannot invoke "Object.toString()" because "o" is null
+ok
+IOException: zero
+IllegalArgumentException: negative: -2
+3 1
+npe 2
+-1
+1
+1 3 0
+0.000 3.142 12.566 0.000
+true
+1 2 s
+run 0
+true
+9 c

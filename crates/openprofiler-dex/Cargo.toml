@@ -1,0 +1,19 @@
+[package]
+name = "openprofiler-dex"
+description = "Android DEX/APK reader, smali disassembler and Dalvik-to-Java decompiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+flate2.workspace = true
+rayon.workspace = true
+memmap2.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,76 @@
+Binary APK
+Package name=dev.openprofiler.demo id=7f
+  type array id=01 entryCount=2
+    resource 0x7f010000 array/numbers
+      () (array) size=2
+        [1, 2]
+    resource 0x7f010001 array/planets
+      () (array) size=2
+        ["Mercury", "Venus"]
+  type attr id=02 entryCount=2
+    resource 0x7f020000 attr/customAttr
+      () (attr) type=dimension
+    resource 0x7f020001 attr/mode
+      () (attr) type=enum size=2
+        fast(0x7f070001)=0x00000000
+        slow(0x7f070002)=0x00000001
+  type bool id=03 entryCount=1
+    resource 0x7f030000 bool/enabled
+      () true
+  type color id=04 entryCount=2
+    resource 0x7f040000 color/accent
+      () #ff03dac5
+    resource 0x7f040001 color/primary
+      () #ff6200ee
+      (night) #ffbb86fc
+  type dimen id=05 entryCount=3
+    resource 0x7f050000 dimen/frac
+      () 1.500000px
+    resource 0x7f050001 dimen/margin
+      () 16.000000dp
+      (sw600dp-v31) 32.000000dp
+      (land-xxhdpi) 24.000000dp
+    resource 0x7f050002 dimen/text_size
+      () 14.000000sp
+  type drawable id=06 entryCount=1
+    resource 0x7f060000 drawable/bg
+      () (file) res/drawable/bg.xml type=XML
+  type id id=07 entryCount=4
+    resource 0x7f070000 id/extra_id
+      () (id)
+    resource 0x7f070001 id/fast
+      () (id)
+    resource 0x7f070002 id/slow
+      () (id)
+    resource 0x7f070003 id/title
+      () (id)
+  type integer id=08 entryCount=1
+    resource 0x7f080000 integer/max_items
+      () 10
+  type layout id=09 entryCount=1
+    resource 0x7f090000 layout/main
+      () (file) res/layout/main.xml type=XML
+  type plurals id=0a entryCount=1
+    resource 0x7f0a0000 plurals/apples
+      () (plurals) size=2
+        one="%d apple"
+        other="%d apples"
+  type string id=0b entryCount=4
+    resource 0x7f0b0000 string/app_name
+      () "Demo"
+      (de) "Demo DE"
+      (pt-rBR) "Demonstração"
+    resource 0x7f0b0001 string/at_sign
+      () "@not_a_ref"
+    resource 0x7f0b0002 string/greeting
+      () "Hello & welcome"
+      (de) "Hallo und willkommen"
+    resource 0x7f0b0003 string/quote
+      () "It's "quoted"
+      next line"
+  type style id=0c entryCount=1
+    resource 0x7f0c0000 style/AppTheme
+      () (style) size=3 parent=0x01030237
+        0x01010056=true
+        0x01010433=@color/primary
+        customAttr(0x7f020000)=8.000000dp

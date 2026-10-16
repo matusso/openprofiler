@@ -1,5 +1,12 @@
 import type {
   CallGraphRequest,
+  CodeClassResponse,
+  CodePackagesResponse,
+  CodeResourceResponse,
+  CodeResourceRow,
+  CodeSearchResponse,
+  CodeSummary,
+  CodeUsagesResponse,
   CallGraphResponse,
   ClassRow,
   CompareRequest,
@@ -176,6 +183,21 @@ export class OpenProfilerClient {
     this.post<{ insight: Insight; rows: unknown[] }>(`/sessions/${id}/heap/inspection`, { kind, limit });
   heapHistogramDiff = (id: string, other: string) =>
     this.post<{ rows: HistogramDiffRow[] }>(`/sessions/${id}/heap/histogram-diff`, { other_session: other });
+
+  // Decompiler (jadx)
+  codeSummary = (id: string) => this.get<CodeSummary>(`/sessions/${id}/code/summary`);
+  codePackages = (id: string, parent: string) =>
+    this.post<CodePackagesResponse>(`/sessions/${id}/code/packages`, { parent });
+  codeClass = (id: string, req: { name?: string; node?: number; view: "java" | "smali" }) =>
+    this.post<CodeClassResponse>(`/sessions/${id}/code/class`, req);
+  codeUsages = (id: string, node: number, limit?: number) =>
+    this.post<CodeUsagesResponse>(`/sessions/${id}/code/usages`, { node, limit });
+  codeSearch = (id: string, req: { query: string; scope: "names" | "code"; limit?: number }) =>
+    this.post<CodeSearchResponse>(`/sessions/${id}/code/search`, req);
+  codeResources = (id: string) =>
+    this.get<{ resources: CodeResourceRow[] }>(`/sessions/${id}/code/resources`);
+  codeResource = (id: string, name: string) =>
+    this.post<CodeResourceResponse>(`/sessions/${id}/code/resource`, { name });
 
   // Event browser & IDE bridge
   events = (id: string, req: EventsRequest) => this.post<EventsResponse>(`/sessions/${id}/events`, req);

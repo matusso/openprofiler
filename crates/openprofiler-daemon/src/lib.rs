@@ -4,7 +4,9 @@
 //! - [`query`] evaluates Query API v1 requests (docs/spec/query-api.md) against a session.
 //! - [`http`] exposes the Query API over HTTP + WebSocket; [`start`] runs it.
 //! - [`mcp`] is the Model Context Protocol server built on the same queries.
+//! - [`decompile`] serves Java source decompiled from `.apk`/`.dex` files by `openprofiler-dex`.
 
+pub mod decompile;
 pub mod demo;
 pub mod engine;
 pub mod events;
