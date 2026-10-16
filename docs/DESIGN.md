@@ -218,6 +218,8 @@ across all indexes, on disk and mmap'd.
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
   smali (or, for JVM classes, bytecode) tabs, back/forward history, and a usages panel; a Resources
   tab shows decoded resources (or a jar's other files).
+- The Open dialog takes a path on the daemon's machine, recent paths, and a file browser over that
+  machine's directories (`/fs/list`); on the desktop also the system file dialog.
 - The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
   in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
   (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
@@ -288,8 +290,20 @@ same calls.
   its lambdas can't be inlined); other targets print as method references; records print as
   `record R(...)` without their generated members; enum constants with class bodies print the
   body inline; locals holding a lambda of a `java.util.function` interface get its generic type
-  when debug info doesn't have one. The low-level view of a JVM class is its original bytecode
-  (`jvm/disasm.rs`) with offsets, resolved constants and linked member references.
+  when debug info doesn't have one, and other locals get generic types from the program's
+  fields, methods and the method's return type their values flow through (all must agree;
+  `ArrayList` flowing into `List<String>` becomes `ArrayList<String>`); `new` of a generic class
+  assigned to a generic target prints a diamond. The low-level view of a JVM class is its
+  original bytecode (`jvm/disasm.rs`) with offsets, resolved constants and linked member
+  references. A directory of class files (`target/classes`) opens like a jar.
+- **Recovered source constructs** (shared by both inputs, `structure.rs` and the printer):
+  `finally` from the copies compilers inline before each exit plus the catch-all that rethrows
+  (an exit whose value `F` could change is the shared code after the try, not the part);
+  try-with-resources from javac's suppressing close handler (nested resources share one
+  statement; `catch`/`finally` around it are hoisted); `switch` on strings from the
+  `hashCode()` switch and the index switch (javac and d8 forms, hash collisions included);
+  boxing and unboxing calls are dropped where the context converts implicitly, except for
+  arguments of overloaded methods (`List.remove`) and `==` between two unboxed values.
 - **Pipeline per method** (`method.rs`, `structure.rs`, `java.rs`):
   1. Decode instructions (`insn.rs`), split basic blocks at branches, switch targets and try
      boundaries; exception edges only leave blocks that can throw.

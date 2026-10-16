@@ -95,7 +95,7 @@ and the trigger file format.
 
 The decompiler is built in (`crates/openprofiler-dex`, written in Rust; no JVM or external tool
 needed). It reads Android apps (`.apk`, `.xapk`, `.apks`, `.aab`, `.dex`) and JVM bytecode (`.jar`,
-`.war`, `.ear`, `.jmod`, `.aar`, `.class`):
+`.war`, `.ear`, `.jmod`, `.aar`, `.class`, or a directory of class files such as `target/classes`):
 
 ```sh
 openprofiler daemon --web app.apk                     # browse it in the UI (Code view)
@@ -109,10 +109,14 @@ openprofiler decompile lib.jar com.example.Service --bytecode    # JVM bytecode 
 Jars, wars and ears open with the classes at any depth (`BOOT-INF/classes`, `WEB-INF/classes`);
 archives without their own classes, such as an `.ear`, load the jars inside them. In multi-release
 jars the base version of a class wins. Java output covers lambdas and method references (lambda
-bodies are printed in place), string concatenation, records, enums with constant bodies,
-try-with-resources, and generic signatures; the low-level tab shows the original bytecode.
+bodies are printed in place), string concatenation, `switch` on strings, `finally` blocks and
+try-with-resources, implicit boxing, records, enums with constant bodies, and generic types
+(without debug info, local generics are inferred from the fields, methods and returns their
+values flow through); the low-level tab shows the original bytecode.
 
-In the UI, open the file like any other (⌘O or drop it). The **Code** view has the package tree,
+In the UI, open the file like any other (⌘O or drop it); **Browse…** in the Open dialog
+navigates the directories of the machine running the daemon, and can open a directory of
+classes. The **Code** view has the package tree,
 search over class, method and field names (tick *In code* to search source text), Java and smali
 tabs, and a **Resources** tab with the decoded `AndroidManifest.xml`, binary XML layouts,
 `resources.arsc` values and images. Click a reference to go to its declaration, click a

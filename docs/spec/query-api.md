@@ -31,6 +31,18 @@ Conventions:
 | `DELETE /api/v1/sessions/{id}` | | `{}` |
 | `GET /api/v1/jvms` | | `LocalJvm[]` |
 | `GET /api/v1/sessions/{id}/summary` | | `Summary` |
+| `POST /api/v1/fs/list` | `{ "path"?: string, "hidden"?: boolean }` | `FsListing` |
+
+`fs/list` lists a directory on the daemon's machine for the Open dialog (the home directory when
+`path` is omitted; a file path lists its directory). Entries are directories first, then files;
+`kind` is what `sessions/open` would open the file as, judged by its extension.
+
+```ts
+type FsEntry = { name: string; path: string; dir: boolean; size: number; modified?: number;
+                 kind?: "profile" | "heap" | "code" };
+type FsListing = { path: string; parent?: string; home?: string; entries: FsEntry[];
+                   truncated: boolean };
+```
 
 ```ts
 type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
@@ -207,10 +219,12 @@ Inspection kinds: `duplicate_strings`, `duplicate_arrays`, `empty_collections`,
 ## Decompiler
 
 Available when the session has the `decompile` capability: `POST /sessions/open` with an `.apk`
-(also `.xapk`, `.apks`, `.apkm`, `.aab`) or `.dex` file. The daemon decompiles in process with
-`openprofiler-dex`; opening indexes the dex files, and each class is decompiled on first request
-and cached. The session stays `loading` while the input is indexed and goes `failed` with an
-`error` for unreadable input (JVM `.jar`/`.class` files are rejected).
+(also `.xapk`, `.apks`, `.apkm`, `.aab`) or `.dex` file, JVM bytecode (`.jar`, `.war`, `.ear`,
+`.jmod`, `.aar`, `.class`), or a directory of `.class` files. The daemon decompiles in process
+with `openprofiler-dex`; opening indexes the classes, and each class is decompiled on first
+request and cached. The session stays `loading` while the input is indexed and goes `failed`
+with an `error` for unreadable input. `code/summary` has `format`: `jvm` for class files (the
+`smali` view is then JVM bytecode) or `dex`.
 
 Paths are under `/api/v1/sessions/{id}/code/`. Node ids are small integers assigned by the
 daemon when a class, method or field first appears in a response; they are stable for the life of
