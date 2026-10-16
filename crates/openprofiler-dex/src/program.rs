@@ -184,10 +184,22 @@ fn is_code_entry(name: &str) -> bool {
 
 impl Program {
     /// Opens an `.apk` (or `.xapk`/`.apks`/`.aab`/zip with dex files), a `.dex` file, or JVM
-    /// bytecode: a `.class` file or a `.jar`/`.war`/`.ear`/`.jmod`/zip with class files.
+    /// bytecode: a `.class` file, a `.jar`/`.war`/`.ear`/`.jmod`/zip with class files, or a
+    /// directory of class files.
     pub fn open(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if path.is_dir() {
+            // A directory of class files (`target/classes`).
+            let files = jvm::class_files(path)?;
+            if files.is_empty() {
+                bail!("{name}: no .class files in the directory");
+            }
+            let (d, warnings) = jvm::build(&name, files)?;
+            let mut p = Self::build(&name, vec![d], None)?;
+            p.warnings = warnings;
+            return Ok(p);
+        }
+        let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         Self::from_bytes(&name, data)
     }
 

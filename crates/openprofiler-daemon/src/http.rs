@@ -74,6 +74,7 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/sessions", get(list_sessions))
         .route("/sessions/open", post(open))
+        .route("/fs/list", post(fs_list))
         .route("/sessions/attach", post(attach))
         .route("/sessions/demo", post(demo))
         .route("/sessions/{id}", axum::routing::delete(close))
@@ -178,6 +179,20 @@ struct OpenReq {
 async fn open(State(st): State<AppState>, b: axum::body::Bytes) -> ApiResult {
     let r: OpenReq = body(&b)?;
     to_json(st.engine.open(&r.path)?.info())
+}
+
+#[derive(Deserialize, Default)]
+struct FsReq {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    hidden: bool,
+}
+
+/// Directory listing for the Open dialog's file browser.
+async fn fs_list(b: axum::body::Bytes) -> ApiResult {
+    let r: FsReq = if b.is_empty() { FsReq::default() } else { body(&b)? };
+    to_json(blocking(move || crate::fs::list(r.path.as_deref(), r.hidden)).await?)
 }
 
 async fn demo(State(st): State<AppState>) -> ApiResult {

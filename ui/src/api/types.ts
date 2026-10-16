@@ -636,3 +636,25 @@ export interface MBeanTrackRequest {
   unit?: Unit;
   enabled?: boolean;
 }
+
+// ---------- File browser ----------
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  /** Seconds since the Unix epoch. */
+  modified?: number | null;
+  /** What the daemon opens it as (by extension). */
+  kind?: "profile" | "heap" | "code" | null;
+}
+
+/** A directory on the machine running the daemon. */
+export interface FsListing {
+  path: string;
+  parent?: string | null;
+  home?: string | null;
+  entries: FsEntry[];
+  truncated: boolean;
+}

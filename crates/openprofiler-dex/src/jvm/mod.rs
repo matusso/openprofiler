@@ -204,6 +204,52 @@ impl Classes {
     }
 }
 
+/// Most class files read from one directory tree.
+const MAX_DIR_FILES: usize = 500_000;
+
+/// Walks a directory tree (`target/classes`, an unpacked jar) for `.class` files, without
+/// following symlinks. Stops at the first one when `first_only`.
+fn walk_classes(dir: &std::path::Path, first_only: bool, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            let p = e.path();
+            if t.is_dir() {
+                stack.push(p);
+            } else if t.is_file() && p.extension().is_some_and(|x| x == "class") {
+                out.push(p);
+                if first_only || out.len() >= MAX_DIR_FILES {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a directory tree holds class files.
+pub fn has_class_files(dir: &std::path::Path) -> bool {
+    let mut found = vec![];
+    walk_classes(dir, true, &mut found).is_ok() && !found.is_empty()
+}
+
+/// The class files under a directory as `(path relative to it, bytes)`, sorted by path.
+pub fn class_files(dir: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut paths = vec![];
+    walk_classes(dir, false, &mut paths)?;
+    paths.sort();
+    paths
+        .into_par_iter()
+        .map(|p| {
+            let rel = p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+            let bytes = std::fs::read(&p).map_err(|e| anyhow!("cannot read {}: {e}", p.display()))?;
+            Ok((rel, bytes))
+        })
+        .collect()
+}
+
 /// Whether the bytes are a class file.
 pub fn is_class(data: &[u8]) -> bool {
     classfile::is_class(data)

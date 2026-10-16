@@ -61,7 +61,7 @@ impl Loader for DefaultLoader {
                 session.set_profile(Arc::new(RwLock::new(profile)));
                 Ok(())
             }
-            FileFormat::Dex | FileFormat::Class | FileFormat::Archive => {
+            FileFormat::Dex | FileFormat::Class | FileFormat::ClassDir | FileFormat::Archive => {
                 crate::decompile::load(path, session)
             }
         }

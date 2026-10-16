@@ -132,6 +132,25 @@ mod tests {
             "{res}"
         );
 
+        // A directory of class files (`target/classes`).
+        let classes = std::env::temp_dir().join(format!("op-classdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&classes);
+        let data = std::fs::read(&jar).unwrap();
+        let zip = openprofiler_dex::zip::Zip::parse(&data).unwrap();
+        for e in zip.entries.iter().filter(|e| e.name.ends_with(".class")) {
+            let out = classes.join(&e.name);
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            std::fs::write(out, zip.read(e).unwrap()).unwrap();
+        }
+        assert_eq!(crate::engine::detect_format(&classes).unwrap(), crate::engine::FileFormat::ClassDir);
+        let d = engine.open_blocking(&classes).unwrap();
+        let code = handle(&d, "class", json!({ "name": "corpus.Control" })).unwrap();
+        assert!(code["code"].as_str().unwrap().contains("public class Control"));
+        let empty = classes.join("corpus").join("none");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(crate::engine::detect_format(&empty).is_err());
+        let _ = std::fs::remove_dir_all(&classes);
+
         // A bare class file.
         let dir = std::env::temp_dir().join(format!("op-class-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

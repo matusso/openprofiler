@@ -42,6 +42,7 @@ import type {
   SelectStep,
   ServerEvent,
   Session,
+  FsListing,
   Summary,
   TelemetryRequest,
   TelemetryResponse,
@@ -115,6 +116,8 @@ export class OpenProfilerClient {
   // Sessions
   sessions = () => this.get<Session[]>("/sessions");
   open = (path: string) => this.post<Session>("/sessions/open", { path });
+  /** Lists a directory on the daemon's machine (its home directory without a path). */
+  fsList = (path?: string, hidden = false) => this.post<FsListing>("/fs/list", { path, hidden });
   attach = (pid: number, options?: Record<string, unknown>) =>
     this.post<Session>("/sessions/attach", { pid, options });
   close = (id: string) => this.request<unknown>("DELETE", `/sessions/${id}`);

@@ -12,6 +12,7 @@ pub mod demo;
 pub mod engine;
 pub mod events;
 pub mod export;
+pub mod fs;
 pub mod heap;
 pub mod http;
 pub mod ide;

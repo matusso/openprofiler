@@ -272,6 +272,8 @@ pub enum FileFormat {
     Dex,
     /// JVM class file.
     Class,
+    /// Directory tree of JVM class files (`target/classes`).
+    ClassDir,
     /// Zip container of code for the decompiler: Android apps with `classes*.dex` (`.apk`,
     /// `.xapk`, `.apks`, `.aab`, ...) or JVM archives with class files (`.jar`, `.war`, `.ear`,
     /// `.jmod`, `.aar`).
@@ -284,6 +286,15 @@ const ARCHIVE_EXTENSIONS: &[&str] =
 
 pub fn detect_format(path: &Path) -> Result<FileFormat> {
     use std::io::Read;
+    if path.is_dir() {
+        if openprofiler_dex::jvm::has_class_files(path) {
+            return Ok(FileFormat::ClassDir);
+        }
+        bail!(
+            "{}: a directory without .class files (open a file, or a directory of classes)",
+            path.display()
+        );
+    }
     let mut f = std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut head = [0u8; 18];
     let n = f.read(&mut head)?;
@@ -454,7 +465,9 @@ impl Engine {
             FileFormat::Hprof | FileFormat::HprofGz => SessionKind::Hprof,
             FileFormat::Jfr => SessionKind::Jfr,
             FileFormat::Snapshot | FileFormat::Recording => SessionKind::Snapshot,
-            FileFormat::Dex | FileFormat::Class | FileFormat::Archive => SessionKind::Dex,
+            FileFormat::Dex | FileFormat::Class | FileFormat::ClassDir | FileFormat::Archive => {
+                SessionKind::Dex
+            }
         };
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let session = self.new_session(kind, &name, Some(path.clone()));
