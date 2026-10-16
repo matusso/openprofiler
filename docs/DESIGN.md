@@ -217,9 +217,10 @@ across all indexes, on disk and mmap'd.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
   smali tabs, back/forward history, and a usages panel; a Resources tab shows decoded resources.
-- The MBeans view (live sessions): the platform MBean server as a domain tree, attribute values
-  (auto-refreshed, writable ones editable), operations with typed argument fields, and numeric
-  attributes plotted as telemetry series sampled by the agent.
+- The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
+  in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
+  (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
+  subscribed beans, and numeric attributes plotted as telemetry series sampled by the agent.
 - A global time range: brushing the timeline filters every view.
 - A command palette (⌘K) for actions, views, classes and methods, with go-to-source through the IDE
   bridge.
@@ -231,8 +232,9 @@ across all indexes, on disk and mmap'd.
 
 - `openprofiler mcp` runs an MCP server on stdio. Tools include `list_jvms`, `attach`,
   `prepare_profiling`, `load_snapshot`, `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`,
-  `compare`, `thread_dump` and the MBean tools (`list_mbeans`, `get_mbean`, `invoke_mbean`,
-  `track_mbean`); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
+  `compare`, `thread_dump` and the MBean tools (`list_mbean_servers`, `connect_jmx`,
+  `list_mbeans`, `get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`,
+  `mbean_notifications`); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge

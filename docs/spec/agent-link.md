@@ -170,16 +170,30 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 | `RunGc` | JVMTI `ForceGarbageCollection` | `ok` |
 | `AddBookmark{label, color}` | adds a bookmark | `ok` |
 | `SetTriggers{triggers}` | replaces the agent's triggers (see below) | `ok`, or an error for an invalid trigger |
-| `MBeanList{pattern}` | MBeans of the platform MBean server matching an ObjectName pattern (empty = all) | `MBeanList` (beans + tracked attributes) |
-| `MBeanGet{name}` | `getMBeanInfo` plus every readable attribute's value | `MBeanInfo` |
-| `MBeanInvoke{name, operation, signature, args}` | `MBeanServer.invoke` | `MBeanInvokeResult` |
-| `MBeanSet{name, attribute, value}` | `MBeanServer.setAttribute` | `ok` |
-| `MBeanTrack{name, attribute, item, label, unit, enabled}` | starts/stops sampling an attribute as telemetry | `MBeanList` (tracked only) |
+| `MBeanServers{}` | the MBean servers (platform, others in the JVM, connected remote JMX) | `MBeanServerList` |
+| `MBeanConnect{url, username, password, enabled}` | connects the JVM to a remote JMX server, or disconnects it | `MBeanServerList` |
+| `MBeanList{server, pattern}` | MBeans matching an ObjectName pattern (empty = all) | `MBeanList` (beans + tracked attributes) |
+| `MBeanGet{server, name}` | `getMBeanInfo` plus every readable attribute's value | `MBeanInfo` |
+| `MBeanInvoke{server, name, operation, signature, args}` | `MBeanServerConnection.invoke` | `MBeanInvokeResult` |
+| `MBeanSet{server, name, attribute, value}` | `MBeanServerConnection.setAttribute` | `ok` |
+| `MBeanTrack{server, name, attribute, item, label, unit, enabled}` | starts/stops sampling an attribute as telemetry | `MBeanList` (tracked only) |
+| `MBeanSubscribe{server, name, enabled}` | adds/removes a notification listener on one MBean | `MBeanNotifications` (subscriptions only) |
+| `MBeanNotifications{after}` | buffered notifications with `seq > after` | `MBeanNotifications` |
 
 ## MBeans
 
-The `mbeans` capability exposes the JVM's platform MBean server (`java.lang`, `java.nio`,
-`com.sun.management`, `jdk.management.jfr`, and whatever the application registers there).
+The `mbeans` capability exposes the JVM's MBean servers. Requests name one with `server`:
+
+- empty: the platform MBean server (`java.lang`, `java.nio`, `com.sun.management`,
+  `jdk.management.jfr`, and whatever the application registers there);
+- the delegate's `MBeanServerId`: another MBean server created in the JVM through
+  `MBeanServerFactory` (e.g. by an application server);
+- a JMX service URL: a remote JMX server the JVM connected to with `MBeanConnect`. The connection
+  is made from inside the profiled JVM (its network, its `java.management.rmi` module), times out
+  after 15 s, and lives until `MBeanConnect{enabled: false}` or the JVM exits. Credentials are
+  passed to the JMX connector and not stored otherwise; they travel over the agent link, so use TLS
+  when the link leaves the host. A closed or failed connection is reported in
+  `MBeanServerInfo.error`.
 
 - Values (`MBeanAttribute.value_json`, `MBeanInvokeResult.value_json`) are JSON: numbers, booleans,
   strings and `null` as themselves; `CompositeData` and `Map`s as objects; `TabularData`,
@@ -190,7 +204,9 @@ The `mbeans` capability exposes the JVM's platform MBean server (`java.lang`, `j
   JSON array (`["a", "b"]`, `[1, 2]`) or a comma-separated list. Other types are rejected.
 - Failures (unknown bean, conversion error, an exception thrown by the bean) come back as a failed
   `Response` with the root cause, e.g. `javax.management.InstanceNotFoundException: x:type=Y`.
-- Requests run on the agent-link thread, so a slow operation delays data batches until it returns.
+- Requests run on a dedicated agent thread (`OpenProfiler MBeans`), one at a time in arrival
+  order, so a slow operation or remote call delays other MBean requests but not data batches or
+  other requests. Responses can therefore arrive out of order; they are matched by `id`.
 - **Tracked attributes** are sampled once per second by the telemetry thread and published as
   ordinary telemetry series with key `mbean:<canonical name>#<attribute>` or
   `mbean:<canonical name>#<attribute>.<item>` for an item of a `CompositeData` attribute
@@ -198,7 +214,17 @@ The `mbeans` capability exposes the JVM's platform MBean server (`java.lang`, `j
   plotted; other values produce no sample. Tracked series are recorded like the built-in ones
   (live data, `.oplink` recordings, snapshots) and can be used as threshold trigger metrics. The
   label defaults to `<attribute>[.<item>] (<name or type key property>)`; tracking an attribute
-  again updates its label and unit. Stopping keeps the samples already taken.
+  again updates its label and unit. Stopping keeps the samples already taken. Attributes of other
+  servers use the key `mbean:[<server>]<canonical name>#…`; remote ones are read by a separate
+  poller thread so a slow connection never stalls the telemetry thread.
+- **Notifications**: `MBeanSubscribe` adds a listener to one MBean (not a pattern) that is a
+  `NotificationBroadcaster`; `MBeanInfo.notifications` lists what a bean declares. Received
+  notifications go to a buffer of the last 1000, numbered by `seq` (increasing per agent). Poll
+  with `MBeanNotifications{after}` and pass the returned `last_seq` as the next `after`; `missed`
+  counts notifications after `after` that fell out of the buffer. `data_json` is the user data as
+  JSON (e.g. the `GcInfo` of `com.sun.management.gc.notification`), or
+  `{attribute, type, old, new}` for attribute change notifications. Notifications are not part of
+  recordings or snapshots. Subscriptions to a remote server end when it is disconnected.
 
 ## Triggers
 

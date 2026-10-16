@@ -277,18 +277,26 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 
 ## MBeans (live sessions with the `mbeans` capability)
 
-The platform MBean server of the attached JVM (see [agent-link.md](agent-link.md#mbeans) for value
-and argument conversion). Errors from the JVM are returned as `{"error": "agent: <exception>"}`.
+The MBean servers of the attached JVM (see [agent-link.md](agent-link.md#mbeans) for servers,
+value and argument conversion, and notifications). `server` is an `MBeanServerInfo.id`; omitted or
+`""` means the platform MBean server. Errors from the JVM are returned as
+`{"error": "agent: <exception>"}`.
 
 | Method & path | Body | Result |
 |---|---|---|
-| `POST .../mbeans` | `{ pattern?: string }` (ObjectName pattern, e.g. `java.lang:*`) | `{ beans: MBeanSummary[], tracked: TrackedAttribute[] }` |
-| `POST .../mbean` | `{ name }` | `MBeanDetail` |
-| `POST .../mbean-invoke` | `{ name, operation, signature: string[], args: string[] }` | `{ value: Json }` |
-| `POST .../mbean-set` | `{ name, attribute, value: string }` | `{}` |
-| `POST .../mbean-track` | `{ name, attribute, item?, label?, unit?: Unit, enabled?: boolean }` | `{ tracked: TrackedAttribute[] }` |
+| `POST .../mbean-servers` | `{}` | `{ servers: MBeanServerInfo[] }` |
+| `POST .../mbean-connect` | `{ url, username?, password?, enabled?: boolean }` (JMX service URL) | `{ servers: MBeanServerInfo[] }` |
+| `POST .../mbeans` | `{ server?, pattern?: string }` (ObjectName pattern, e.g. `java.lang:*`) | `{ beans: MBeanSummary[], tracked: TrackedAttribute[] }` |
+| `POST .../mbean` | `{ server?, name }` | `MBeanDetail` |
+| `POST .../mbean-invoke` | `{ server?, name, operation, signature: string[], args: string[] }` | `{ value: Json }` |
+| `POST .../mbean-set` | `{ server?, name, attribute, value: string }` | `{}` |
+| `POST .../mbean-track` | `{ server?, name, attribute, item?, label?, unit?: Unit, enabled?: boolean }` | `{ tracked: TrackedAttribute[] }` |
+| `POST .../mbean-subscribe` | `{ server?, name, enabled?: boolean }` | `{ subscriptions: { server, name }[] }` |
+| `POST .../mbean-notifications` | `{ after?: number }` | `MBeanNotifications` |
 
 ```ts
+interface MBeanServerInfo { id: string; kind: "platform" | "local" | "remote"; label: string;
+                            default_domain: string; beans: number; error?: string }
 interface MBeanSummary { name: string; domain: string; class_name: string; description: string }
 interface MBeanDetail {
   name: string; class_name: string; description: string;
@@ -297,9 +305,17 @@ interface MBeanDetail {
   operations: { name: string; return_type: string; description: string;
                 impact: "info" | "action" | "action_info" | "unknown";
                 params: { name: string; type: string; description: string }[] }[];
+  notifications: { name: string; description: string; types: string[] }[];
 }
 interface TrackedAttribute { key: string; label: string; unit: Unit; name: string;
-                             attribute: string; item?: string }
+                             attribute: string; item?: string; server: string }
+interface MBeanNotifications {
+  notifications: { seq: number; time: number /* epoch ns */; server: string; name: string;
+                   type: string; sequence_number: number; message: string; data: Json }[];
+  subscriptions: { server: string; name: string }[];
+  last: number;    // pass as the next `after`
+  missed: number;  // notifications after `after` dropped from the agent's buffer (last 1000)
+}
 ```
 
 `mbean-track` samples a numeric attribute (or `item` of a composite attribute) once per second as
