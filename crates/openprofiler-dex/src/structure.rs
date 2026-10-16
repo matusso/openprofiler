@@ -24,6 +24,8 @@ pub struct Catch {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Case {
     pub keys: Vec<i32>,
+    /// String constants replacing `keys` in a switch on a string.
+    pub labels: Vec<Arc<str>>,
     pub default: bool,
     pub body: Vec<Node>,
 }
@@ -64,6 +66,10 @@ pub enum Node {
     Try {
         body: Vec<Node>,
         catches: Vec<Catch>,
+        /// Runs on every exit (recovered from the copies compilers inline at each exit).
+        finally: Vec<Node>,
+        /// `try (T r = init; ...)`: assignments of the resources, closed in reverse order.
+        resources: Vec<Stmt>,
     },
     Sync {
         lock: Expr,
@@ -324,6 +330,10 @@ pub fn structure(body: &mut Body) -> Structured {
     }
     let mut nodes = cleanup(nodes, &s.body.vars);
     lift_sync(&mut nodes);
+    recover_resources(&mut nodes);
+    recover_finally(&mut nodes);
+    hoist_resources(&mut nodes);
+    string_switches(&mut nodes);
     inline_temps(&mut nodes, &s.body.vars);
     if s.body.ret == "Z" {
         merge_bool_returns(&mut nodes);
@@ -636,6 +646,7 @@ impl S<'_> {
                             body.push(Node::Break(None));
                         }
                         out_cases.push(Case {
+                            labels: vec![],
                             keys: cases.iter().filter(|c| c.1 == t).map(|c| c.0).collect(),
                             default: t == default,
                             body,
@@ -933,7 +944,7 @@ impl S<'_> {
             self.walk(Some(hb), &hc, &mut hbody);
             catches.push(Catch { types: vec![ty], var, body: hbody });
         }
-        out.push(Node::Try { body, catches });
+        out.push(Node::Try { body, catches, finally: vec![], resources: vec![] });
         exit
     }
 }
@@ -944,8 +955,9 @@ fn ends_with_jump(nodes: &[Node]) -> bool {
     match nodes.last() {
         Some(Node::Return(_) | Node::Throw(_) | Node::Break(_) | Node::Continue(_)) => true,
         Some(Node::If { then, els, .. }) => !els.is_empty() && ends_with_jump(then) && ends_with_jump(els),
-        Some(Node::Try { body, catches }) => {
-            ends_with_jump(body) && catches.iter().all(|c| ends_with_jump(&c.body))
+        Some(Node::Try { body, catches, finally, .. }) => {
+            ends_with_jump(finally)
+                || (ends_with_jump(body) && catches.iter().all(|c| ends_with_jump(&c.body)))
         }
         Some(Node::Sync { body, .. }) => ends_with_jump(body),
         _ => false,
@@ -963,8 +975,8 @@ fn size(nodes: &[Node]) -> usize {
             | Node::ForEach { body, .. }
             | Node::Sync { body, .. } => 1 + size(body),
             Node::Switch { cases, .. } => 1 + cases.iter().map(|c| size(&c.body)).sum::<usize>(),
-            Node::Try { body, catches } => {
-                1 + size(body) + catches.iter().map(|c| size(&c.body)).sum::<usize>()
+            Node::Try { body, catches, finally, .. } => {
+                1 + size(body) + catches.iter().map(|c| size(&c.body)).sum::<usize>() + size(finally)
             }
             _ => 1,
         })
@@ -980,7 +992,7 @@ fn strip_trailing_continue(nodes: &mut Vec<Node>) {
             strip_trailing_continue(then);
             strip_trailing_continue(els);
         }
-        Some(Node::Try { body, catches }) => {
+        Some(Node::Try { body, catches, .. }) => {
             strip_trailing_continue(body);
             for c in catches {
                 strip_trailing_continue(&mut c.body);
@@ -1059,10 +1071,15 @@ fn cleanup(nodes: Vec<Node>, vars: &[VarInfo]) -> Vec<Node> {
                 let cases = cases.into_iter().map(|c| Case { body: cleanup(c.body, vars), ..c }).collect();
                 out.push(Node::Switch { label, value, cases });
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
                 let catches =
                     catches.into_iter().map(|c| Catch { body: cleanup(c.body, vars), ..c }).collect();
-                out.push(Node::Try { body: cleanup(body, vars), catches });
+                out.push(Node::Try {
+                    body: cleanup(body, vars),
+                    catches,
+                    finally: cleanup(finally, vars),
+                    resources,
+                });
             }
             Node::Sync { lock, body } => out.push(Node::Sync { lock, body: cleanup(body, vars) }),
             n => out.push(n),
@@ -1101,7 +1118,7 @@ pub fn merge_bool_returns(nodes: &mut Vec<Node>) {
             | Node::ForEach { body, .. }
             | Node::Sync { body, .. } => merge_bool_returns(body),
             Node::Switch { cases, .. } => cases.iter_mut().for_each(|c| merge_bool_returns(&mut c.body)),
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, .. } => {
                 merge_bool_returns(body);
                 catches.iter_mut().for_each(|c| merge_bool_returns(&mut c.body));
             }
@@ -1144,14 +1161,15 @@ fn lift_sync(nodes: &mut Vec<Node>) {
             }
             Node::Loop { body, .. } | Node::For { body, .. } | Node::Sync { body, .. } => lift_sync(body),
             Node::Switch { cases, .. } => cases.iter_mut().for_each(|c| lift_sync(&mut c.body)),
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, .. } => {
                 lift_sync(body);
                 catches.iter_mut().for_each(|c| lift_sync(&mut c.body));
+                lift_sync(finally);
             }
             _ => {}
         }
         if let Node::Stmt(Stmt::MonitorEnter(lock)) = &nodes[i]
-            && let Some(Node::Try { body, catches }) = nodes.get(i + 1)
+            && let Some(Node::Try { body, catches, .. }) = nodes.get(i + 1)
             && catches.len() == 1
             && catches[0].types == [None]
             && matches!(catches[0].body.first(), Some(Node::Stmt(Stmt::MonitorExit(_))))
@@ -1223,8 +1241,9 @@ pub fn count_refs(nodes: &[Node], counts: &mut std::collections::HashMap<VarId, 
                 add(value, counts);
                 cases.iter().for_each(|c| count_refs(&c.body, counts));
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, .. } => {
                 count_refs(body, counts);
+                count_refs(finally, counts);
                 for c in catches {
                     if let Some(v) = c.var {
                         *counts.entry(v).or_default() += 1;
@@ -1239,6 +1258,504 @@ pub fn count_refs(nodes: &[Node], counts: &mut std::collections::HashMap<VarId, 
             Node::Return(Some(e)) | Node::Throw(e) => add(e, counts),
             _ => {}
         }
+    }
+}
+
+/// Child statement lists of a node, mutably.
+fn children_mut(n: &mut Node) -> Vec<&mut Vec<Node>> {
+    match n {
+        Node::If { then, els, .. } => vec![then, els],
+        Node::Loop { body, .. }
+        | Node::For { body, .. }
+        | Node::ForEach { body, .. }
+        | Node::Sync { body, .. } => {
+            vec![body]
+        }
+        Node::Switch { cases, .. } => cases.iter_mut().map(|c| &mut c.body).collect(),
+        Node::Try { body, catches, finally, .. } => {
+            let mut v = vec![body];
+            v.extend(catches.iter_mut().map(|c| &mut c.body));
+            v.push(finally);
+            v
+        }
+        _ => vec![],
+    }
+}
+
+fn mentions(nodes: &[Node], v: VarId) -> bool {
+    let mut counts = std::collections::HashMap::new();
+    count_refs(nodes, &mut counts);
+    counts.contains_key(&v)
+}
+
+fn is_close(e: &Expr, r: VarId) -> bool {
+    matches!(e, Expr::Invoke(InvokeKind::Virtual | InvokeKind::Interface, m, a)
+        if &*m.name == "close" && m.params.is_empty() && a.as_slice() == [Expr::Var(r)])
+}
+
+/// `r != null` (javac checks resources that aren't a `new`).
+fn not_null(e: &Expr, r: VarId) -> bool {
+    matches!(e, Expr::Bin(BinOp::Ne, a, z, _) if **a == Expr::Var(r) && matches!(**z, Expr::Lit { bits: 0, .. }))
+}
+
+/// The handler javac generates for a resource:
+/// `catch (Throwable t) { try { r.close(); } catch (Throwable t2) { t.addSuppressed(t2); } throw t; }`.
+fn suppressing_handler(c: &Catch, r: VarId) -> bool {
+    let throwable = |t: &[Option<Arc<str>>]| match t {
+        [None] => true,
+        [Some(x)] => &**x == "Ljava/lang/Throwable;",
+        _ => false,
+    };
+    let Some(t) = c.var else { return false };
+    if !throwable(&c.types) {
+        return false;
+    }
+    let closing = |n: &[Node]| match n {
+        [Node::Try { body, catches, finally, resources }] => {
+            finally.is_empty()
+                && resources.is_empty()
+                && matches!(body.as_slice(), [Node::Stmt(Stmt::Expr(e))] if is_close(e, r))
+                && matches!(catches.as_slice(), [k] if throwable(&k.types) && k.var.is_some_and(|t2|
+                    matches!(k.body.as_slice(), [Node::Stmt(Stmt::Expr(Expr::Invoke(_, m, a)))]
+                        if &*m.name == "addSuppressed" && a.as_slice() == [Expr::Var(t), Expr::Var(t2)])))
+        }
+        _ => false,
+    };
+    match c.body.as_slice() {
+        [rest @ .., Node::Throw(Expr::Var(x))] if *x == t => {
+            closing(rest)
+                || matches!(rest, [Node::If { cond, then, els }] if not_null(cond, r) && els.is_empty() && closing(then))
+        }
+        _ => false,
+    }
+}
+
+/// `R r = init; try { A } catch (Throwable t) { <close r, suppressing> throw t; } r.close();`,
+/// with `r.close()` also copied before each exit of `A`, is `try (R r = init) { A }`.
+fn recover_resources(nodes: &mut Vec<Node>) {
+    for n in nodes.iter_mut() {
+        for c in children_mut(n) {
+            recover_resources(c);
+        }
+    }
+    let mut i = 0;
+    while i + 1 < nodes.len() {
+        if let Node::Stmt(Stmt::Assign(r, _)) = &nodes[i]
+            && let Node::Try { body, catches, finally, resources } = &nodes[i + 1]
+            && finally.is_empty()
+            && resources.is_empty()
+            && let [handler] = catches.as_slice()
+            && suppressing_handler(handler, *r)
+        {
+            let r = *r;
+            let close = vec![Node::Stmt(Stmt::Expr(Expr::Invoke(
+                InvokeKind::Virtual,
+                MethodRef {
+                    class: "".into(),
+                    name: "close".into(),
+                    params: Vec::new().into(),
+                    ret: "V".into(),
+                },
+                vec![Expr::Var(r)],
+            )))];
+            // The exact close call in the code (its owner class and invoke kind).
+            let found = find_close(body, r).or_else(|| find_close(&nodes[i + 2..], r));
+            let forms: Vec<Vec<Node>> = match found {
+                Some(c) => vec![
+                    vec![c.clone()],
+                    vec![Node::If {
+                        cond: Expr::bin(BinOp::Ne, Expr::Var(r), Expr::lit(0)),
+                        then: vec![c],
+                        els: vec![],
+                    }],
+                ],
+                None => vec![close],
+            };
+            let mut done = false;
+            for f in forms {
+                let mut b = body.clone();
+                let tail = shared_tail(&mut b, &f, &nodes[i + 2..]);
+                if !strip_exits(&mut b, &f, 0) {
+                    continue;
+                }
+                let mut after = 0;
+                if b.ends_with(&f) {
+                    b.truncate(b.len() - f.len());
+                } else if !ends_with_jump(&b) {
+                    if !nodes[i + 2..].starts_with(&f) {
+                        continue;
+                    }
+                    after = f.len();
+                }
+                let Node::Stmt(init) = nodes[i].clone() else { break };
+                let mut resources = vec![init];
+                // Nested resources share one statement: `try (A a = ..; B b = ..)`.
+                if let [Node::Try { body: inner, catches, finally, resources: more }] = b.as_slice()
+                    && catches.is_empty()
+                    && finally.is_empty()
+                    && !more.is_empty()
+                {
+                    resources.extend(more.iter().cloned());
+                    b = inner.clone();
+                }
+                let node = Node::Try { body: b, catches: vec![], finally: vec![], resources };
+                nodes.splice(i..i + 2 + after, std::iter::once(node).chain(tail));
+                done = true;
+                break;
+            }
+            if done {
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn find_close(nodes: &[Node], r: VarId) -> Option<Node> {
+    for n in nodes {
+        if let Node::Stmt(Stmt::Expr(e)) = n
+            && is_close(e, r)
+        {
+            return Some(n.clone());
+        }
+        let mut n = n.clone();
+        for c in children_mut(&mut n) {
+            if let Some(x) = find_close(c, r) {
+                return Some(x);
+            }
+        }
+    }
+    None
+}
+
+/// `try { try (R r = ..) { A } } catch (E e) { .. } finally { .. }` → one statement: the
+/// resources are closed before the catches and the finally run either way.
+fn hoist_resources(nodes: &mut [Node]) {
+    for n in nodes.iter_mut() {
+        for c in children_mut(n) {
+            hoist_resources(c);
+        }
+        if let Node::Try { body, resources, catches, finally } = n
+            && resources.is_empty()
+            && (!catches.is_empty() || !finally.is_empty())
+            && let [Node::Try { body: inner, catches: c2, finally: f2, resources: r2 }] = body.as_slice()
+            && c2.is_empty()
+            && f2.is_empty()
+            && !r2.is_empty()
+        {
+            *resources = r2.clone();
+            *body = inner.clone();
+        }
+    }
+}
+
+/// `try { A } catch (Throwable t) { F; throw t; }`, where the compiler copied `F` before every
+/// exit of `A` (and of the other catches), is `try { A } finally { F }`. A nested `try` with the
+/// typed catches becomes one statement: `try { A } catch (E e) { B } finally { F }`.
+fn recover_finally(nodes: &mut Vec<Node>) {
+    for n in nodes.iter_mut() {
+        for c in children_mut(n) {
+            recover_finally(c);
+        }
+    }
+    let mut i = 0;
+    while i < nodes.len() {
+        if let Some((node, after, tail)) = finally_form(&nodes[i], &nodes[i + 1..]) {
+            nodes[i] = node;
+            nodes.drain(i + 1..i + 1 + after);
+            if let Some(t) = tail {
+                nodes.insert(i + 1, t);
+            }
+        }
+        i += 1;
+    }
+}
+
+/// The `try`/`finally` for a candidate node, and how many following nodes (the copy of `F` on
+/// the fall-through path) it absorbs.
+fn finally_form(n: &Node, rest: &[Node]) -> Option<(Node, usize, Option<Node>)> {
+    let Node::Try { body, catches, finally, .. } = n else { return None };
+    let all = catches.last()?;
+    if !finally.is_empty() || all.types != [None] {
+        return None;
+    }
+    let Some(Node::Throw(Expr::Var(t))) = all.body.last() else { return None };
+    if all.var != Some(*t) {
+        return None;
+    }
+    let f = &all.body[..all.body.len() - 1];
+    if f.is_empty() || mentions(f, *t) {
+        return None;
+    }
+    let mut body = body.clone();
+    let mut catches: Vec<Catch> = catches[..catches.len() - 1].to_vec();
+    if catches.is_empty()
+        && let [Node::Try { body: b, catches: c, finally: inner, resources: r }] = body.as_slice()
+        && inner.is_empty()
+        && r.is_empty()
+        && !c.iter().any(|c| c.types.contains(&None))
+    {
+        catches = c.clone();
+        body = b.clone();
+    }
+    // A part that falls through had its own copy at its end, or shares the one after the try.
+    let mut shared = false;
+    let mut tail: Option<Node> = None;
+    for part in std::iter::once(&mut body).chain(catches.iter_mut().map(|c| &mut c.body)) {
+        if let Some(r) = shared_tail(part, f, rest) {
+            if tail.as_ref().is_some_and(|t| *t != r) {
+                return None;
+            }
+            tail = Some(r);
+        }
+        if !strip_exits(part, f, 0) {
+            return None;
+        }
+        if part.ends_with(f) {
+            part.truncate(part.len() - f.len());
+        } else if !ends_with_jump(part) {
+            shared = true;
+        }
+    }
+    let after = if shared {
+        if !rest.starts_with(f) {
+            return None;
+        }
+        f.len()
+    } else {
+        0
+    };
+    Some((Node::Try { body, catches, finally: f.to_vec(), resources: vec![] }, after, tail))
+}
+
+/// Removes the copy of `f` before each `return`, `break` or `continue` that leaves the try.
+/// Fails if such an exit runs without it. `loops` counts enclosing loops and switches inside the
+/// try (their unlabeled jumps stay inside).
+fn strip_exits(nodes: &mut Vec<Node>, f: &[Node], loops: u32) -> bool {
+    let mut j = 0;
+    while j < nodes.len() {
+        // A returned value must not depend on `f` (javac computes it first, into a temporary).
+        let exit = |n: &Node| match n {
+            Node::Return(e) => e.as_ref().is_none_or(|e| independent(e, f)),
+            Node::Break(_) | Node::Continue(_) => true,
+            _ => false,
+        };
+        if nodes[j..].starts_with(f) && nodes.get(j + f.len()).is_some_and(exit) {
+            nodes.drain(j..j + f.len());
+            j += 1;
+            continue;
+        }
+        let inner = matches!(
+            nodes[j],
+            Node::Loop { .. } | Node::For { .. } | Node::ForEach { .. } | Node::Switch { .. }
+        );
+        match &mut nodes[j] {
+            Node::Return(_) => return false,
+            Node::Break(_) | Node::Continue(_) if loops == 0 => return false,
+            n => {
+                let depth = loops + u32::from(inner);
+                for c in children_mut(n) {
+                    if !strip_exits(c, f, depth) {
+                        return false;
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+    true
+}
+
+/// Whether `e` has the same value before and after `f` runs: constants and variables `f`
+/// doesn't assign.
+fn independent(e: &Expr, f: &[Node]) -> bool {
+    match e {
+        Expr::Lit { .. } | Expr::Str(_) | Expr::Class(_) => true,
+        Expr::Var(v) => {
+            let mut assigned = false;
+            fn walk(nodes: &[Node], v: VarId, hit: &mut bool) {
+                for n in nodes {
+                    if matches!(n, Node::Stmt(Stmt::Assign(x, _)) if *x == v) {
+                        *hit = true;
+                    }
+                    let mut n = n.clone();
+                    for c in children_mut(&mut n) {
+                        walk(c, v, hit);
+                    }
+                }
+            }
+            walk(f, *v, &mut assigned);
+            !assigned
+        }
+        _ => false,
+    }
+}
+
+/// A part ending in `f; return e;` where `e` must run after `f` ends the try statement, not the
+/// part: its return is the code after the try. Rewrites the part to fall through and returns
+/// the `return` to add after the try when nothing follows it yet.
+fn shared_tail(part: &mut Vec<Node>, f: &[Node], rest: &[Node]) -> Option<Node> {
+    let ret = part.last().cloned()?;
+    let Node::Return(Some(e)) = &ret else { return None };
+    if independent(e, f) || part.len() <= f.len() || !part[..part.len() - 1].ends_with(f) {
+        return None;
+    }
+    if rest.first() == Some(&ret) {
+        // `try { ..; f } ...; return e;`: the part keeps its copy of f.
+        part.pop();
+        None
+    } else if rest.starts_with(f) && rest.get(f.len()) == Some(&ret) {
+        // The copy of f after the try serves this part too.
+        part.truncate(part.len() - 1 - f.len());
+        None
+    } else if rest.is_empty() {
+        part.pop();
+        Some(ret.clone())
+    } else {
+        None
+    }
+}
+
+/// `int i = -1; switch (s.hashCode()) { case H: if (s.equals("a")) i = 0; ... }
+/// switch (i) { case 0: ... }`, as javac compiles a switch on a string, back to
+/// `switch (s) { case "a": ... }`.
+fn string_switches(nodes: &mut Vec<Node>) {
+    for n in nodes.iter_mut() {
+        for c in children_mut(n) {
+            string_switches(c);
+        }
+    }
+    let mut i = 0;
+    while i + 1 < nodes.len() {
+        if let Some((value, labels)) = hash_switch(&nodes[i])
+            && let Node::Switch { value: Expr::Var(sel), cases, .. } = &nodes[i + 1]
+            && labels.iter().all(|(_, v, _)| v == sel)
+            && cases.iter().all(|c| c.keys.iter().all(|k| labels.iter().any(|l| l.2 == *k)))
+        {
+            // The selector's `-1` initialization right before.
+            let init = i.checked_sub(1).filter(
+                |&p| matches!(&nodes[p], Node::Stmt(Stmt::Assign(v, Expr::Lit { bits: -1, .. })) if v == sel),
+            );
+            let (sel, value) = (*sel, value.clone());
+            if !mentions_after(&nodes[i + 2..], sel) {
+                if let Node::Switch { value: v, cases, .. } = &mut nodes[i + 1] {
+                    *v = value;
+                    for c in cases.iter_mut() {
+                        c.labels = c
+                            .keys
+                            .iter()
+                            .filter_map(|k| labels.iter().find(|l| l.2 == *k).map(|l| l.0.clone()))
+                            .collect();
+                    }
+                }
+                nodes.remove(i);
+                if let Some(p) = init {
+                    nodes.remove(p);
+                    i = p;
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn mentions_after(nodes: &[Node], v: VarId) -> bool {
+    mentions(nodes, v)
+}
+
+/// A `switch (s.hashCode())` whose cases only compare `s` with string constants and set a
+/// selector: the string, and `(constant, selector, value)` per comparison.
+fn hash_switch(n: &Node) -> Option<(Expr, Vec<(Arc<str>, VarId, i32)>)> {
+    let Node::Switch { value: Expr::Invoke(InvokeKind::Virtual, m, args), cases, .. } = n else {
+        return None;
+    };
+    if &*m.name != "hashCode" || &*m.class != "Ljava/lang/String;" || args.len() != 1 {
+        return None;
+    }
+    let s = &args[0];
+    let mut out = vec![];
+    for c in cases {
+        if !c.default && !collect_equals(&c.body, s, &mut out) {
+            return None;
+        }
+        if c.default && !no_match(&c.body) {
+            return None;
+        }
+    }
+    (!out.is_empty()).then(|| (s.clone(), out))
+}
+
+/// Code for "no constant matched": nothing, `break`, or d8's `sel = -1; break;`.
+fn no_match(n: &[Node]) -> bool {
+    let minus_one = |n: &Node| matches!(n, Node::Stmt(Stmt::Assign(_, Expr::Lit { bits: -1, .. })));
+    match n {
+        [] | [Node::Break(None)] => true,
+        [a] => minus_one(a),
+        [a, Node::Break(None)] => minus_one(a),
+        _ => false,
+    }
+}
+
+/// `s.equals("c")` → `Some(("c", true))`; its negation → `false`.
+fn equals_test<'a>(cond: &'a Expr, s: &Expr) -> Option<(&'a Arc<str>, bool)> {
+    let (e, positive) = match cond {
+        Expr::Not(e) => (&**e, false),
+        Expr::Bin(BinOp::Eq, e, z, _) if matches!(**z, Expr::Lit { bits: 0, .. }) => (&**e, false),
+        Expr::Bin(BinOp::Ne, e, z, _) if matches!(**z, Expr::Lit { bits: 0, .. }) => (&**e, true),
+        e => (e, true),
+    };
+    match e {
+        Expr::Invoke(InvokeKind::Virtual, m, a)
+            if &*m.name == "equals" && a.len() == 2 && a[0] == *s && matches!(a[1], Expr::Str(_)) =>
+        {
+            let Expr::Str(c) = &a[1] else { return None };
+            Some((c, positive))
+        }
+        _ => None,
+    }
+}
+
+/// Case bodies: `if (!s.equals(c)) break; sel = k; break;` or chains of
+/// `if (s.equals(c)) { sel = k; } else if ...` (hash collisions).
+fn collect_equals(body: &[Node], s: &Expr, out: &mut Vec<(Arc<str>, VarId, i32)>) -> bool {
+    let set = |n: &[Node]| match n {
+        [Node::Stmt(Stmt::Assign(v, Expr::Lit { bits, .. }))]
+        | [Node::Stmt(Stmt::Assign(v, Expr::Lit { bits, .. })), Node::Break(None)] => {
+            Some((*v, *bits as i32))
+        }
+        _ => None,
+    };
+    match body {
+        [Node::If { cond, then, els }, rest @ ..] => {
+            let Some((c, positive)) = equals_test(cond, s) else { return false };
+            let (hit, miss) =
+                if positive { (then.as_slice(), els.as_slice()) } else { (els.as_slice(), then.as_slice()) };
+            // Negated form: the "miss" branch breaks and the hit is the rest of the case.
+            if !positive && hit.is_empty() && no_match(miss) && !miss.is_empty() {
+                return match set(rest) {
+                    Some((v, k)) => {
+                        out.push((c.clone(), v, k));
+                        true
+                    }
+                    None => false,
+                };
+            }
+            let Some((v, k)) = set(hit) else { return false };
+            out.push((c.clone(), v, k));
+            // After a hit that breaks, the next comparison may follow as the rest of the case.
+            if miss.is_empty()
+                && matches!(hit.last(), Some(Node::Break(None)))
+                && !rest.is_empty()
+                && !no_match(rest)
+            {
+                return collect_equals(rest, s, out);
+            }
+            (no_match(miss) || collect_equals(miss, s, out))
+                && rest.iter().all(|n| matches!(n, Node::Break(None)))
+        }
+        _ => false,
     }
 }
 
@@ -1273,9 +1790,10 @@ fn inline_temps_in(
             Node::Switch { cases, .. } => {
                 cases.iter_mut().for_each(|c| inline_temps_in(&mut c.body, vars, counts))
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, .. } => {
                 inline_temps_in(body, vars, counts);
                 catches.iter_mut().for_each(|c| inline_temps_in(&mut c.body, vars, counts));
+                inline_temps_in(finally, vars, counts);
             }
             _ => {}
         }

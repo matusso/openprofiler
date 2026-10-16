@@ -40,5 +40,15 @@ public class Check {
         p(Features.max(Arrays.asList(3, 9, 2)) + " " + Features.max(List.<String>of()));
         p(f.local(4));
         p(f.concat('z', 1L << 33, 0.25, null, new int[3]));
+        p(f.boxes(1000, 1000, List.of(7, 8, 7, 9)) + " | " + f.boxes(5, 5, List.of(1, 2)));
+        p(f.collide("Aa") + " " + f.collide("BB") + " " + f.collide("C") + " " + f.collide("xyz"));
+        p(f.loopFinally(5) + " " + f.loopFinally(1));
+        p(f.nestedFinally("abc") + " " + f.nestedFinally(null));
+        try {
+            p(f.nullableResource(true) + " " + f.nullableResource(false));
+        } catch (java.io.IOException e) {
+            p("io " + e);
+        }
+        p(f.index(List.of("a", "b", "a")));
     }
 }

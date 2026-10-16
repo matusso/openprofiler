@@ -51,9 +51,17 @@ fn readable_constructs() {
         "BiFunction<String, Integer, String> rep = String::repeat;",
         "Runnable inner = () -> this.log.add(msg + k);",
         "Collectors.groupingBy(String::length, TreeMap::new, Collectors.counting())",
-        ".filter(x -> x.intValue() % 2 == 0)",
-        "catch (IOException e) {",
-        "th.addSuppressed(th2);",
+        ".filter(x -> x % 2 == 0)",
+        "Function<Integer, Integer> twice = x -> op.applyAsInt(x, 2);",
+        "try (Res r1 = new Res(out, a); Res r2 = new Res(out, b)) {",
+        "} catch (IOException e) {",
+        "} finally {\n            out.add(\"finally\");",
+        "try (Res r = res) {",
+        "case \"Aa\":",
+        "case \"BB\":",
+        "boolean equal = a.intValue() == b.intValue();",
+        "copy.remove(Integer.valueOf(7));",
+        "this.log = new ArrayList<>();",
         "return \"c=\" + c + \" l=\" + l + \" d=\" + d + \" o=\" + String.valueOf(o) + \" len=\" + arr.length + \"!\";",
         "if (s instanceof Circle) {",
         "r |= ~v;",
@@ -61,7 +69,13 @@ fn readable_constructs() {
     ] {
         assert!(all.contains(want), "missing `{want}` in:\n{all}");
     }
-    assert!(!all.contains("extends Record"), "{all}");
+    for unwanted in ["extends Record", "addSuppressed", "hashCode()) {", "Integer.valueOf(base)"] {
+        assert!(!all.contains(unwanted), "unexpected `{unwanted}` in:\n{all}");
+    }
+    // Without debug info, local generics come from where values flow.
+    let p = Program::open(&data("modern-nodebug.jar")).unwrap();
+    let all: String = decompile_all(&p).into_iter().map(|(_, c)| c).collect();
+    assert!(all.contains("ArrayList<String> arrayList = new ArrayList<>();"), "{all}");
 }
 
 #[test]

@@ -297,4 +297,79 @@ public class Features {
     public String concat(char c, long l, double d, Object o, int[] arr) {
         return "c=" + c + " l=" + l + " d=" + d + " o=" + o + " len=" + arr.length + '!';
     }
+
+    public String boxes(Integer a, Integer b, List<Integer> xs) {
+        boolean same = a == b;
+        boolean equal = a.intValue() == b.intValue();
+        List<Integer> copy = new ArrayList<>(xs);
+        copy.remove(Integer.valueOf(7));
+        copy.remove(0);
+        Long big = 5L;
+        Object o = 3;
+        long sum = big + a;
+        return same + " " + equal + " " + copy + " " + sum + " " + o;
+    }
+
+    public int collide(String s) {
+        switch (s) {
+            case "Aa":
+                return 1;
+            case "BB":
+                return 2;
+            case "C":
+                return 3;
+            default:
+                return s.length();
+        }
+    }
+
+    public List<String> loopFinally(int n) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            try {
+                if (i == 1) {
+                    continue;
+                }
+                if (i == 3) {
+                    break;
+                }
+                out.add("i" + i);
+            } finally {
+                out.add("f" + i);
+            }
+        }
+        return out;
+    }
+
+    public String nestedFinally(String x) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            try {
+                sb.append(x.length());
+            } finally {
+                sb.append("-inner");
+            }
+        } catch (NullPointerException e) {
+            sb.append("npe");
+        } finally {
+            sb.append("-outer");
+        }
+        return sb.toString();
+    }
+
+    public String nullableResource(boolean open) throws IOException {
+        List<String> out = new ArrayList<>();
+        try (Res r = open ? new Res(out, "n") : null) {
+            out.add(r == null ? "none" : "some");
+        }
+        return out.toString();
+    }
+
+    public Map<String, List<Integer>> index(List<String> words) {
+        Map<String, List<Integer>> m = new TreeMap<>();
+        for (int i = 0; i < words.size(); i++) {
+            m.computeIfAbsent(words.get(i), k -> new ArrayList<>()).add(i);
+        }
+        return m;
+    }
 }

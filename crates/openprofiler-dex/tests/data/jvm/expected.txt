@@ -32,3 +32,9 @@ pos7true neg-1false zero2false
 9 null
 anon12
 c=z l=8589934592 d=0.25 o=null len=3!
+false true [7, 9] 1005 3 | true true [2] 10 3
+1 2 3 3
+[i0, f0, f1, i2, f2, f3] [i0, f0]
+3-inner-outer -innernpe-outer
+[open n, some, close n] [none]
+{a=[0, 2], b=[1]}

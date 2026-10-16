@@ -205,6 +205,11 @@ struct Writer<'p> {
     hidden: HashSet<MethodKey>,
     /// Anonymous classes printed as enum constant bodies.
     enum_bodies: HashSet<Arc<str>>,
+    /// The `new` being printed goes to a generic target: `new ArrayList<>()`.
+    diamond: bool,
+    /// Keep boxing and unboxing calls explicit (arguments of overloaded methods, `==` on two
+    /// unboxed values), where implicit conversions could change meaning.
+    exact_boxing: bool,
     /// Hidden methods whose lambda could not be printed inline after all.
     failed: HashSet<MethodKey>,
     lambda_depth: usize,
@@ -237,6 +242,8 @@ pub fn print_class(p: &Program, top: &str) -> Printed {
             cls: top.into(),
             hidden: hidden.clone(),
             enum_bodies: HashSet::new(),
+            exact_boxing: false,
+            diamond: false,
             failed: HashSet::new(),
             lambda_depth: 0,
         };
@@ -1229,8 +1236,7 @@ impl<'p> Writer<'p> {
                 }
                 self.w(" {");
                 self.indent += 1;
-                let generic_ret =
-                    msig.as_ref().and_then(|s| s.ret.clone()).filter(|r| matches!(r, Sig::Var(_)));
+                let generic_ret = msig.as_ref().and_then(|s| s.ret.clone());
                 self.body(&body, st, Some(&names), generic_ret);
                 self.indent -= 1;
                 self.line();
@@ -1280,10 +1286,13 @@ impl<'p> Writer<'p> {
         let mut live = HashMap::new();
         structure::count_refs(&st.nodes, &mut live);
         let mut mc = MethodCtx::new(self, body, param_names, reserved, Some(&live));
-        if let Some(r) = generic_ret {
-            generic_locals(&st.nodes, body, &r, &mut mc.generic);
+        if let Some(r) = &generic_ret
+            && matches!(r, Sig::Var(_))
+        {
+            generic_locals(&st.nodes, body, r, &mut mc.generic);
         }
         lambda_locals(&st.nodes, body, &mut mc.generic);
+        self.flow_generics(&st.nodes, body, generic_ret.as_ref(), &mut mc.generic);
         mc.labels = st.used_labels.iter().copied().collect();
         plan_declarations(&mut mc, &st.nodes);
         self.nodes(&mut mc, &st.nodes);
@@ -1433,7 +1442,11 @@ impl<'p> Writer<'p> {
                 self.indent += 1;
                 let shared = mc.next_scope();
                 for (ci, c) in cases.iter().enumerate() {
-                    for &k in &c.keys {
+                    for l in &c.labels {
+                        self.line();
+                        self.w(&format!("case \"{}\":", escape_java(l, '"')));
+                    }
+                    for &k in c.keys.iter().filter(|_| c.labels.is_empty()) {
                         self.line();
                         self.w("case ");
                         match &names {
@@ -1455,9 +1468,26 @@ impl<'p> Writer<'p> {
                 self.line();
                 self.w("}");
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
                 self.line();
                 self.w("try");
+                if !resources.is_empty() {
+                    self.w(" (");
+                    for (k, r) in resources.iter().enumerate() {
+                        if k > 0 {
+                            self.w("; ");
+                        }
+                        if let Stmt::Assign(v, e) = r {
+                            let t = mc.var_type(*v);
+                            self.var_type_decl(mc, *v, &t);
+                            self.w(" ");
+                            self.w(&mc.names[*v as usize].clone());
+                            self.w(" = ");
+                            self.assigned(mc, e, 1, &t);
+                        }
+                    }
+                    self.w(")");
+                }
                 self.block(mc, body);
                 for Catch { types, var, body } in catches {
                     self.w(" catch (");
@@ -1479,8 +1509,9 @@ impl<'p> Writer<'p> {
                     self.w(")");
                     self.block(mc, body);
                 }
-                if catches.is_empty() {
-                    self.w(" finally {\n}");
+                if !finally.is_empty() || (catches.is_empty() && resources.is_empty()) {
+                    self.w(" finally");
+                    self.block(mc, finally);
                 }
             }
             Node::Sync { lock, body } => {
@@ -1591,7 +1622,9 @@ impl<'p> Writer<'p> {
                     self.w(";");
                     return;
                 }
+                self.diamond = matches!(e, Expr::New(..)) && mc.var_sig(v).is_some_and(|s| has_args(&s));
                 self.assigned(mc, e, 1, &t);
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::Expr(e) => {
@@ -1609,7 +1642,10 @@ impl<'p> Writer<'p> {
                 }
                 self.field_target(mc, Some(o), f, false);
                 self.w(" = ");
+                self.diamond =
+                    matches!(val, Expr::New(..)) && self.field_sig(f).is_some_and(|s| has_args(&s));
                 self.assigned(mc, val, 1, &f.ty.clone());
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::SPut(f, val) => {
@@ -1620,7 +1656,10 @@ impl<'p> Writer<'p> {
                 }
                 self.field_target(mc, None, f, false);
                 self.w(" = ");
+                self.diamond =
+                    matches!(val, Expr::New(..)) && self.field_sig(f).is_some_and(|s| has_args(&s));
                 self.assigned(mc, val, 1, &f.ty.clone());
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::APut(a, i, val, _) => {
@@ -1746,6 +1785,13 @@ impl<'p> Writer<'p> {
     }
 
     fn expr(&mut self, mc: &mut MethodCtx<'_>, e: &Expr, prec: u8, expect: Option<&str>) {
+        // `Integer.valueOf(x)` where an Integer is expected, `x.intValue()` where an int is:
+        // the compiler's boxing conversions are implicit in source.
+        if !self.exact_boxing
+            && let Some((inner, prim)) = implicit_boxing(mc, e, expect)
+        {
+            return self.expr(mc, inner, prec, Some(prim));
+        }
         let my = expr_prec(e, mc);
         if my < prec {
             self.w("(");
@@ -1769,6 +1815,17 @@ impl<'p> Writer<'p> {
                 self.w(".class");
             }
             Expr::Raw(r) => self.w(r),
+            Expr::Bin(op, a, b, t)
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && !self.exact_boxing
+                    && is_unboxing(a)
+                    && is_unboxing(b) =>
+            {
+                // `a.intValue() == b.intValue()` would compare references without the calls.
+                self.exact_boxing = true;
+                self.expr_inner(mc, &Expr::Bin(*op, a.clone(), b.clone(), *t), expect);
+                self.exact_boxing = false;
+            }
             Expr::Bin(op, a, b, t) => {
                 if let Some(zero) = zero_test(mc, *op, a, b) {
                     match zero {
@@ -1896,12 +1953,15 @@ impl<'p> Writer<'p> {
                         let k = self.defined(&class);
                         self.link(&n, k, false);
                     }
-                    self.args(mc, &m.params[1..], rest);
+                    self.call_args(mc, m, &m.params[1..], rest);
                     return;
                 }
                 self.w("new ");
                 self.ty(&class);
-                self.args(mc, &m.params, args);
+                if std::mem::take(&mut self.diamond) && self.generic_class(&class) {
+                    self.w("<>");
+                }
+                self.call_args(mc, m, &m.params, args);
             }
             Expr::NewArray(t, n) => {
                 self.w("new ");
@@ -2099,6 +2159,8 @@ impl<'p> Writer<'p> {
         }
         let reserved = mc.used_names.clone();
         let prev = std::mem::replace(&mut self.cls, t.class.clone());
+        // The body is its own context, whatever call the lambda is an argument of.
+        let exact = std::mem::replace(&mut self.exact_boxing, false);
         self.lambda_depth += 1;
         self.lambda_params(&params);
         if matches!(st.nodes.last(), Some(Node::Return(None))) {
@@ -2124,6 +2186,7 @@ impl<'p> Writer<'p> {
             }
         }
         self.lambda_depth -= 1;
+        self.exact_boxing = exact;
         self.cls = prev;
         true
     }
@@ -2161,7 +2224,7 @@ impl<'p> Writer<'p> {
                     self.w(".");
                 }
                 self.link(&ident(&m.name), key, false);
-                self.args(mc, &m.params, args);
+                self.call_args(mc, m, &m.params, args);
             }
             _ => {
                 let Some((recv, rest)) = args.split_first() else {
@@ -2178,7 +2241,7 @@ impl<'p> Writer<'p> {
                         self.receiver(mc, recv, &m.class);
                         self.w(".<init>");
                     }
-                    self.args(mc, &m.params, rest);
+                    self.call_args(mc, m, &m.params, rest);
                     return;
                 }
                 if kind == InvokeKind::Super {
@@ -2188,9 +2251,167 @@ impl<'p> Writer<'p> {
                     self.w(".");
                 }
                 self.link(&ident(&m.name), key, false);
-                self.args(mc, &m.params, rest);
+                self.call_args(mc, m, &m.params, rest);
             }
         }
+    }
+
+    /// Generic signature of a field declared in the program.
+    fn field_sig(&self, f: &FieldRef) -> Option<Sig> {
+        let (d, c) = self.p.class(&f.class)?;
+        let cd = d.class_data(c).ok()?;
+        let ef = cd
+            .static_fields
+            .iter()
+            .chain(&cd.instance_fields)
+            .find(|x| d.field(x.field).is_some_and(|fi| d.string(fi.name) == &*f.name))?;
+        let ann = d.annotations(c).ok()?;
+        signature(d, ann.fields.get(&ef.field)?).and_then(|s| types::parse_field_sig(&s))
+    }
+
+    /// Generic signature of a method declared in the program.
+    fn method_sig(&self, m: &MethodRef) -> Option<types::MethodSig> {
+        let (d, c) = self.p.class(&m.class)?;
+        let cd = d.class_data(c).ok()?;
+        let desc = m.desc();
+        let em = cd.direct_methods.iter().chain(&cd.virtual_methods).find(|x| {
+            d.method(x.method)
+                .is_some_and(|mi| d.string(mi.name) == &*m.name && d.proto_desc(mi.proto) == desc)
+        })?;
+        let ann = d.annotations(c).ok()?;
+        signature(d, ann.methods.get(&em.method)?).and_then(|s| types::parse_method_sig(&s))
+    }
+
+    /// Whether `new C<>()` can be written: generic classes of the program and of the JDK
+    /// collections.
+    fn generic_class(&self, desc: &str) -> bool {
+        if let Some((d, c)) = self.p.class(desc) {
+            let ann = d.annotations(c).unwrap_or_default();
+            return signature(d, &ann.class)
+                .and_then(|s| types::parse_class_sig(&s))
+                .is_some_and(|s| !s.params.is_empty());
+        }
+        type_arity(desc).is_some()
+    }
+
+    /// Generic types of locals without debug signatures, from where their values come from or
+    /// go: fields, method results and parameters of the program's generic members, and the
+    /// method's own return type. A local only gets a type all of these agree on.
+    fn flow_generics(&self, nodes: &[Node], body: &Body, ret: Option<&Sig>, out: &mut HashMap<VarId, Sig>) {
+        let mut cands: HashMap<VarId, Vec<Sig>> = HashMap::new();
+        let mut add = |v: VarId, s: Option<Sig>| {
+            if let Some(s) = s {
+                cands.entry(v).or_default().push(s);
+            }
+        };
+        let visit_expr = |e: &Expr, add: &mut dyn FnMut(VarId, Option<Sig>)| {
+            e.visit(&mut |x| {
+                let (m, args, receiver) = match x {
+                    Expr::Invoke(k, m, a) if !matches!(k, InvokeKind::Custom) => {
+                        (m, a.as_slice(), !matches!(k, InvokeKind::Static))
+                    }
+                    Expr::New(m, a) => (m, a.as_slice(), false),
+                    _ => return,
+                };
+                let args = if receiver { args.get(1..).unwrap_or_default() } else { args };
+                let Some(ms) = self.method_sig(m) else { return };
+                if ms.args.len() != args.len() {
+                    return;
+                }
+                for (a, s) in args.iter().zip(&ms.args) {
+                    if let Expr::Var(v) = a {
+                        add(*v, Some(s.clone()));
+                    }
+                }
+            })
+        };
+        fn walk(nodes: &[Node], f: &mut dyn FnMut(&Node)) {
+            for n in nodes {
+                f(n);
+                let mut n = n.clone();
+                for c in structure_children(&mut n) {
+                    walk(c, f);
+                }
+            }
+        }
+        walk(nodes, &mut |n| {
+            let mut exprs: Vec<&Expr> = vec![];
+            match n {
+                Node::Stmt(st) => {
+                    match st {
+                        Stmt::Assign(v, Expr::IGet(_, f) | Expr::SGet(f)) => add(*v, self.field_sig(f)),
+                        Stmt::Assign(v, Expr::Invoke(k, m, _)) if !matches!(k, InvokeKind::Custom) => {
+                            add(*v, self.method_sig(m).and_then(|s| s.ret))
+                        }
+                        Stmt::IPut(_, f, Expr::Var(v)) | Stmt::SPut(f, Expr::Var(v)) => {
+                            add(*v, self.field_sig(f))
+                        }
+                        _ => {}
+                    }
+                    st.visit_exprs(&mut |e| visit_expr(e, &mut add));
+                }
+                Node::Return(Some(e)) => {
+                    if let Expr::Var(v) = e {
+                        add(*v, ret.cloned());
+                    }
+                    exprs.push(e);
+                }
+                Node::If { cond: e, .. } | Node::Throw(e) | Node::Switch { value: e, .. } => exprs.push(e),
+                Node::Loop { kind: LoopKind::While(e) | LoopKind::DoWhile(e), .. } => exprs.push(e),
+                Node::ForEach { iterable: e, .. } | Node::Sync { lock: e, .. } => exprs.push(e),
+                _ => {}
+            }
+            for e in exprs {
+                visit_expr(e, &mut add);
+            }
+        });
+        for (v, sigs) in cands {
+            let vi = &body.vars[v as usize];
+            if vi.signature.is_some() || vi.is_this || vi.param.is_some() || out.contains_key(&v) {
+                continue;
+            }
+            let Some(ty) = vi.ty.as_deref() else { continue };
+            let first = &sigs[0];
+            if sigs.iter().any(|s| s != first) || !has_args(first) || has_type_vars(first) {
+                continue;
+            }
+            let Some(erased) = first.erased() else { continue };
+            if erased == ty {
+                out.insert(v, first.clone());
+            } else if let (Some(n), Sig::Class(parts)) = (type_arity(ty), first)
+                && let Some((_, args)) = parts.last()
+                && args.len() == n
+                && collection_interface(&erased, n)
+            {
+                // `ArrayList` where a `List<String>` goes: `ArrayList<String>`.
+                out.insert(v, Sig::Class(vec![(types::java_name(ty), args.clone())]));
+            }
+        }
+    }
+
+    /// Arguments of a call; overloads make boxing conversions significant.
+    fn call_args(&mut self, mc: &mut MethodCtx<'_>, m: &MethodRef, params: &[String], args: &[Expr]) {
+        let exact = self.overloaded(m);
+        let prev = std::mem::replace(&mut self.exact_boxing, exact);
+        self.args(mc, params, args);
+        self.exact_boxing = prev;
+    }
+
+    /// Whether another method of the same name and arity may be chosen instead: known from the
+    /// program's own classes; for others, the library methods where it matters (`List.remove`).
+    fn overloaded(&self, m: &MethodRef) -> bool {
+        let Some((d, c)) = self.p.class(&m.class) else {
+            return matches!(&*m.name, "remove" | "removeElement");
+        };
+        let Ok(cd) = d.class_data(c) else { return true };
+        cd.direct_methods
+            .iter()
+            .chain(&cd.virtual_methods)
+            .filter_map(|x| d.method(x.method))
+            .filter(|mi| d.string(mi.name) == &*m.name)
+            .filter(|mi| d.proto(mi.proto).is_some_and(|p| p.params.len() == m.params.len()))
+            .count()
+            > 1
     }
 
     fn concat(&mut self, mc: &mut MethodCtx<'_>, parts: &[&Expr]) {
@@ -2387,6 +2608,162 @@ fn expr_prec(e: &Expr, mc: &MethodCtx<'_>) -> u8 {
 
 fn is_record(d: &DexFile, c: &dex::ClassDef) -> bool {
     c.superclass.is_some_and(|s| d.type_desc(s) == "Ljava/lang/Record;") && c.access & dex::ACC_FINAL != 0
+}
+
+/// Statement lists of a node (read-only use on a clone).
+fn structure_children(n: &mut Node) -> Vec<&mut Vec<Node>> {
+    match n {
+        Node::If { then, els, .. } => vec![then, els],
+        Node::Loop { body, .. }
+        | Node::For { body, .. }
+        | Node::ForEach { body, .. }
+        | Node::Sync { body, .. } => {
+            vec![body]
+        }
+        Node::Switch { cases, .. } => cases.iter_mut().map(|c| &mut c.body).collect(),
+        Node::Try { body, catches, finally, .. } => {
+            let mut v = vec![body];
+            v.extend(catches.iter_mut().map(|c| &mut c.body));
+            v.push(finally);
+            v
+        }
+        _ => vec![],
+    }
+}
+
+fn has_args(s: &Sig) -> bool {
+    matches!(s, Sig::Class(parts) if parts.iter().any(|p| !p.1.is_empty()))
+}
+
+fn has_type_vars(s: &Sig) -> bool {
+    match s {
+        Sig::Var(_) => true,
+        Sig::Array(t) => has_type_vars(t),
+        Sig::Prim(_) => false,
+        Sig::Class(parts) => parts.iter().flat_map(|p| &p.1).any(|a| match a {
+            SigArg::Any => false,
+            SigArg::Exact(t) | SigArg::Extends(t) | SigArg::Super(t) => has_type_vars(t),
+        }),
+    }
+}
+
+/// Number of type parameters of JDK collection classes (and a few other generic JDK classes)
+/// whose type arguments match the interfaces they implement one to one.
+fn type_arity(desc: &str) -> Option<usize> {
+    let n = desc.strip_prefix("Ljava/")?.strip_suffix(';')?;
+    Some(match n {
+        "util/ArrayList"
+        | "util/LinkedList"
+        | "util/Vector"
+        | "util/Stack"
+        | "util/HashSet"
+        | "util/LinkedHashSet"
+        | "util/TreeSet"
+        | "util/ArrayDeque"
+        | "util/PriorityQueue"
+        | "util/concurrent/CopyOnWriteArrayList"
+        | "util/concurrent/CopyOnWriteArraySet"
+        | "util/concurrent/ConcurrentLinkedQueue"
+        | "util/concurrent/ConcurrentLinkedDeque"
+        | "util/concurrent/LinkedBlockingQueue"
+        | "util/concurrent/LinkedBlockingDeque"
+        | "util/concurrent/ArrayBlockingQueue"
+        | "util/concurrent/PriorityBlockingQueue"
+        | "util/concurrent/ConcurrentSkipListSet"
+        | "util/concurrent/atomic/AtomicReference"
+        | "lang/ThreadLocal"
+        | "lang/InheritableThreadLocal"
+        | "lang/ref/WeakReference"
+        | "lang/ref/SoftReference"
+        | "util/concurrent/CompletableFuture" => 1,
+        "util/HashMap"
+        | "util/LinkedHashMap"
+        | "util/TreeMap"
+        | "util/Hashtable"
+        | "util/WeakHashMap"
+        | "util/IdentityHashMap"
+        | "util/concurrent/ConcurrentHashMap"
+        | "util/concurrent/ConcurrentSkipListMap" => 2,
+        _ => return None,
+    })
+}
+
+/// Interfaces of the collections in [`type_arity`] taking the same type arguments.
+fn collection_interface(desc: &str, arity: usize) -> bool {
+    let n = desc.strip_prefix("Ljava/").and_then(|d| d.strip_suffix(';')).unwrap_or("");
+    match arity {
+        1 => matches!(
+            n,
+            "util/List"
+                | "util/Collection"
+                | "lang/Iterable"
+                | "util/Set"
+                | "util/SortedSet"
+                | "util/NavigableSet"
+                | "util/Queue"
+                | "util/Deque"
+                | "util/concurrent/BlockingQueue"
+                | "util/concurrent/BlockingDeque"
+        ),
+        2 => {
+            matches!(n, "util/Map" | "util/SortedMap" | "util/NavigableMap" | "util/concurrent/ConcurrentMap")
+        }
+        _ => false,
+    }
+}
+
+/// Primitive descriptor of a wrapper class.
+fn wrapped(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "Ljava/lang/Integer;" => "I",
+        "Ljava/lang/Long;" => "J",
+        "Ljava/lang/Short;" => "S",
+        "Ljava/lang/Byte;" => "B",
+        "Ljava/lang/Character;" => "C",
+        "Ljava/lang/Boolean;" => "Z",
+        "Ljava/lang/Float;" => "F",
+        "Ljava/lang/Double;" => "D",
+        _ => return None,
+    })
+}
+
+/// `x.intValue()` and the like.
+fn is_unboxing(e: &Expr) -> bool {
+    matches!(e, Expr::Invoke(InvokeKind::Virtual, m, a)
+        if a.len() == 1 && m.params.is_empty() && wrapped(&m.class).is_some_and(|p| *m.ret == *p)
+            && m.name.ends_with("Value"))
+}
+
+/// A boxing (`Integer.valueOf(i)`) or unboxing (`x.intValue()`) call the context makes implicit:
+/// the operand and the type it is printed with.
+fn implicit_boxing<'e>(
+    mc: &MethodCtx<'_>,
+    e: &'e Expr,
+    expect: Option<&str>,
+) -> Option<(&'e Expr, &'static str)> {
+    let expect = expect?;
+    let Expr::Invoke(kind, m, a) = e else { return None };
+    let prim = wrapped(&m.class)?;
+    match kind {
+        InvokeKind::Static
+            if &*m.name == "valueOf" && a.len() == 1 && m.params.len() == 1 && m.params[0] == prim =>
+        {
+            // Literals of byte, short and char only box in assignments to exactly their wrapper.
+            let arg = match &a[0] {
+                Expr::Lit { .. } => matches!(prim, "I" | "J" | "F" | "D" | "Z"),
+                x => mc.type_of(x).as_deref() == Some(prim),
+            };
+            let target = expect == &*m.class
+                || matches!(
+                    expect,
+                    "Ljava/lang/Object;" | "Ljava/io/Serializable;" | "Ljava/lang/Comparable;"
+                )
+                || (expect == "Ljava/lang/Number;" && !matches!(prim, "Z" | "C"));
+            (arg && target).then_some((&a[0], prim))
+        }
+        InvokeKind::Virtual if is_unboxing(e) && expect == prim => Some((&a[0], prim)),
+        _ => None,
+    }
 }
 
 /// `(T[]..) Array.newInstance(C.class, new int[]{dims})` as `(base element type, dims)`.
@@ -2843,10 +3220,16 @@ fn walk_refs(
                     path.truncate(base);
                 }
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
+                for r in resources {
+                    r.visit_exprs(&mut |e| e.visit_vars(&mut |v| add(v, refs)));
+                }
                 walk_refs(body, counter, path, refs, first_assign, headers);
                 for c in catches {
                     walk_refs(&c.body, counter, path, refs, first_assign, headers);
+                }
+                if !finally.is_empty() || (catches.is_empty() && resources.is_empty()) {
+                    walk_refs(finally, counter, path, refs, first_assign, headers);
                 }
             }
             Node::Sync { lock, body } => {
@@ -2875,8 +3258,14 @@ fn mark_catch_vars(nodes: &[Node], declared: &mut [bool]) {
                 mark_catch_vars(body, declared);
             }
             Node::Switch { cases, .. } => cases.iter().for_each(|c| mark_catch_vars(&c.body, declared)),
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
+                for r in resources {
+                    if let Stmt::Assign(v, _) = r {
+                        declared[*v as usize] = true;
+                    }
+                }
                 mark_catch_vars(body, declared);
+                mark_catch_vars(finally, declared);
                 for c in catches {
                     if let Some(v) = c.var {
                         declared[v as usize] = true;
@@ -2927,9 +3316,10 @@ fn has_continue(nodes: &[Node], label: u32, innermost: bool) -> bool {
         }
         Node::Sync { body, .. } => has_continue(body, label, innermost),
         Node::Switch { cases, .. } => cases.iter().any(|c| has_continue(&c.body, label, innermost)),
-        Node::Try { body, catches } => {
+        Node::Try { body, catches, finally, .. } => {
             has_continue(body, label, innermost)
                 || catches.iter().any(|c| has_continue(&c.body, label, innermost))
+                || has_continue(finally, label, innermost)
         }
         _ => false,
     })
@@ -2960,9 +3350,10 @@ fn loops_to_for(nodes: &mut Vec<Node>, body: &Body, counts: &HashMap<VarId, usiz
             Node::Switch { cases, .. } => {
                 cases.iter_mut().for_each(|c| loops_to_for(&mut c.body, body, counts))
             }
-            Node::Try { body: b, catches } => {
+            Node::Try { body: b, catches, finally, .. } => {
                 loops_to_for(b, body, counts);
                 catches.iter_mut().for_each(|c| loops_to_for(&mut c.body, body, counts));
+                loops_to_for(finally, body, counts);
             }
             _ => {}
         }
@@ -3098,9 +3489,10 @@ fn lambda_locals(nodes: &[Node], body: &Body, out: &mut HashMap<VarId, Sig>) {
                 | Node::ForEach { body, .. }
                 | Node::Sync { body, .. } => walk(body, f),
                 Node::Switch { cases, .. } => cases.iter().for_each(|c| walk(&c.body, f)),
-                Node::Try { body, catches } => {
+                Node::Try { body, catches, finally, .. } => {
                     walk(body, f);
                     catches.iter().for_each(|c| walk(&c.body, f));
+                    walk(finally, f);
                 }
                 _ => {}
             }
@@ -3167,9 +3559,10 @@ fn generic_locals(nodes: &[Node], body: &Body, ret: &Sig, out: &mut HashMap<VarI
                 | Node::ForEach { body, .. }
                 | Node::Sync { body, .. } => walk(body, moves, returned),
                 Node::Switch { cases, .. } => cases.iter().for_each(|c| walk(&c.body, moves, returned)),
-                Node::Try { body, catches } => {
+                Node::Try { body, catches, finally, .. } => {
                     walk(body, moves, returned);
                     catches.iter().for_each(|c| walk(&c.body, moves, returned));
+                    walk(finally, moves, returned);
                 }
                 _ => {}
             }

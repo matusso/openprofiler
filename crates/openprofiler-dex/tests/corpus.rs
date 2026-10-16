@@ -61,6 +61,7 @@ fn readable_constructs() {
         "CIRCLE(\"c\"),",
         "return Shapes.this.registered;",
         "out.add(new AnonymousClass1());",
+        "case \"alpha\":",
     ] {
         assert!(all.contains(want), "missing `{want}` in:\n{all}");
     }
