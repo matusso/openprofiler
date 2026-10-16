@@ -212,11 +212,14 @@ across all indexes, on disk and mmap'd.
 
 ### 3.10 UI
 
-- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Events, Code, Compare), a top
+- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Events, MBeans, Code, Compare), a top
   session bar with recording controls and a timeline scrubber, and an inspector panel.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
   smali tabs, back/forward history, and a usages panel; a Resources tab shows decoded resources.
+- The MBeans view (live sessions): the platform MBean server as a domain tree, attribute values
+  (auto-refreshed, writable ones editable), operations with typed argument fields, and numeric
+  attributes plotted as telemetry series sampled by the agent.
 - A global time range: brushing the timeline filters every view.
 - A command palette (⌘K) for actions, views, classes and methods, with go-to-source through the IDE
   bridge.
@@ -228,7 +231,8 @@ across all indexes, on disk and mmap'd.
 
 - `openprofiler mcp` runs an MCP server on stdio. Tools include `list_jvms`, `attach`,
   `prepare_profiling`, `load_snapshot`, `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`,
-  `compare` and `thread_dump`; `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
+  `compare`, `thread_dump` and the MBean tools (`list_mbeans`, `get_mbean`, `invoke_mbean`,
+  `track_mbean`); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge

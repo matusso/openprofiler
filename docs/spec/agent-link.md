@@ -170,6 +170,35 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 | `RunGc` | JVMTI `ForceGarbageCollection` | `ok` |
 | `AddBookmark{label, color}` | adds a bookmark | `ok` |
 | `SetTriggers{triggers}` | replaces the agent's triggers (see below) | `ok`, or an error for an invalid trigger |
+| `MBeanList{pattern}` | MBeans of the platform MBean server matching an ObjectName pattern (empty = all) | `MBeanList` (beans + tracked attributes) |
+| `MBeanGet{name}` | `getMBeanInfo` plus every readable attribute's value | `MBeanInfo` |
+| `MBeanInvoke{name, operation, signature, args}` | `MBeanServer.invoke` | `MBeanInvokeResult` |
+| `MBeanSet{name, attribute, value}` | `MBeanServer.setAttribute` | `ok` |
+| `MBeanTrack{name, attribute, item, label, unit, enabled}` | starts/stops sampling an attribute as telemetry | `MBeanList` (tracked only) |
+
+## MBeans
+
+The `mbeans` capability exposes the JVM's platform MBean server (`java.lang`, `java.nio`,
+`com.sun.management`, `jdk.management.jfr`, and whatever the application registers there).
+
+- Values (`MBeanAttribute.value_json`, `MBeanInvokeResult.value_json`) are JSON: numbers, booleans,
+  strings and `null` as themselves; `CompositeData` and `Map`s as objects; `TabularData`,
+  collections and arrays as arrays (at most 1000 items, nested at most 8 levels deep); `ObjectName`s
+  as their canonical name; NaN/infinity and everything else as `toString()`.
+- Invoke arguments and set values are strings converted to the declared type: primitives and their
+  boxes, `String`, `Object` (passed as a string), `ObjectName`, and arrays of these written as a
+  JSON array (`["a", "b"]`, `[1, 2]`) or a comma-separated list. Other types are rejected.
+- Failures (unknown bean, conversion error, an exception thrown by the bean) come back as a failed
+  `Response` with the root cause, e.g. `javax.management.InstanceNotFoundException: x:type=Y`.
+- Requests run on the agent-link thread, so a slow operation delays data batches until it returns.
+- **Tracked attributes** are sampled once per second by the telemetry thread and published as
+  ordinary telemetry series with key `mbean:<canonical name>#<attribute>` or
+  `mbean:<canonical name>#<attribute>.<item>` for an item of a `CompositeData` attribute
+  (e.g. `mbean:java.lang:type=Memory#HeapMemoryUsage.used`). Numbers and booleans (0/1) are
+  plotted; other values produce no sample. Tracked series are recorded like the built-in ones
+  (live data, `.oplink` recordings, snapshots) and can be used as threshold trigger metrics. The
+  label defaults to `<attribute>[.<item>] (<name or type key property>)`; tracking an attribute
+  again updates its label and unit. Stopping keeps the samples already taken.
 
 ## Triggers
 
@@ -203,8 +232,9 @@ A bare array works too. Durations are numbers of milliseconds or strings with a 
 | `jvm_exit` | at VM death, before the offline recording is written or the final batch is sent |
 
 Threshold metrics are the telemetry keys (`heap.used`, `heap.committed`, `nonheap.used`,
-`gc.activity`, `threads.live`, `classes.loaded`, `cpu.process`, `cpu.system`, `alloc.rate`, …)
-plus `heap.used_pct` (used heap as a percentage of the maximum).
+`gc.activity`, `threads.live`, `classes.loaded`, `cpu.process`, `cpu.system`, `alloc.rate`, …,
+and tracked MBean attributes `mbean:…`) plus `heap.used_pct` (used heap as a percentage of the
+maximum).
 
 | action | effect |
 |---|---|
