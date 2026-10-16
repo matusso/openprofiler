@@ -96,6 +96,12 @@ public final class Agent {
         return Dumps.threadDump();
     }
 
+    // ---- MBean browser (operations and line formats documented in MBeans) ------------------------
+
+    public static String[] mbean(String op, String[] args) {
+        return MBeans.call(op, args);
+    }
+
     // ---- used by the Controller API ------------------------------------------------------------
 
     static void bookmark(String label, String color) {

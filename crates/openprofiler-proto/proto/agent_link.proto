@@ -34,7 +34,7 @@ message Hello {
   JvmInfo jvm = 3;
   // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "monitor_usage" (owners of
   // contended monitors), "park" (j.u.c lock hooks), "threads", "telemetry", "heap_dump",
-  // "thread_dump", "virtual_threads", "triggers", ...
+  // "thread_dump", "virtual_threads", "triggers", "mbeans", ...
   repeated string capabilities = 4;
   // Echo of the daemon's token (daemon -> agent direction uses Auth below).
   string token = 5;
@@ -353,6 +353,196 @@ message SetTriggers {
   repeated Trigger triggers = 1;
 }
 
+// ---------------------------------------------------------------------------------------------
+// MBean browser. Values are JSON (see agent-link.md). `server` selects the MBean server: empty
+// for the platform server, otherwise an `MBeanServerInfo.id` from MBeanServersRequest.
+// ---------------------------------------------------------------------------------------------
+
+// Lists the MBean servers: the platform one, others in the JVM and connected remote JMX servers.
+message MBeanServersRequest {}
+
+message MBeanServerInfo {
+  // Empty for the platform server, the delegate's MBeanServerId for other servers in the JVM,
+  // the service URL for remote ones.
+  string id = 1;
+  // "platform", "local" or "remote".
+  string kind = 2;
+  string label = 3;
+  string default_domain = 4;
+  uint32 bean_count = 5;
+  // Why the server cannot be reached (remote connection closed or failing).
+  string error = 6;
+}
+
+message MBeanServerList {
+  repeated MBeanServerInfo servers = 1;
+}
+
+// Connects the JVM to a remote JMX server (`enabled`), or disconnects it. Answers MBeanServerList.
+message MBeanConnectRequest {
+  // A JMX service URL, e.g. service:jmx:rmi:///jndi/rmi://host:9010/jmxrmi.
+  string url = 1;
+  string username = 2;
+  string password = 3;
+  bool enabled = 4;
+}
+
+// Lists MBeans whose ObjectName matches `pattern` (an ObjectName pattern; empty = all).
+message MBeanListRequest {
+  string pattern = 1;
+  string server = 2;
+}
+
+message MBeanSummary {
+  string name = 1;
+  string class_name = 2;
+  string description = 3;
+}
+
+// A numeric MBean attribute sampled as a telemetry series (key `mbean:<name>#<attribute>[.<item>]`).
+message TrackedAttribute {
+  string key = 1;
+  string label = 2;
+  // openprofiler_model::Unit, as in TelemetrySeriesDelta.
+  uint32 unit = 3;
+  string mbean = 4;
+  string attribute = 5;
+  // Item of a CompositeData attribute (e.g. "used" of HeapMemoryUsage); empty for plain numbers.
+  string item = 6;
+  string server = 7;
+}
+
+message MBeanList {
+  repeated MBeanSummary beans = 1;
+  // Attributes currently sampled as telemetry.
+  repeated TrackedAttribute tracked = 2;
+}
+
+message MBeanGetRequest {
+  string name = 1;
+  string server = 2;
+}
+
+message MBeanAttribute {
+  string name = 1;
+  string type = 2;
+  string description = 3;
+  bool readable = 4;
+  bool writable = 5;
+  // The current value as JSON; empty if it could not be read (see `error`).
+  string value_json = 6;
+  string error = 7;
+}
+
+message MBeanParameter {
+  string name = 1;
+  string type = 2;
+  string description = 3;
+}
+
+message MBeanOperation {
+  string name = 1;
+  string return_type = 2;
+  string description = 3;
+  // "info", "action", "action_info" or "unknown".
+  string impact = 4;
+  repeated MBeanParameter params = 5;
+}
+
+message MBeanInfo {
+  string name = 1;
+  string class_name = 2;
+  string description = 3;
+  repeated MBeanAttribute attributes = 4;
+  repeated MBeanOperation operations = 5;
+  repeated MBeanNotificationInfo notifications = 6;
+}
+
+// A notification the MBean declares it can emit.
+message MBeanNotificationInfo {
+  // Notification class name.
+  string name = 1;
+  string description = 2;
+  repeated string types = 3;
+}
+
+// Arguments are strings converted to the parameter types (primitives, their boxes, String,
+// ObjectName, and arrays of those as JSON arrays or comma-separated lists).
+message MBeanInvokeRequest {
+  string name = 1;
+  string operation = 2;
+  // Parameter types, selecting the overload.
+  repeated string signature = 3;
+  repeated string args = 4;
+  string server = 5;
+}
+
+message MBeanInvokeResult {
+  string value_json = 1;
+}
+
+// Sets a writable attribute; `value` is converted like an MBeanInvokeRequest argument.
+message MBeanSetRequest {
+  string name = 1;
+  string attribute = 2;
+  string value = 3;
+  string server = 4;
+}
+
+// Starts (`enabled`) or stops sampling a numeric attribute as telemetry, once per second.
+message MBeanTrackRequest {
+  string name = 1;
+  string attribute = 2;
+  string item = 3;
+  // Defaults to "<attribute>[.<item>] (<bean>)".
+  string label = 4;
+  uint32 unit = 5;
+  bool enabled = 6;
+  string server = 7;
+}
+
+// Adds (`enabled`) or removes a notification listener on one MBean. Answers MBeanNotifications
+// with the subscriptions only.
+message MBeanSubscribeRequest {
+  string server = 1;
+  string name = 2;
+  bool enabled = 3;
+}
+
+// The buffered notifications (the agent keeps the last 1000) with `seq` above `after`.
+message MBeanNotificationsRequest {
+  uint64 after = 1;
+}
+
+message MBeanNotification {
+  // Increasing per agent, starting at 1.
+  uint64 seq = 1;
+  // Epoch nanoseconds (millisecond precision).
+  int64 time = 2;
+  string server = 3;
+  // The subscribed MBean.
+  string source = 4;
+  string type = 5;
+  int64 sequence_number = 6;
+  string message = 7;
+  // User data as JSON; for attribute change notifications {attribute, type, old, new}.
+  string data_json = 8;
+}
+
+message MBeanSubscription {
+  string server = 1;
+  string name = 2;
+}
+
+message MBeanNotifications {
+  repeated MBeanNotification notifications = 1;
+  repeated MBeanSubscription subscriptions = 2;
+  // The newest sequence number; pass it as the next `after`.
+  uint64 last_seq = 3;
+  // Notifications after `after` dropped from the buffer before they were read.
+  uint64 missed = 4;
+}
+
 message Request {
   uint64 id = 1;
   oneof kind {
@@ -364,6 +554,15 @@ message Request {
     RunGc run_gc = 7;
     AddBookmark bookmark = 8;
     SetTriggers set_triggers = 9;
+    MBeanListRequest mbean_list = 10;
+    MBeanGetRequest mbean_get = 11;
+    MBeanInvokeRequest mbean_invoke = 12;
+    MBeanSetRequest mbean_set = 13;
+    MBeanTrackRequest mbean_track = 14;
+    MBeanServersRequest mbean_servers = 15;
+    MBeanConnectRequest mbean_connect = 16;
+    MBeanSubscribeRequest mbean_subscribe = 17;
+    MBeanNotificationsRequest mbean_notifications = 18;
   }
 }
 
@@ -404,6 +603,14 @@ message Response {
     ThreadDump thread_dump = 4;
     HeapDumpResult heap_dump = 5;
     SnapshotResult snapshot = 6;
+    // MBeanList and MBeanTrack (the latter with `tracked` only).
+    MBeanList mbean_list = 7;
+    MBeanInfo mbean_info = 8;
+    MBeanInvokeResult mbean_invoke = 9;
+    // MBeanServers and MBeanConnect.
+    MBeanServerList mbean_servers = 10;
+    // MBeanNotifications and MBeanSubscribe.
+    MBeanNotifications mbean_notifications = 11;
   }
 }
 

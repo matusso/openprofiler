@@ -77,6 +77,42 @@ public class Workload {
         }
     }
 
+    public interface SlowMBean {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    /** An MBean with a slow operation: MBean requests must not hold up the agent link. */
+    public static class Slow implements SlowMBean {
+        public void sleep(long millis) throws InterruptedException {
+            Thread.sleep(millis);
+        }
+    }
+
+    /**
+     * An MBean with a slow operation on the platform server, and a second MBean server (holding the
+     * memory MXBean) with a JMX connector on loopback, for the MBean browser tests; its
+     * service URL is published as the system property openprofiler.test.jmx.
+     */
+    static javax.management.remote.JMXConnectorServer jmx;
+
+    static void startJmx() {
+        try {
+            javax.management.ObjectName slow = new javax.management.ObjectName("openprofiler.test:type=Slow");
+            java.lang.management.ManagementFactory.getPlatformMBeanServer().registerMBean(new Slow(), slow);
+            javax.management.MBeanServer mbs = javax.management.MBeanServerFactory.createMBeanServer("testapp");
+            mbs.registerMBean(java.lang.management.ManagementFactory.getMemoryMXBean(),
+                new javax.management.ObjectName("java.lang:type=Memory"));
+            javax.management.remote.JMXConnectorServer cs =
+                javax.management.remote.JMXConnectorServerFactory.newJMXConnectorServer(
+                    new javax.management.remote.JMXServiceURL("service:jmx:rmi://127.0.0.1"), null, mbs);
+            cs.start();
+            jmx = cs;
+            System.setProperty("openprofiler.test.jmx", cs.getAddress().toString());
+        } catch (Exception e) {
+            System.err.println("no JMX connector: " + e);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         long seconds = args.length > 0 ? Long.parseLong(args[0]) : 0;
         System.out.println("PID " + ProcessHandle.current().pid());
@@ -100,10 +136,12 @@ public class Workload {
             j.start();
         }
         startVirtualThreads();
+        startJmx();
         long end = System.currentTimeMillis() + seconds * 1000;
         while (seconds == 0 || System.currentTimeMillis() < end) {
             Thread.sleep(100);
         }
+        if (jmx != null) jmx.stop(); // RMI would keep the JVM alive
         System.out.println("DONE");
     }
 }

@@ -15,7 +15,8 @@ export type Capability =
   | "gc"
   | "thread_dumps"
   | "recording"
-  | "decompile";
+  | "decompile"
+  | "mbeans";
 
 export type SessionState = "loading" | "ready" | "live" | "detached" | "failed";
 
@@ -537,4 +538,99 @@ export interface CodeResourceResponse {
   binary?: boolean;
   /** Files decoded from a container such as resources.arsc. */
   files?: string[];
+}
+
+// MBean browser (live sessions with the "mbeans" capability)
+
+export interface MBeanSummary {
+  name: string;
+  domain: string;
+  class_name: string;
+  description: string;
+}
+
+export interface TrackedAttribute {
+  key: string;
+  label: string;
+  unit: Unit;
+  name: string;
+  attribute: string;
+  item?: string;
+  server: string;
+}
+
+export interface MBeanServerInfo {
+  /** "" for the platform server, the MBeanServerId for other local servers, the URL for remote ones. */
+  id: string;
+  kind: "platform" | "local" | "remote";
+  label: string;
+  default_domain: string;
+  beans: number;
+  error?: string;
+}
+
+export interface MBeanSubscription {
+  server: string;
+  name: string;
+}
+
+export interface MBeanNotification {
+  seq: number;
+  /** Epoch nanoseconds. */
+  time: number;
+  server: string;
+  name: string;
+  type: string;
+  sequence_number: number;
+  message: string;
+  data: unknown;
+}
+
+export interface MBeanNotificationsResponse {
+  notifications: MBeanNotification[];
+  subscriptions: MBeanSubscription[];
+  last: number;
+  missed: number;
+}
+
+export interface MBeanListResponse {
+  beans: MBeanSummary[];
+  tracked: TrackedAttribute[];
+}
+
+export interface MBeanAttribute {
+  name: string;
+  type: string;
+  description: string;
+  readable: boolean;
+  writable: boolean;
+  value: unknown;
+  error?: string;
+}
+
+export interface MBeanOperation {
+  name: string;
+  return_type: string;
+  description: string;
+  impact: "info" | "action" | "action_info" | "unknown";
+  params: { name: string; type: string; description: string }[];
+}
+
+export interface MBeanDetail {
+  name: string;
+  class_name: string;
+  description: string;
+  attributes: MBeanAttribute[];
+  operations: MBeanOperation[];
+  notifications: { name: string; description: string; types: string[] }[];
+}
+
+export interface MBeanTrackRequest {
+  server: string;
+  name: string;
+  attribute: string;
+  item?: string;
+  label?: string;
+  unit?: Unit;
+  enabled?: boolean;
 }

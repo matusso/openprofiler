@@ -17,6 +17,7 @@ import { CpuView } from "./views/CpuView";
 import { EventsView } from "./views/EventsView";
 import { HeapView } from "./views/HeapView";
 import { LocksView } from "./views/LocksView";
+import { MBeansView } from "./views/MBeansView";
 import { MemoryView } from "./views/MemoryView";
 import { OverviewView } from "./views/OverviewView";
 import { Placeholder } from "./views/Placeholder";
@@ -210,12 +211,7 @@ function Main() {
         />
       );
     case "mbeans":
-      return (
-        <Placeholder
-          title="MBeans"
-          text="The MBean browser needs a live agent with JMX access (roadmap phase 5)."
-        />
-      );
+      return <MBeansView />;
   }
 }
 

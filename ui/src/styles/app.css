@@ -1627,3 +1627,213 @@ select {
 .tk-attr {
   color: var(--c7);
 }
+
+/* ---------- MBean browser ---------- */
+
+.mb-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 10px;
+  padding: 10px 16px 0;
+  max-height: 40%;
+  overflow: auto;
+}
+
+.mb-charts .chart-card h3 {
+  align-items: center;
+}
+
+.mb-charts .chart-card h3 > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.mb-unit {
+  height: 22px;
+  font-size: 11px;
+}
+
+.mb-chart-wait {
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mb-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.mb-detail-head {
+  padding: 10px 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mb-title {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.mb-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mb-table {
+  display: flex;
+  flex-direction: column;
+  font-size: 12.5px;
+}
+
+.mb-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 260px) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.mb-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mb-type {
+  font-size: 11px;
+}
+
+.mb-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mb-str {
+  white-space: pre-wrap;
+}
+
+.mb-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 260px;
+}
+
+.btn.mb-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.mb-value {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mb-entry {
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) minmax(0, max-content) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.mb-entry > .btn {
+  justify-self: start;
+}
+
+.mb-val .num {
+  white-space: nowrap;
+}
+
+.mb-edit {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mb-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.mb-op {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mb-op-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+
+.mb-op-form {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mb-op-form .input {
+  width: 180px;
+}
+
+.mb-result {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.mb-server {
+  max-width: 360px;
+}
+
+.mb-connect {
+  flex-basis: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mb-connect-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mb-notif-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.mb-notif-types {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.mb-row.mb-notif {
+  grid-template-columns: 120px minmax(0, 1fr);
+}

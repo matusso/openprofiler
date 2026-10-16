@@ -9,7 +9,8 @@ use openprofiler_proto::{
 };
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 const FLUSH_EVERY: Duration = Duration::from_millis(200);
@@ -19,6 +20,47 @@ const BLOB_CHUNK: usize = 1 << 20;
 static FINAL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static FINAL_DONE: AtomicBool = AtomicBool::new(false);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Bumped per daemon session, so MBean responses finishing after a reconnect are dropped.
+static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
+static MBEAN_WORKER: OnceLock<MBeanWorker> = OnceLock::new();
+
+/// Runs MBean requests on their own thread: an operation or a remote JMX call can take long, and
+/// the link thread must keep sending data batches meanwhile. Requests run one at a time, in order.
+struct MBeanWorker {
+    jobs: mpsc::Sender<(u64, v1::Request)>,
+    /// Finished responses with their session generation, sent by the link thread.
+    done: Mutex<Vec<(u64, v1::Response)>>,
+}
+
+fn mbean_worker(a: &'static Agent) -> Option<&'static MBeanWorker> {
+    if let Some(w) = MBEAN_WORKER.get() {
+        return Some(w);
+    }
+    let (tx, rx) = mpsc::channel::<(u64, v1::Request)>();
+    let w = MBEAN_WORKER.get_or_init(|| MBeanWorker { jobs: tx, done: Mutex::new(vec![]) });
+    let r = std::thread::Builder::new().name("openprofiler-mbeans".into()).spawn(move || {
+        crate::own_thread();
+        let jni = a.vm.attach_daemon("OpenProfiler MBeans");
+        for (generation, req) in rx {
+            let mut resp = v1::Response { id: req.id, ok: true, ..Default::default() };
+            let r = match (jni, a.java.get(), &req.kind) {
+                (Some(jni), Some(h), Some(kind)) => h.mbean_request(jni, kind),
+                (None, ..) => Err("MBeans unavailable (cannot attach to the VM)".into()),
+                _ => Err("MBeans unavailable (no boot classes)".into()),
+            };
+            match r {
+                Ok(result) => resp.result = result,
+                Err(e) => fail(&mut resp, &e),
+            }
+            w.done.lock().unwrap().push((generation, resp));
+        }
+    });
+    if let Err(e) = r {
+        log(&format!("cannot start the MBean thread: {e}"));
+        return None;
+    }
+    Some(w)
+}
 
 pub fn start(a: &'static Agent) {
     let r = std::thread::Builder::new().name("openprofiler-link".into()).spawn(move || run(a));
@@ -246,6 +288,7 @@ fn session<S: Read + Write>(a: &'static Agent, jni: *mut jvmti_sys::JNIEnv, s: &
         *lock.lock().unwrap() = true;
         cv.notify_all();
     }
+    let generation = SESSION_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let mut sent = resume_from;
     let mut last_flush = Instant::now() - FLUSH_EVERY;
     loop {
@@ -258,11 +301,19 @@ fn session<S: Read + Write>(a: &'static Agent, jni: *mut jvmti_sys::JNIEnv, s: &
                         a.collector.lock().ack(&w);
                     }
                 }
-                Some(FrameType::Request) => handle_request(a, jni, s, f.decode()?)?,
+                Some(FrameType::Request) => handle_request(a, jni, s, f.decode()?, generation)?,
                 Some(FrameType::Ping) => {
                     send(s, FrameType::Pong, &v1::Ping { time: now_nanos() })?;
                 }
                 _ => {}
+            }
+        }
+        if let Some(w) = MBEAN_WORKER.get() {
+            let done = std::mem::take(&mut *w.done.lock().unwrap());
+            for (g, resp) in done {
+                if g == generation {
+                    send(s, FrameType::Response, &resp)?;
+                }
             }
         }
         let final_req = FINAL_REQUESTED.load(Ordering::SeqCst);
@@ -287,9 +338,17 @@ fn handle_request<S: Write>(
     jni: *mut jvmti_sys::JNIEnv,
     s: &mut S,
     req: v1::Request,
+    generation: u64,
 ) -> io::Result<()> {
     use v1::request::Kind;
     let mut resp = v1::Response { id: req.id, ok: true, ..Default::default() };
+    if is_mbean(&req.kind) {
+        match mbean_worker(a) {
+            Some(w) if w.jobs.send((generation, req)).is_ok() => return Ok(()),
+            _ => fail(&mut resp, "MBeans unavailable (no worker thread)"),
+        }
+        return send(s, FrameType::Response, &resp);
+    }
     let mut blob: Option<(u64, std::path::PathBuf)> = None;
     match req.kind {
         Some(Kind::ThreadDump(_)) => match a.java.get() {
@@ -355,6 +414,7 @@ fn handle_request<S: Write>(
                 fail(&mut resp, &e);
             }
         }
+        Some(_) => fail(&mut resp, "unsupported request"),
         None => fail(&mut resp, "empty request"),
     }
     send(s, FrameType::Response, &resp)?;
@@ -364,6 +424,24 @@ fn handle_request<S: Write>(
         r?;
     }
     Ok(())
+}
+
+fn is_mbean(kind: &Option<v1::request::Kind>) -> bool {
+    use v1::request::Kind;
+    matches!(
+        kind,
+        Some(
+            Kind::MbeanServers(_)
+                | Kind::MbeanConnect(_)
+                | Kind::MbeanList(_)
+                | Kind::MbeanGet(_)
+                | Kind::MbeanInvoke(_)
+                | Kind::MbeanSet(_)
+                | Kind::MbeanTrack(_)
+                | Kind::MbeanSubscribe(_)
+                | Kind::MbeanNotifications(_)
+        )
+    )
 }
 
 fn fail(resp: &mut v1::Response, msg: &str) {

@@ -143,8 +143,11 @@ impl Session {
         if self.heap().is_some() {
             caps.push("heap".into());
         }
-        if self.live().is_some() {
+        if let Some(l) = self.live() {
             caps.push("recording".into());
+            if l.client().hello().capabilities.iter().any(|c| c == "mbeans") {
+                caps.push("mbeans".into());
+            }
         }
         if self.decompiler().is_some() {
             caps.push("decompile".into());

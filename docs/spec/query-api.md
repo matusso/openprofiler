@@ -36,7 +36,7 @@ Conventions:
 type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
 type Capability = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception"
                 | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording"
-                | "decompile";
+                | "decompile" | "mbeans";
 interface Session {
   id: string; kind: SessionKind; name: string; path?: string;
   state: "loading" | "ready" | "live" | "detached" | "failed";
@@ -274,6 +274,53 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 - `POST .../gc` → runs a full GC.
 - `POST .../triggers` `{ triggers: Trigger[] }` → replaces the agent's triggers (format in
   [agent-link.md](agent-link.md#triggers)); returns `{ installed }`.
+
+## MBeans (live sessions with the `mbeans` capability)
+
+The MBean servers of the attached JVM (see [agent-link.md](agent-link.md#mbeans) for servers,
+value and argument conversion, and notifications). `server` is an `MBeanServerInfo.id`; omitted or
+`""` means the platform MBean server. Errors from the JVM are returned as
+`{"error": "agent: <exception>"}`.
+
+| Method & path | Body | Result |
+|---|---|---|
+| `POST .../mbean-servers` | `{}` | `{ servers: MBeanServerInfo[] }` |
+| `POST .../mbean-connect` | `{ url, username?, password?, enabled?: boolean }` (JMX service URL) | `{ servers: MBeanServerInfo[] }` |
+| `POST .../mbeans` | `{ server?, pattern?: string }` (ObjectName pattern, e.g. `java.lang:*`) | `{ beans: MBeanSummary[], tracked: TrackedAttribute[] }` |
+| `POST .../mbean` | `{ server?, name }` | `MBeanDetail` |
+| `POST .../mbean-invoke` | `{ server?, name, operation, signature: string[], args: string[] }` | `{ value: Json }` |
+| `POST .../mbean-set` | `{ server?, name, attribute, value: string }` | `{}` |
+| `POST .../mbean-track` | `{ server?, name, attribute, item?, label?, unit?: Unit, enabled?: boolean }` | `{ tracked: TrackedAttribute[] }` |
+| `POST .../mbean-subscribe` | `{ server?, name, enabled?: boolean }` | `{ subscriptions: { server, name }[] }` |
+| `POST .../mbean-notifications` | `{ after?: number }` | `MBeanNotifications` |
+
+```ts
+interface MBeanServerInfo { id: string; kind: "platform" | "local" | "remote"; label: string;
+                            default_domain: string; beans: number; error?: string }
+interface MBeanSummary { name: string; domain: string; class_name: string; description: string }
+interface MBeanDetail {
+  name: string; class_name: string; description: string;
+  attributes: { name: string; type: string; description: string; readable: boolean;
+                writable: boolean; value: Json; error?: string }[];
+  operations: { name: string; return_type: string; description: string;
+                impact: "info" | "action" | "action_info" | "unknown";
+                params: { name: string; type: string; description: string }[] }[];
+  notifications: { name: string; description: string; types: string[] }[];
+}
+interface TrackedAttribute { key: string; label: string; unit: Unit; name: string;
+                             attribute: string; item?: string; server: string }
+interface MBeanNotifications {
+  notifications: { seq: number; time: number /* epoch ns */; server: string; name: string;
+                   type: string; sequence_number: number; message: string; data: Json }[];
+  subscriptions: { server: string; name: string }[];
+  last: number;    // pass as the next `after`
+  missed: number;  // notifications after `after` dropped from the agent's buffer (last 1000)
+}
+```
+
+`mbean-track` samples a numeric attribute (or `item` of a composite attribute) once per second as
+the telemetry series `key` (`mbean:<name>#<attribute>[.<item>]`), which `POST .../telemetry`
+returns like any other series; `enabled: false` stops sampling. `unit` defaults to `count`.
 
 ## Export
 

@@ -131,9 +131,10 @@ openprofiler mcp        # MCP server on stdio
 ```
 
 Register the command with any MCP client. Tools include `list_jvms`, `attach`, `load_snapshot`,
-`hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`, `compare`, `thread_dump` and
-`set_triggers`, plus `decompile`, `search_code` and `find_usages` for apps opened in the
-decompiler.
+`hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`, `compare`, `thread_dump`,
+`set_triggers`, the MBean tools (`list_mbean_servers`, `connect_jmx`, `list_mbeans`,
+`get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`, `mbean_notifications`), plus
+`decompile`, `search_code` and `find_usages` for apps opened in the decompiler.
 
 ### Use it from your IDE
 

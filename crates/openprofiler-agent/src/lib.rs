@@ -172,6 +172,7 @@ unsafe fn init(vm: *mut JavaVM, options: *const c_char, attach: bool) -> jint {
     caps.push("thread_dump".into());
     caps.push("heap_dump".into());
     caps.push("triggers".into());
+    caps.push("mbeans".into());
 
     let tls = if opts.tls && opts.mode == Mode::Live {
         match tls::TlsIdentity::generate() {
