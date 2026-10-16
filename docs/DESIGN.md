@@ -303,7 +303,12 @@ same calls.
   statement; `catch`/`finally` around it are hoisted); `switch` on strings from the
   `hashCode()` switch and the index switch (javac and d8 forms, hash collisions included);
   boxing and unboxing calls are dropped where the context converts implicitly, except for
-  arguments of overloaded methods (`List.remove`) and `==` between two unboxed values.
+  arguments of overloaded methods (`List.remove`) and `==` between two unboxed values;
+  conditionals from branches assigning one variable, chained through the else side
+  (`a > 0 ? "pos" : a < 0 ? "neg" : "zero"`), keeping boxing explicit where a reference is
+  expected and only one side boxes; casts of calls returning a type argument of a receiver with
+  known generic type (`words.get(i)` of a `List<String>`; the program's signatures, or a table of
+  JDK collection and functional-interface methods) are dropped.
 - **Pipeline per method** (`method.rs`, `structure.rs`, `java.rs`):
   1. Decode instructions (`insn.rs`), split basic blocks at branches, switch targets and try
      boundaries; exception edges only leave blocks that can throw.

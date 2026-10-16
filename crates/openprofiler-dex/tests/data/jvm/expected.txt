@@ -38,3 +38,4 @@ false true [7, 9] 1005 3 | true true [2] 10 3
 3-inner-outer -innernpe-outer
 [open n, some, close n] [none]
 {a=[0, 2], b=[1]}
+null 2

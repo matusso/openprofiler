@@ -365,6 +365,11 @@ public class Features {
         return out.toString();
     }
 
+    public String boxedTernary(boolean flag, Integer boxed, int n) {
+        Integer x = flag ? boxed : Integer.valueOf(n);
+        return String.valueOf(x);
+    }
+
     public Map<String, List<Integer>> index(List<String> words) {
         Map<String, List<Integer>> m = new TreeMap<>();
         for (int i = 0; i < words.size(); i++) {

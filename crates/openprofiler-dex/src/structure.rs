@@ -1026,6 +1026,10 @@ fn cleanup(nodes: Vec<Node>, vars: &[VarInfo]) -> Vec<Node> {
                     let t = match (a, b) {
                         (Expr::Lit { bits: 1, .. }, Expr::Lit { bits: 0, .. }) if boolean => cond,
                         (Expr::Lit { bits: 0, .. }, Expr::Lit { bits: 1, .. }) if boolean => cond.negate(),
+                        // `c ? x : d ? y : z` chains through the else side.
+                        _ if matches!(a, Expr::Ternary(..)) && !matches!(b, Expr::Ternary(..)) => {
+                            Expr::Ternary(Box::new(cond.negate()), Box::new(b.clone()), Box::new(a.clone()))
+                        }
                         _ => Expr::Ternary(Box::new(cond), Box::new(a.clone()), Box::new(b.clone())),
                     };
                     out.push(Node::Stmt(Stmt::Assign(*v1, t)));
@@ -1145,8 +1149,35 @@ pub fn merge_bool_returns(nodes: &mut Vec<Node>) {
     }
 }
 
+/// A value fit for a conditional branch: pure, unboxed or boxed (`x.intValue()`,
+/// `Integer.valueOf(1)`), or itself a conditional of such values.
 fn is_simple(e: &Expr) -> bool {
-    !matches!(e, Expr::Ternary(..)) && e.is_pure()
+    match e {
+        Expr::Ternary(c, a, b) => c.is_pure() && is_simple(a) && is_simple(b),
+        Expr::Invoke(InvokeKind::Virtual, m, args)
+            if args.len() == 1 && m.params.is_empty() && m.name.ends_with("Value") =>
+        {
+            is_wrapper(&m.class) && args[0].is_pure()
+        }
+        Expr::Invoke(InvokeKind::Static, m, args) if &*m.name == "valueOf" && args.len() == 1 => {
+            is_wrapper(&m.class) && args[0].is_pure()
+        }
+        e => e.is_pure(),
+    }
+}
+
+fn is_wrapper(class: &str) -> bool {
+    matches!(
+        class,
+        "Ljava/lang/Integer;"
+            | "Ljava/lang/Long;"
+            | "Ljava/lang/Short;"
+            | "Ljava/lang/Byte;"
+            | "Ljava/lang/Character;"
+            | "Ljava/lang/Boolean;"
+            | "Ljava/lang/Float;"
+            | "Ljava/lang/Double;"
+    )
 }
 
 /// `monitor-enter x; try { ...; monitor-exit x } catch (Throwable t) { monitor-exit x; throw t; }`

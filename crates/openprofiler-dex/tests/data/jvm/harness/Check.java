@@ -50,5 +50,6 @@ public class Check {
             p("io " + e);
         }
         p(f.index(List.of("a", "b", "a")));
+        p(f.boxedTernary(true, null, 1) + " " + f.boxedTernary(false, null, 2));
     }
 }

@@ -931,7 +931,7 @@ impl<'p> Writer<'p> {
                     self.line();
                     self.w("static {");
                     self.indent += 1;
-                    self.body(&body, st, None, None);
+                    self.body(&body, st, None, None, &[]);
                     self.indent -= 1;
                     self.line();
                     self.w("}");
@@ -1237,7 +1237,7 @@ impl<'p> Writer<'p> {
                 self.w(" {");
                 self.indent += 1;
                 let generic_ret = msig.as_ref().and_then(|s| s.ret.clone());
-                self.body(&body, st, Some(&names), generic_ret);
+                self.body(&body, st, Some(&names), generic_ret, generic_args.as_deref().unwrap_or_default());
                 self.indent -= 1;
                 self.line();
                 self.w("}");
@@ -1251,8 +1251,9 @@ impl<'p> Writer<'p> {
         st: Structured,
         param_names: Option<&[String]>,
         generic_ret: Option<Sig>,
+        generic_params: &[Sig],
     ) {
-        self.body_in(body, st, param_names, generic_ret, None)
+        self.body_in(body, st, param_names, generic_ret, generic_params, None)
     }
 
     /// A method body; `reserved` names belong to an enclosing scope (lambda bodies).
@@ -1262,6 +1263,7 @@ impl<'p> Writer<'p> {
         mut st: Structured,
         param_names: Option<&[String]>,
         generic_ret: Option<Sig>,
+        generic_params: &[Sig],
         reserved: Option<&HashSet<String>>,
     ) {
         if let Some(w) = &st.warning {
@@ -1290,6 +1292,11 @@ impl<'p> Writer<'p> {
             && matches!(r, Sig::Var(_))
         {
             generic_locals(&st.nodes, body, r, &mut mc.generic);
+        }
+        for (v, vi) in body.vars.iter().enumerate() {
+            if let Some(s) = vi.param.and_then(|k| generic_params.get(k)).filter(|s| has_args(s)) {
+                mc.generic.insert(v as VarId, s.clone());
+            }
         }
         lambda_locals(&st.nodes, body, &mut mc.generic);
         self.flow_generics(&st.nodes, body, generic_ret.as_ref(), &mut mc.generic);
@@ -1614,6 +1621,7 @@ impl<'p> Writer<'p> {
                 if let Expr::Cast(ct, inner) = e
                     && let Some(sig) = mc.var_sig(v)
                     && (sig.erased().as_deref() == Some(&**ct) || matches!(sig, Sig::Var(_)))
+                    && self.call_result(mc, inner).is_none_or(|r| r != sig)
                 {
                     self.w("(");
                     self.sig(&sig);
@@ -1791,6 +1799,12 @@ impl<'p> Writer<'p> {
             && let Some((inner, prim)) = implicit_boxing(mc, e, expect)
         {
             return self.expr(mc, inner, prec, Some(prim));
+        }
+        // `(String) words.get(i)` of a `List<String>`: the call already has the cast type.
+        if let Expr::Cast(t, inner) = e
+            && self.call_result(mc, inner).is_some_and(|r| r.erased().as_deref() == Some(&**t))
+        {
+            return self.expr(mc, inner, prec, Some(t));
         }
         let my = expr_prec(e, mc);
         if my < prec {
@@ -2002,11 +2016,20 @@ impl<'p> Writer<'p> {
                 self.w(")");
             }
             Expr::Ternary(c, a, b) => {
+                // `c ? x : 1` unboxes a boxed `x`: where a reference is expected, implicit
+                // boxing only goes when both sides box.
+                let boxes = |e: &Expr| {
+                    matches!(e, Expr::Lit { bits: 0, .. }) || implicit_boxing(mc, e, expect).is_some()
+                };
+                let exact = expect.is_some_and(types::is_reference) && !(boxes(a) && boxes(b));
+                let prev = self.exact_boxing;
+                self.exact_boxing |= exact;
                 self.cond_prec(mc, c, 3);
                 self.w(" ? ");
                 self.expr(mc, a, 3, expect);
                 self.w(" : ");
                 self.expr(mc, b, 2, expect);
+                self.exact_boxing = prev;
             }
             Expr::CaughtException(_) => self.w("/* caught exception */ null"),
             Expr::Lambda(l, caps) => self.lambda(mc, l, caps),
@@ -2179,7 +2202,7 @@ impl<'p> Writer<'p> {
             _ => {
                 self.w("{");
                 self.indent += 1;
-                self.body_in(&body, st, Some(&names), None, Some(&reserved));
+                self.body_in(&body, st, Some(&names), None, &[], Some(&reserved));
                 self.indent -= 1;
                 self.line();
                 self.w("}");
@@ -2267,6 +2290,105 @@ impl<'p> Writer<'p> {
             .find(|x| d.field(x.field).is_some_and(|fi| d.string(fi.name) == &*f.name))?;
         let ann = d.annotations(c).ok()?;
         signature(d, ann.fields.get(&ef.field)?).and_then(|s| types::parse_field_sig(&s))
+    }
+
+    /// Generic type of a value, where known: generic locals, parameters and fields, and calls
+    /// on them returning a type argument.
+    fn generic_type(&self, mc: &MethodCtx<'_>, e: &Expr) -> Option<Sig> {
+        match e {
+            Expr::Var(v) => mc.var_sig(*v),
+            Expr::IGet(_, f) | Expr::SGet(f) => self.field_sig(f),
+            Expr::Cast(t, inner) => {
+                self.generic_type(mc, inner).filter(|s| s.erased().as_deref() == Some(&**t))
+            }
+            _ => self.call_result(mc, e),
+        }
+    }
+
+    /// The type argument a call returns: `words.get(i)` of a `List<String>` is a `String`.
+    fn call_result(&self, mc: &MethodCtx<'_>, e: &Expr) -> Option<Sig> {
+        let Expr::Invoke(InvokeKind::Virtual | InvokeKind::Interface, m, args) = e else { return None };
+        let recv = self.generic_type(mc, args.first()?)?;
+        let erased = recv.erased()?;
+        // A `TreeMap<K, V>` calling `Map.get` passes its type arguments on as they are.
+        if erased != *m.class && !type_arity(&erased).is_some_and(|n| collection_interface(&m.class, n)) {
+            return None;
+        }
+        let Sig::Class(parts) = recv else { return None };
+        let k = self.returned_type_arg(m)?;
+        match parts.last()?.1.get(k)? {
+            SigArg::Exact(s) if !has_type_vars(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// Which of its class's type parameters a method returns: from the program's signatures,
+    /// or for the JDK's collections and functional interfaces.
+    fn returned_type_arg(&self, m: &MethodRef) -> Option<usize> {
+        if let Some((d, c)) = self.p.class(&m.class) {
+            let Sig::Var(t) = self.method_sig(m)?.ret? else { return None };
+            let ann = d.annotations(c).ok()?;
+            let cs = signature(d, &ann.class).and_then(|s| types::parse_class_sig(&s))?;
+            return cs.params.iter().position(|p| p.name == t);
+        }
+        if &*m.ret != "Ljava/lang/Object;" {
+            return None;
+        }
+        let class = &*m.class;
+        let name = &*m.name;
+        let n = m.params.len();
+        if type_arity(class) == Some(1) || collection_interface(class, 1) {
+            let element = match n {
+                0 => matches!(
+                    name,
+                    "get"
+                        | "getFirst"
+                        | "getLast"
+                        | "removeFirst"
+                        | "removeLast"
+                        | "remove"
+                        | "poll"
+                        | "pollFirst"
+                        | "pollLast"
+                        | "peek"
+                        | "peekFirst"
+                        | "peekLast"
+                        | "pop"
+                        | "element"
+                        | "first"
+                        | "last"
+                        | "take"
+                        | "join"
+                ),
+                1 => {
+                    matches!(name, "get" | "remove" | "getAndSet" | "floor" | "ceiling" | "higher" | "lower")
+                }
+                2 => name == "set" && m.params[0] == "I",
+                _ => false,
+            };
+            return element.then_some(0);
+        }
+        if type_arity(class) == Some(2) || collection_interface(class, 2) {
+            return match name {
+                "firstKey" | "lastKey" | "floorKey" | "ceilingKey" | "higherKey" | "lowerKey" => Some(0),
+                "get" | "put" | "remove" | "getOrDefault" | "putIfAbsent" | "replace" | "compute"
+                | "computeIfAbsent" | "computeIfPresent" | "merge" => Some(1),
+                _ => None,
+            };
+        }
+        let n = class.strip_prefix("Ljava/")?.strip_suffix(';')?;
+        match (n, name) {
+            ("util/Iterator" | "util/ListIterator", "next" | "previous")
+            | ("util/Map$Entry", "getKey")
+            | ("util/Optional", "get" | "orElse" | "orElseGet" | "orElseThrow")
+            | ("util/function/Supplier", "get")
+            | ("util/function/UnaryOperator" | "util/function/BinaryOperator", "apply")
+            | ("util/concurrent/Callable", "call")
+            | ("util/concurrent/Future", "get") => Some(0),
+            ("util/Map$Entry", "getValue" | "setValue") | ("util/function/Function", "apply") => Some(1),
+            ("util/function/BiFunction", "apply") => Some(2),
+            _ => None,
+        }
     }
 
     /// Generic signature of a method declared in the program.
