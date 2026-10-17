@@ -201,32 +201,59 @@ struct Writer<'p> {
     indent: usize,
     /// Class whose members are being printed.
     cls: Arc<str>,
+    /// Synthetic `lambda$` methods printed inline at their lambdas instead of as members.
+    hidden: HashSet<MethodKey>,
+    /// Anonymous classes printed as enum constant bodies.
+    enum_bodies: HashSet<Arc<str>>,
+    /// The `new` being printed goes to a generic target: `new ArrayList<>()`.
+    diamond: bool,
+    /// Keep boxing and unboxing calls explicit (arguments of overloaded methods, `==` on two
+    /// unboxed values), where implicit conversions could change meaning.
+    exact_boxing: bool,
+    /// Hidden methods whose lambda could not be printed inline after all.
+    failed: HashSet<MethodKey>,
+    lambda_depth: usize,
 }
+
+/// `(class, name, descriptor)`.
+type MethodKey = (Arc<str>, Arc<str>, Arc<str>);
 
 pub fn print_class(p: &Program, top: &str) -> Printed {
     let pkg = types::package_of(top);
-    let mut w = Writer {
-        p,
-        top: top.into(),
-        pkg: pkg.clone(),
-        out: String::new(),
-        links: vec![],
-        imports: BTreeMap::new(),
-        reserved: HashSet::new(),
-        indent: 0,
-        cls: top.into(),
-    };
-    w.reserved.insert(p.simple_name(top));
-    let mut stack = vec![Arc::<str>::from(top)];
-    while let Some(c) = stack.pop() {
-        if let Some(m) = p.members.get(&c) {
-            for x in m {
-                w.reserved.insert(p.simple_name(x));
-                stack.push(x.clone());
-            }
+    let mut nest = vec![Arc::<str>::from(top)];
+    let mut k = 0;
+    while k < nest.len() {
+        if let Some(m) = p.members.get(&nest[k]) {
+            nest.extend(m.iter().cloned());
         }
+        k += 1;
     }
-    w.class(top);
+    let mut hidden = lambda_methods(p, &nest);
+    let w = loop {
+        let mut w = Writer {
+            p,
+            top: top.into(),
+            pkg: pkg.clone(),
+            out: String::new(),
+            links: vec![],
+            imports: BTreeMap::new(),
+            reserved: nest.iter().map(|c| p.simple_name(c)).collect(),
+            indent: 0,
+            cls: top.into(),
+            hidden: hidden.clone(),
+            enum_bodies: HashSet::new(),
+            exact_boxing: false,
+            diamond: false,
+            failed: HashSet::new(),
+            lambda_depth: 0,
+        };
+        w.class(top);
+        // Lambdas that fell back to calling their method need it printed: print again.
+        if w.failed.is_empty() {
+            break w;
+        }
+        hidden.retain(|m| !w.failed.contains(m));
+    };
     // Header: package, imports, then shift link offsets.
     let mut head = String::new();
     if !pkg.is_empty() {
@@ -597,6 +624,7 @@ impl<'p> Writer<'p> {
         let is_enum =
             access & dex::ACC_ENUM != 0 && c.superclass.is_some_and(|s| d.type_desc(s) == "Ljava/lang/Enum;");
         let anonymous = self.p.inner.get(desc).is_some_and(|i| i.name.is_none());
+        let record = is_record(d, c);
         if anonymous {
             self.w("/* anonymous class */");
             self.line();
@@ -619,9 +647,14 @@ impl<'p> Writer<'p> {
             // Nested without an enclosing instance (e.g. anonymous classes from static code).
             class_access |= dex::ACC_STATIC;
         }
+        if record {
+            class_access &= !(dex::ACC_FINAL | dex::ACC_STATIC);
+        }
         self.modifiers(class_access, 'c', false);
         self.w(if is_annotation {
             "@interface "
+        } else if record {
+            "record "
         } else if iface {
             "interface "
         } else if is_enum {
@@ -641,6 +674,29 @@ impl<'p> Writer<'p> {
         if let Some(s) = &sig {
             self.type_params(&s.params);
         }
+        if record {
+            self.w("(");
+            let cd = d.class_data(c).unwrap_or_default();
+            for (k, f) in cd.instance_fields.iter().enumerate() {
+                let Some(fi) = d.field(f.field) else { continue };
+                if k > 0 {
+                    self.w(", ");
+                }
+                let fa = ann.fields.get(&f.field);
+                if let Some(a) = fa {
+                    self.annotations(d, a, true);
+                }
+                match fa.and_then(|a| signature(d, a)).and_then(|s| types::parse_field_sig(&s)) {
+                    Some(s) => self.sig(&s),
+                    None => self.ty(d.type_desc(fi.ty)),
+                }
+                self.w(" ");
+                let n = d.string(fi.name).to_owned();
+                let key = Some(NodeKey::Field(desc.into(), n.as_str().into()));
+                self.link(&ident(&n), key, true);
+            }
+            self.w(")");
+        }
         let mut supers: Vec<(String, Option<Sig>)> = vec![];
         if let Some(s) = c.superclass {
             supers.push((d.type_desc(s).to_owned(), sig.as_ref().and_then(|s| s.supers.first().cloned())));
@@ -653,6 +709,7 @@ impl<'p> Writer<'p> {
         if let Some((_, (sup, ss))) = ext.into_iter().next()
             && sup != "Ljava/lang/Object;"
             && !is_enum
+            && !record
             && !iface
         {
             self.w(" extends ");
@@ -679,6 +736,25 @@ impl<'p> Writer<'p> {
             }
         }
         self.w(" {");
+        self.class_body(desc, false);
+        self.w("}");
+        if self.indent == 0 {
+            self.w("\n");
+        }
+        self.cls = prev;
+    }
+
+    /// Members of a class between its braces; `enum_body` for the class body of an enum constant
+    /// (its constructor is implicit).
+    fn class_body(&mut self, desc: &str, enum_body: bool) {
+        let Some((d, c)) = self.p.class(desc) else { return };
+        let ann = d.annotations(c).unwrap_or_default();
+        let access = self.p.inner.get(desc).map_or(c.access, |i| i.access | (c.access & dex::ACC_INTERFACE));
+        let iface = access & dex::ACC_INTERFACE != 0;
+        let is_enum =
+            access & dex::ACC_ENUM != 0 && c.superclass.is_some_and(|s| d.type_desc(s) == "Ljava/lang/Enum;");
+        let anonymous = self.p.inner.get(desc).is_some_and(|i| i.name.is_none());
+        let record = is_record(d, c);
         self.indent += 1;
         let cd = d.class_data(c).unwrap_or_default();
         let statics = d.encoded_array_at(c.static_values_off).unwrap_or_default();
@@ -689,10 +765,17 @@ impl<'p> Writer<'p> {
             .iter()
             .find(|m| d.method(m.method).is_some_and(|mi| d.string(mi.name) == "<clinit>"));
         let mut clinit_body = clinit.and_then(|m| self.decompile(d, desc, m).ok());
-        let mut enum_consts: Vec<(String, Vec<Expr>)> = vec![];
-        if is_enum && let Some((body, st)) = &mut clinit_body {
-            enum_consts = take_enum_constants(desc, &mut st.nodes);
-            let _ = body;
+        let mut enum_consts: Vec<(String, Vec<Expr>, Option<Arc<str>>)> = vec![];
+        if is_enum && let Some((_, st)) = &mut clinit_body {
+            // Constants with a class body are anonymous subclasses of the enum.
+            let p = self.p;
+            let body_class = |c: &str| {
+                p.inner.get(c).is_some_and(|i| &*i.outer == desc && i.name.is_none())
+                    && p.class(c)
+                        .is_some_and(|(cd, cc)| cc.superclass.is_some_and(|s| cd.type_desc(s) == desc))
+            };
+            enum_consts = take_enum_constants(desc, &mut st.nodes, &body_class);
+            self.enum_bodies.extend(enum_consts.iter().filter_map(|c| c.2.clone()));
         }
         let mut any = false;
         let consts_found = !enum_consts.is_empty();
@@ -706,7 +789,7 @@ impl<'p> Writer<'p> {
         if is_enum && consts_found {
             self.line();
             let n = enum_consts.len();
-            for (k, (name, args)) in std::mem::take(&mut enum_consts).into_iter().enumerate() {
+            for (k, (name, args, class_body)) in std::mem::take(&mut enum_consts).into_iter().enumerate() {
                 self.line();
                 let key = self.p.resolve_field(desc, &name);
                 self.link(&name, key, true);
@@ -714,7 +797,7 @@ impl<'p> Writer<'p> {
                     && let Some((body, _)) = &clinit_body
                 {
                     self.w("(");
-                    let mut mc = MethodCtx::new(self, body, None);
+                    let mut mc = MethodCtx::new(self, body, None, None, None);
                     for (j, a) in args.iter().enumerate() {
                         if j > 0 {
                             self.w(", ");
@@ -722,6 +805,13 @@ impl<'p> Writer<'p> {
                         self.expr(&mut mc, a, 0, None);
                     }
                     self.w(")");
+                }
+                if let Some(cb) = class_body {
+                    self.w(" {");
+                    let prev = std::mem::replace(&mut self.cls, cb.clone());
+                    self.class_body(&cb, true);
+                    self.cls = prev;
+                    self.w("}");
                 }
                 self.w(if k + 1 == n { ";" } else { "," });
             }
@@ -745,6 +835,10 @@ impl<'p> Writer<'p> {
                 && f.access & dex::ACC_SYNTHETIC != 0
                 && self.p.has_outer_instance(desc)
             {
+                continue;
+            }
+            // Record components are declared in the header.
+            if record && f.access & dex::ACC_STATIC == 0 {
                 continue;
             }
             if first_field {
@@ -822,6 +916,10 @@ impl<'p> Writer<'p> {
             {
                 continue;
             }
+            if self.hidden.contains(&(Arc::from(desc), Arc::from(mname.as_str()), Arc::from(pdesc.as_str())))
+            {
+                continue;
+            }
             if mname == "<clinit>" {
                 if let Some((body, st)) = clinit_body.take() {
                     if st.nodes.is_empty()
@@ -833,12 +931,18 @@ impl<'p> Writer<'p> {
                     self.line();
                     self.w("static {");
                     self.indent += 1;
-                    self.body(&body, st, None, None);
+                    self.body(&body, st, None, None, &[]);
                     self.indent -= 1;
                     self.line();
                     self.w("}");
                     any = true;
                 }
+                continue;
+            }
+            if enum_body && mname == "<init>" {
+                continue;
+            }
+            if record && self.implicit_record_member(d, desc, c, m, &mname, &pdesc) {
                 continue;
             }
             self.method(d, desc, m, &ann, iface, is_enum, anonymous);
@@ -848,6 +952,9 @@ impl<'p> Writer<'p> {
         // Nested classes.
         if let Some(members) = self.p.members.get(desc).cloned() {
             for inner in members {
+                if self.enum_bodies.contains(&inner) {
+                    continue;
+                }
                 self.line();
                 self.line();
                 self.class(&inner);
@@ -858,11 +965,58 @@ impl<'p> Writer<'p> {
         if any {
             self.line();
         }
-        self.w("}");
-        if self.indent == 0 {
-            self.w("\n");
+    }
+
+    /// Members the compiler generates for a record: the canonical constructor that only assigns
+    /// the components, accessors returning a component, and `toString`/`hashCode`/`equals`
+    /// through `ObjectMethods`.
+    fn implicit_record_member(
+        &self,
+        d: &DexFile,
+        desc: &str,
+        c: &dex::ClassDef,
+        m: &EncodedMethod,
+        name: &str,
+        pdesc: &str,
+    ) -> bool {
+        let cd = d.class_data(c).unwrap_or_default();
+        let comps: Vec<(String, String)> = cd
+            .instance_fields
+            .iter()
+            .filter_map(|f| d.field(f.field))
+            .map(|f| (d.string(f.name).to_owned(), d.type_desc(f.ty).to_owned()))
+            .collect();
+        let Some(Ok((body, st))) = (m.code_off != 0).then(|| self.decompile(d, desc, m)) else {
+            return false;
+        };
+        if st.warning.is_some() {
+            return false;
         }
-        self.cls = prev;
+        let is_this = |e: &Expr| matches!(e, Expr::Var(v) if body.vars[*v as usize].is_this);
+        match (name, st.nodes.as_slice()) {
+            (
+                "toString" | "hashCode" | "equals",
+                [Node::Return(Some(Expr::Invoke(InvokeKind::Custom, r, _)))],
+            ) => &*r.class == "Ljava/lang/runtime/ObjectMethods;",
+            ("<init>", _) => {
+                let want: String = format!("({})V", comps.iter().map(|c| c.1.as_str()).collect::<String>());
+                if pdesc != want {
+                    return false;
+                }
+                let nodes = strip_ctor_prefix(&st.nodes, desc);
+                nodes.len() == comps.len()
+                    && nodes.iter().zip(&comps).zip(&body.params).all(|((n, comp), p)| {
+                        matches!(n, Node::Stmt(Stmt::IPut(o, f, Expr::Var(v)))
+                            if is_this(o) && *f.name == *comp.0 && v == p)
+                    })
+            }
+            (_, [Node::Return(Some(Expr::IGet(o, f)))]) => {
+                is_this(o)
+                    && *f.name == *name
+                    && comps.iter().any(|c| c.0 == name && pdesc == format!("(){}", c.1))
+            }
+            _ => false,
+        }
     }
 
     fn typed_value(&mut self, d: &DexFile, v: &Value, ty: &str) {
@@ -1082,9 +1236,8 @@ impl<'p> Writer<'p> {
                 }
                 self.w(" {");
                 self.indent += 1;
-                let generic_ret =
-                    msig.as_ref().and_then(|s| s.ret.clone()).filter(|r| matches!(r, Sig::Var(_)));
-                self.body(&body, st, Some(&names), generic_ret);
+                let generic_ret = msig.as_ref().and_then(|s| s.ret.clone());
+                self.body(&body, st, Some(&names), generic_ret, generic_args.as_deref().unwrap_or_default());
                 self.indent -= 1;
                 self.line();
                 self.w("}");
@@ -1095,9 +1248,23 @@ impl<'p> Writer<'p> {
     fn body(
         &mut self,
         body: &Body,
+        st: Structured,
+        param_names: Option<&[String]>,
+        generic_ret: Option<Sig>,
+        generic_params: &[Sig],
+    ) {
+        self.body_in(body, st, param_names, generic_ret, generic_params, None)
+    }
+
+    /// A method body; `reserved` names belong to an enclosing scope (lambda bodies).
+    fn body_in(
+        &mut self,
+        body: &Body,
         mut st: Structured,
         param_names: Option<&[String]>,
         generic_ret: Option<Sig>,
+        generic_params: &[Sig],
+        reserved: Option<&HashSet<String>>,
     ) {
         if let Some(w) = &st.warning {
             self.line();
@@ -1118,10 +1285,22 @@ impl<'p> Writer<'p> {
             self.line();
             self.w(&format!("/*\n{:#?}\n*/", st.nodes).replace("*/\n*/", "* /\n*/"));
         }
-        let mut mc = MethodCtx::new(self, body, param_names);
-        if let Some(r) = generic_ret {
-            generic_locals(&st.nodes, body, &r, &mut mc.generic);
+        let mut live = HashMap::new();
+        structure::count_refs(&st.nodes, &mut live);
+        let mut mc = MethodCtx::new(self, body, param_names, reserved, Some(&live));
+        mc.generic_ret |= generic_ret.as_ref().is_some_and(has_args);
+        if let Some(r) = &generic_ret
+            && matches!(r, Sig::Var(_))
+        {
+            generic_locals(&st.nodes, body, r, &mut mc.generic);
         }
+        for (v, vi) in body.vars.iter().enumerate() {
+            if let Some(s) = vi.param.and_then(|k| generic_params.get(k)).filter(|s| has_args(s)) {
+                mc.generic.insert(v as VarId, s.clone());
+            }
+        }
+        lambda_locals(&st.nodes, body, &mut mc.generic);
+        self.flow_generics(&st.nodes, body, generic_ret.as_ref(), &mut mc.generic);
         mc.labels = st.used_labels.iter().copied().collect();
         plan_declarations(&mut mc, &st.nodes);
         self.nodes(&mut mc, &st.nodes);
@@ -1271,7 +1450,11 @@ impl<'p> Writer<'p> {
                 self.indent += 1;
                 let shared = mc.next_scope();
                 for (ci, c) in cases.iter().enumerate() {
-                    for &k in &c.keys {
+                    for l in &c.labels {
+                        self.line();
+                        self.w(&format!("case \"{}\":", escape_java(l, '"')));
+                    }
+                    for &k in c.keys.iter().filter(|_| c.labels.is_empty()) {
                         self.line();
                         self.w("case ");
                         match &names {
@@ -1293,9 +1476,26 @@ impl<'p> Writer<'p> {
                 self.line();
                 self.w("}");
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
                 self.line();
                 self.w("try");
+                if !resources.is_empty() {
+                    self.w(" (");
+                    for (k, r) in resources.iter().enumerate() {
+                        if k > 0 {
+                            self.w("; ");
+                        }
+                        if let Stmt::Assign(v, e) = r {
+                            let t = mc.var_type(*v);
+                            self.var_type_decl(mc, *v, &t);
+                            self.w(" ");
+                            self.w(&mc.names[*v as usize].clone());
+                            self.w(" = ");
+                            self.assigned(mc, e, 1, &t);
+                        }
+                    }
+                    self.w(")");
+                }
                 self.block(mc, body);
                 for Catch { types, var, body } in catches {
                     self.w(" catch (");
@@ -1317,8 +1517,9 @@ impl<'p> Writer<'p> {
                     self.w(")");
                     self.block(mc, body);
                 }
-                if catches.is_empty() {
-                    self.w(" finally {\n}");
+                if !finally.is_empty() || (catches.is_empty() && resources.is_empty()) {
+                    self.w(" finally");
+                    self.block(mc, finally);
                 }
             }
             Node::Sync { lock, body } => {
@@ -1348,7 +1549,9 @@ impl<'p> Writer<'p> {
                     Some(e) => {
                         self.w("return ");
                         let rt = mc.body.ret.clone();
+                        self.diamond = mc.generic_ret && plain_new(e);
                         self.assigned(mc, e, 0, &rt);
+                        self.diamond = false;
                         self.w(";");
                     }
                     None => self.w("return;"),
@@ -1421,6 +1624,8 @@ impl<'p> Writer<'p> {
                 if let Expr::Cast(ct, inner) = e
                     && let Some(sig) = mc.var_sig(v)
                     && (sig.erased().as_deref() == Some(&**ct) || matches!(sig, Sig::Var(_)))
+                    && self.call_result(mc, inner).is_none_or(|r| r != sig)
+                    && !self.target_typed(mc, inner)
                 {
                     self.w("(");
                     self.sig(&sig);
@@ -1429,7 +1634,9 @@ impl<'p> Writer<'p> {
                     self.w(";");
                     return;
                 }
+                self.diamond = matches!(e, Expr::New(..)) && mc.var_sig(v).is_some_and(|s| has_args(&s));
                 self.assigned(mc, e, 1, &t);
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::Expr(e) => {
@@ -1447,7 +1654,10 @@ impl<'p> Writer<'p> {
                 }
                 self.field_target(mc, Some(o), f, false);
                 self.w(" = ");
+                self.diamond =
+                    matches!(val, Expr::New(..)) && self.field_sig(f).is_some_and(|s| has_args(&s));
                 self.assigned(mc, val, 1, &f.ty.clone());
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::SPut(f, val) => {
@@ -1458,7 +1668,10 @@ impl<'p> Writer<'p> {
                 }
                 self.field_target(mc, None, f, false);
                 self.w(" = ");
+                self.diamond =
+                    matches!(val, Expr::New(..)) && self.field_sig(f).is_some_and(|s| has_args(&s));
                 self.assigned(mc, val, 1, &f.ty.clone());
+                self.diamond = false;
                 self.w(";");
             }
             Stmt::APut(a, i, val, _) => {
@@ -1505,6 +1718,15 @@ impl<'p> Writer<'p> {
 
     /// An object a member is accessed on; a `null` constant needs a cast (`((T) null).f`).
     fn receiver(&mut self, mc: &mut MethodCtx<'_>, e: &Expr, class: &str) {
+        // A lambda needs a target type before it can be called.
+        if let Expr::Lambda(l, _) = e {
+            self.w("((");
+            self.ty(&l.iface);
+            self.w(") ");
+            self.expr(mc, e, 0, None);
+            self.w(")");
+            return;
+        }
         if let Expr::Lit { bits: 0, .. } = e {
             self.w("((");
             self.ty(class);
@@ -1559,6 +1781,7 @@ impl<'p> Writer<'p> {
     // ------------------------------------------------------------ expressions
 
     /// An assigned or returned value: implicit widening conversions need no cast.
+    /// Casts of calls that infer their result from the target need none either.
     fn assigned(&mut self, mc: &mut MethodCtx<'_>, e: &Expr, prec: u8, expect: &str) {
         if let Expr::Cast(to, inner) = e
             && &**to == expect
@@ -1566,6 +1789,12 @@ impl<'p> Writer<'p> {
             && widens(&from, to)
         {
             return self.expr(mc, inner, prec, Some(&from));
+        }
+        if let Expr::Cast(to, inner) = e
+            && &**to == expect
+            && self.target_typed(mc, inner)
+        {
+            return self.expr(mc, inner, prec, Some(expect));
         }
         self.expr(mc, e, prec, Some(expect));
     }
@@ -1575,6 +1804,19 @@ impl<'p> Writer<'p> {
     }
 
     fn expr(&mut self, mc: &mut MethodCtx<'_>, e: &Expr, prec: u8, expect: Option<&str>) {
+        // `Integer.valueOf(x)` where an Integer is expected, `x.intValue()` where an int is:
+        // the compiler's boxing conversions are implicit in source.
+        if !self.exact_boxing
+            && let Some((inner, prim)) = implicit_boxing(mc, e, expect)
+        {
+            return self.expr(mc, inner, prec, Some(prim));
+        }
+        // `(String) words.get(i)` of a `List<String>`: the call already has the cast type.
+        if let Expr::Cast(t, inner) = e
+            && self.call_result(mc, inner).is_some_and(|r| r.erased().as_deref() == Some(&**t))
+        {
+            return self.expr(mc, inner, prec, Some(t));
+        }
         let my = expr_prec(e, mc);
         if my < prec {
             self.w("(");
@@ -1598,10 +1840,21 @@ impl<'p> Writer<'p> {
                 self.w(".class");
             }
             Expr::Raw(r) => self.w(r),
+            Expr::Bin(op, a, b, t)
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && !self.exact_boxing
+                    && is_unboxing(a)
+                    && is_unboxing(b) =>
+            {
+                // `a.intValue() == b.intValue()` would compare references without the calls.
+                self.exact_boxing = true;
+                self.expr_inner(mc, &Expr::Bin(*op, a.clone(), b.clone(), *t), expect);
+                self.exact_boxing = false;
+            }
             Expr::Bin(op, a, b, t) => {
                 if let Some(zero) = zero_test(mc, *op, a, b) {
                     match zero {
-                        ZeroTest::Truthy(x) => self.expr(mc, x, 13, Some("Z")),
+                        ZeroTest::Truthy(x) => self.expr_inner(mc, x, Some("Z")),
                         ZeroTest::Falsy(x) => {
                             self.w("!");
                             self.expr(mc, x, 13, Some("Z"));
@@ -1655,6 +1908,21 @@ impl<'p> Writer<'p> {
                 self.expr(mc, a, 13, Some("Z"));
             }
             Expr::Cast(t, a) => {
+                // `(int[][]) Array.newInstance(int.class, new int[]{a, b})` → `new int[a][b]`
+                if let Some((base, dims)) = multi_array(t, a) {
+                    self.w("new ");
+                    self.ty(base);
+                    let extra = t.len() - base.len() - dims.len();
+                    for d in dims {
+                        self.w("[");
+                        self.expr(mc, d, 0, Some("I"));
+                        self.w("]");
+                    }
+                    for _ in 0..extra {
+                        self.w("[]");
+                    }
+                    return;
+                }
                 let from = mc.type_of(a);
                 // Widening conversions are implicit; narrowing ones and reference casts are not.
                 if from.as_deref() == Some(&**t) {
@@ -1710,12 +1978,15 @@ impl<'p> Writer<'p> {
                         let k = self.defined(&class);
                         self.link(&n, k, false);
                     }
-                    self.args(mc, &m.params[1..], rest);
+                    self.call_args(mc, m, &m.params[1..], rest);
                     return;
                 }
                 self.w("new ");
                 self.ty(&class);
-                self.args(mc, &m.params, args);
+                if std::mem::take(&mut self.diamond) && self.generic_class(&class) {
+                    self.w("<>");
+                }
+                self.call_args(mc, m, &m.params, args);
             }
             Expr::NewArray(t, n) => {
                 self.w("new ");
@@ -1756,14 +2027,204 @@ impl<'p> Writer<'p> {
                 self.w(")");
             }
             Expr::Ternary(c, a, b) => {
+                // `c ? x : 1` unboxes a boxed `x`: where a reference is expected, implicit
+                // boxing only goes when both sides box.
+                let boxes = |e: &Expr| {
+                    matches!(e, Expr::Lit { bits: 0, .. }) || implicit_boxing(mc, e, expect).is_some()
+                };
+                let exact = expect.is_some_and(types::is_reference) && !(boxes(a) && boxes(b));
+                let prev = self.exact_boxing;
+                self.exact_boxing |= exact;
                 self.cond_prec(mc, c, 3);
                 self.w(" ? ");
                 self.expr(mc, a, 3, expect);
                 self.w(" : ");
                 self.expr(mc, b, 2, expect);
+                self.exact_boxing = prev;
             }
             Expr::CaughtException(_) => self.w("/* caught exception */ null"),
+            Expr::Lambda(l, caps) => self.lambda(mc, l, caps),
         }
+    }
+
+    fn lambda(&mut self, mc: &mut MethodCtx<'_>, l: &Lambda, caps: &[Expr]) {
+        let t = &l.target;
+        if is_lambda_method(l) {
+            let key: MethodKey = (t.class.clone(), t.name.clone(), t.desc().into());
+            if self.hidden.contains(&key) {
+                if self.inline_lambda(mc, l, caps) {
+                    return;
+                }
+                self.failed.insert(key);
+            }
+            return self.lambda_call(mc, l, caps);
+        }
+        let key = self.p.resolve_method(&t.class, &t.name, &t.desc());
+        let is_this = |e: &Expr| matches!(e, Expr::Var(v) if mc.body.vars[*v as usize].is_this);
+        match caps {
+            [] if l.kind == Lambda::NEW => {
+                self.ty(&t.class);
+                self.w("::");
+                self.link("new", key, false);
+            }
+            [] if l.kind != Lambda::NEW => {
+                self.ty(&t.class);
+                self.w("::");
+                self.link(&ident(&t.name), key, false);
+            }
+            [recv] if l.has_receiver() => {
+                if l.kind == 7 && is_this(recv) && *t.class != *self.cls {
+                    self.w("super");
+                } else {
+                    self.receiver(mc, recv, &t.class);
+                }
+                self.w("::");
+                self.link(&ident(&t.name), key, false);
+            }
+            _ => self.lambda_call(mc, l, caps),
+        }
+    }
+
+    /// `(a, b) -> target(captured..., a, b)`.
+    fn lambda_call(&mut self, mc: &mut MethodCtx<'_>, l: &Lambda, caps: &[Expr]) {
+        let t = &l.target;
+        let names: Vec<String> =
+            l.params.iter().map(|p| mc.fresh_name(&base_name(p, &|d| self.p.simple_name(d)))).collect();
+        self.lambda_params(&names);
+        let key = self.p.resolve_method(&t.class, &t.name, &t.desc());
+        let mut args: Vec<Result<&Expr, &str>> = caps.iter().map(Ok).collect();
+        args.extend(names.iter().map(|n| Err(n.as_str())));
+        let mut rest = &args[..];
+        if l.kind == Lambda::NEW {
+            self.w("new ");
+            self.ty(&t.class);
+        } else if l.has_receiver() {
+            match args.split_first() {
+                Some((Ok(r), more)) => {
+                    self.receiver(mc, r, &t.class);
+                    rest = more;
+                }
+                Some((Err(n), more)) => {
+                    self.w(n);
+                    rest = more;
+                }
+                None => {}
+            }
+            self.w(".");
+            self.link(&ident(&t.name), key, false);
+        } else {
+            if *t.class != *self.cls {
+                self.ty(&t.class);
+                self.w(".");
+            }
+            self.link(&ident(&t.name), key, false);
+        }
+        self.w("(");
+        for (k, a) in rest.iter().enumerate() {
+            if k > 0 {
+                self.w(", ");
+            }
+            match a {
+                Ok(e) => self.expr(mc, e, 1, t.params.get(k).map(String::as_str)),
+                Err(n) => self.w(n),
+            }
+        }
+        self.w(")");
+    }
+
+    fn lambda_params(&mut self, names: &[String]) {
+        if names.len() == 1 {
+            self.w(&names[0]);
+        } else {
+            self.w("(");
+            self.w(&names.join(", "));
+            self.w(")");
+        }
+        self.w(" -> ");
+    }
+
+    /// Prints the body of a synthetic `lambda$` method in place. Captured values must be plain
+    /// variables (or `this`): the body refers to them by their names in the enclosing method.
+    fn inline_lambda(&mut self, mc: &mut MethodCtx<'_>, l: &Lambda, caps: &[Expr]) -> bool {
+        let t = &l.target;
+        if self.lambda_depth > 16 {
+            return false;
+        }
+        let Some((d, c)) = self.p.class(&t.class) else { return false };
+        let Ok(cd) = d.class_data(c) else { return false };
+        let desc = t.desc();
+        let Some(m) = cd.direct_methods.iter().chain(&cd.virtual_methods).find(|m| {
+            m.code_off != 0
+                && d.method(m.method)
+                    .is_some_and(|mi| d.string(mi.name) == &*t.name && d.proto_desc(mi.proto) == desc)
+        }) else {
+            return false;
+        };
+        let instance = m.access & dex::ACC_STATIC == 0;
+        let (recv, captured) = match (instance, caps.split_first()) {
+            (true, Some((r, rest))) => (Some(r), rest),
+            (true, None) => return false,
+            (false, _) => (None, caps),
+        };
+        if recv.is_some_and(|r| !matches!(r, Expr::Var(v) if mc.body.vars[*v as usize].is_this)) {
+            return false;
+        }
+        let Ok((body, mut st)) = self.decompile(d, &t.class, m) else { return false };
+        if st.warning.is_some() || body.params.len() < captured.len() {
+            return false;
+        }
+        let mut names = vec![];
+        for c in captured {
+            let Expr::Var(v) = c else { return false };
+            names.push(mc.names[*v as usize].clone());
+        }
+        let simple = |d: &str| self.p.simple_name(d);
+        let mut params = vec![];
+        for &v in &body.params[captured.len()..] {
+            let vi = &body.vars[v as usize];
+            let base = vi
+                .name
+                .clone()
+                .filter(|n| valid_ident(n))
+                .unwrap_or_else(|| base_name(vi.ty.as_deref().unwrap_or("I"), &simple));
+            let n = mc.fresh_name(&base);
+            params.push(n.clone());
+            names.push(n);
+        }
+        let reserved = mc.used_names.clone();
+        let prev = std::mem::replace(&mut self.cls, t.class.clone());
+        // The body is its own context, whatever call the lambda is an argument of.
+        let exact = std::mem::replace(&mut self.exact_boxing, false);
+        self.lambda_depth += 1;
+        self.lambda_params(&params);
+        if matches!(st.nodes.last(), Some(Node::Return(None))) {
+            st.nodes.pop();
+        }
+        match st.nodes.as_slice() {
+            [Node::Return(Some(e))] => {
+                let mut lmc = MethodCtx::new(self, &body, Some(&names), Some(&reserved), None);
+                let ret = body.ret.clone();
+                self.diamond = plain_new(e);
+                self.assigned(&mut lmc, e, 1, &ret);
+                self.diamond = false;
+            }
+            [Node::Stmt(Stmt::Expr(e @ (Expr::Invoke(..) | Expr::New(..))))] => {
+                let mut lmc = MethodCtx::new(self, &body, Some(&names), Some(&reserved), None);
+                self.expr(&mut lmc, e, 1, None);
+            }
+            _ => {
+                self.w("{");
+                self.indent += 1;
+                self.body_in(&body, st, Some(&names), None, &[], Some(&reserved));
+                self.indent -= 1;
+                self.line();
+                self.w("}");
+            }
+        }
+        self.lambda_depth -= 1;
+        self.exact_boxing = exact;
+        self.cls = prev;
+        true
     }
 
     fn cond_prec(&mut self, mc: &mut MethodCtx<'_>, c: &Expr, prec: u8) {
@@ -1799,7 +2260,7 @@ impl<'p> Writer<'p> {
                     self.w(".");
                 }
                 self.link(&ident(&m.name), key, false);
-                self.args(mc, &m.params, args);
+                self.call_args(mc, m, &m.params, args);
             }
             _ => {
                 let Some((recv, rest)) = args.split_first() else {
@@ -1816,7 +2277,7 @@ impl<'p> Writer<'p> {
                         self.receiver(mc, recv, &m.class);
                         self.w(".<init>");
                     }
-                    self.args(mc, &m.params, rest);
+                    self.call_args(mc, m, &m.params, rest);
                     return;
                 }
                 if kind == InvokeKind::Super {
@@ -1826,9 +2287,297 @@ impl<'p> Writer<'p> {
                     self.w(".");
                 }
                 self.link(&ident(&m.name), key, false);
-                self.args(mc, &m.params, rest);
+                self.call_args(mc, m, &m.params, rest);
             }
         }
+    }
+
+    /// Generic signature of a field declared in the program.
+    fn field_sig(&self, f: &FieldRef) -> Option<Sig> {
+        let (d, c) = self.p.class(&f.class)?;
+        let cd = d.class_data(c).ok()?;
+        let ef = cd
+            .static_fields
+            .iter()
+            .chain(&cd.instance_fields)
+            .find(|x| d.field(x.field).is_some_and(|fi| d.string(fi.name) == &*f.name))?;
+        let ann = d.annotations(c).ok()?;
+        signature(d, ann.fields.get(&ef.field)?).and_then(|s| types::parse_field_sig(&s))
+    }
+
+    /// Generic type of a value, where known: generic locals, parameters and fields, and calls
+    /// on them returning a type argument.
+    fn generic_type(&self, mc: &MethodCtx<'_>, e: &Expr) -> Option<Sig> {
+        match e {
+            Expr::Var(v) => mc.var_sig(*v),
+            Expr::IGet(_, f) | Expr::SGet(f) => self.field_sig(f),
+            Expr::Cast(t, inner) => {
+                self.generic_type(mc, inner).filter(|s| s.erased().as_deref() == Some(&**t))
+            }
+            _ => self.call_result(mc, e),
+        }
+    }
+
+    /// The type argument a call returns: `words.get(i)` of a `List<String>` is a `String`.
+    fn call_result(&self, mc: &MethodCtx<'_>, e: &Expr) -> Option<Sig> {
+        let Expr::Invoke(InvokeKind::Virtual | InvokeKind::Interface, m, args) = e else { return None };
+        let recv = self.generic_type(mc, args.first()?)?;
+        let erased = recv.erased()?;
+        // A `TreeMap<K, V>` calling `Map.get` passes its type arguments on as they are.
+        if erased != *m.class && !type_arity(&erased).is_some_and(|n| collection_interface(&m.class, n)) {
+            return None;
+        }
+        let Sig::Class(parts) = recv else { return None };
+        let k = self.returned_type_arg(m)?;
+        match parts.last()?.1.get(k)? {
+            SigArg::Exact(s) if !has_type_vars(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// Which of its class's type parameters a method returns: from the program's signatures,
+    /// or for the JDK's collections and functional interfaces.
+    fn returned_type_arg(&self, m: &MethodRef) -> Option<usize> {
+        if let Some((d, c)) = self.p.class(&m.class) {
+            let Sig::Var(t) = self.method_sig(m)?.ret? else { return None };
+            let ann = d.annotations(c).ok()?;
+            let cs = signature(d, &ann.class).and_then(|s| types::parse_class_sig(&s))?;
+            return cs.params.iter().position(|p| p.name == t);
+        }
+        if &*m.ret != "Ljava/lang/Object;" {
+            return None;
+        }
+        let class = &*m.class;
+        let name = &*m.name;
+        let n = m.params.len();
+        if type_arity(class) == Some(1) || collection_interface(class, 1) {
+            let element = match n {
+                0 => matches!(
+                    name,
+                    "get"
+                        | "getFirst"
+                        | "getLast"
+                        | "removeFirst"
+                        | "removeLast"
+                        | "remove"
+                        | "poll"
+                        | "pollFirst"
+                        | "pollLast"
+                        | "peek"
+                        | "peekFirst"
+                        | "peekLast"
+                        | "pop"
+                        | "element"
+                        | "first"
+                        | "last"
+                        | "take"
+                        | "join"
+                ),
+                1 => {
+                    matches!(name, "get" | "remove" | "getAndSet" | "floor" | "ceiling" | "higher" | "lower")
+                }
+                2 => name == "set" && m.params[0] == "I",
+                _ => false,
+            };
+            return element.then_some(0);
+        }
+        if type_arity(class) == Some(2) || collection_interface(class, 2) {
+            return match name {
+                "firstKey" | "lastKey" | "floorKey" | "ceilingKey" | "higherKey" | "lowerKey" => Some(0),
+                "get" | "put" | "remove" | "getOrDefault" | "putIfAbsent" | "replace" | "compute"
+                | "computeIfAbsent" | "computeIfPresent" | "merge" => Some(1),
+                _ => None,
+            };
+        }
+        let n = class.strip_prefix("Ljava/")?.strip_suffix(';')?;
+        match (n, name) {
+            ("util/Iterator" | "util/ListIterator", "next" | "previous")
+            | ("util/Map$Entry", "getKey")
+            | ("util/Optional", "get" | "orElse" | "orElseGet" | "orElseThrow")
+            | ("util/function/Supplier", "get")
+            | ("util/function/UnaryOperator" | "util/function/BinaryOperator", "apply")
+            | ("util/concurrent/Callable", "call")
+            | ("util/concurrent/Future", "get") => Some(0),
+            ("util/Map$Entry", "getValue" | "setValue") | ("util/function/Function", "apply") => Some(1),
+            ("util/function/BiFunction", "apply") => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Generic signature of a method declared in the program.
+    fn method_sig(&self, m: &MethodRef) -> Option<types::MethodSig> {
+        let (d, c) = self.p.class(&m.class)?;
+        let cd = d.class_data(c).ok()?;
+        let desc = m.desc();
+        let em = cd.direct_methods.iter().chain(&cd.virtual_methods).find(|x| {
+            d.method(x.method)
+                .is_some_and(|mi| d.string(mi.name) == &*m.name && d.proto_desc(mi.proto) == desc)
+        })?;
+        let ann = d.annotations(c).ok()?;
+        signature(d, ann.methods.get(&em.method)?).and_then(|s| types::parse_method_sig(&s))
+    }
+
+    /// A call whose result type the compiler infers from the assignment target:
+    /// `stream.collect(Collectors.toList())` on a stream of known element type. JDK signatures
+    /// are not available, so this covers `Stream.collect` with a `Collectors` collector.
+    fn target_typed(&self, mc: &MethodCtx<'_>, e: &Expr) -> bool {
+        let Expr::Invoke(InvokeKind::Interface, m, args) = e else { return false };
+        &*m.class == "Ljava/util/stream/Stream;"
+            && &*m.name == "collect"
+            && matches!(&args[..], [recv, Expr::Invoke(InvokeKind::Static, c, _)]
+                if &*c.class == "Ljava/util/stream/Collectors;" && self.typed_stream(mc, recv))
+    }
+
+    /// A stream whose element type the compiler knows: a pipeline started from a value of
+    /// known generic type or from a static factory.
+    fn typed_stream(&self, mc: &MethodCtx<'_>, e: &Expr) -> bool {
+        if self.generic_type(mc, e).is_some() {
+            return true;
+        }
+        match e {
+            Expr::Invoke(InvokeKind::Static, m, _) => {
+                m.class.starts_with("Ljava/util/stream/") || &*m.class == "Ljava/util/Arrays;"
+            }
+            Expr::Invoke(InvokeKind::Virtual | InvokeKind::Interface, m, args) => {
+                let streams = m.class.starts_with("Ljava/util/stream/");
+                let source = matches!(&*m.name, "stream" | "parallelStream")
+                    && (type_arity(&m.class).is_some() || collection_interface(&m.class, 1));
+                (streams || source) && args.first().is_some_and(|r| self.typed_stream(mc, r))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `new C<>()` can be written: generic classes of the program and of the JDK
+    /// collections.
+    fn generic_class(&self, desc: &str) -> bool {
+        if let Some((d, c)) = self.p.class(desc) {
+            let ann = d.annotations(c).unwrap_or_default();
+            return signature(d, &ann.class)
+                .and_then(|s| types::parse_class_sig(&s))
+                .is_some_and(|s| !s.params.is_empty());
+        }
+        type_arity(desc).is_some()
+    }
+
+    /// Generic types of locals without debug signatures, from where their values come from or
+    /// go: fields, method results and parameters of the program's generic members, and the
+    /// method's own return type. A local only gets a type all of these agree on.
+    fn flow_generics(&self, nodes: &[Node], body: &Body, ret: Option<&Sig>, out: &mut HashMap<VarId, Sig>) {
+        let mut cands: HashMap<VarId, Vec<Sig>> = HashMap::new();
+        let mut add = |v: VarId, s: Option<Sig>| {
+            if let Some(s) = s {
+                cands.entry(v).or_default().push(s);
+            }
+        };
+        let visit_expr = |e: &Expr, add: &mut dyn FnMut(VarId, Option<Sig>)| {
+            e.visit(&mut |x| {
+                let (m, args, receiver) = match x {
+                    Expr::Invoke(k, m, a) if !matches!(k, InvokeKind::Custom) => {
+                        (m, a.as_slice(), !matches!(k, InvokeKind::Static))
+                    }
+                    Expr::New(m, a) => (m, a.as_slice(), false),
+                    _ => return,
+                };
+                let args = if receiver { args.get(1..).unwrap_or_default() } else { args };
+                let Some(ms) = self.method_sig(m) else { return };
+                if ms.args.len() != args.len() {
+                    return;
+                }
+                for (a, s) in args.iter().zip(&ms.args) {
+                    if let Expr::Var(v) = a {
+                        add(*v, Some(s.clone()));
+                    }
+                }
+            })
+        };
+        fn walk(nodes: &[Node], f: &mut dyn FnMut(&Node)) {
+            for n in nodes {
+                f(n);
+                let mut n = n.clone();
+                for c in structure_children(&mut n) {
+                    walk(c, f);
+                }
+            }
+        }
+        walk(nodes, &mut |n| {
+            let mut exprs: Vec<&Expr> = vec![];
+            match n {
+                Node::Stmt(st) => {
+                    match st {
+                        Stmt::Assign(v, Expr::IGet(_, f) | Expr::SGet(f)) => add(*v, self.field_sig(f)),
+                        Stmt::Assign(v, Expr::Invoke(k, m, _)) if !matches!(k, InvokeKind::Custom) => {
+                            add(*v, self.method_sig(m).and_then(|s| s.ret))
+                        }
+                        Stmt::IPut(_, f, Expr::Var(v)) | Stmt::SPut(f, Expr::Var(v)) => {
+                            add(*v, self.field_sig(f))
+                        }
+                        _ => {}
+                    }
+                    st.visit_exprs(&mut |e| visit_expr(e, &mut add));
+                }
+                Node::Return(Some(e)) => {
+                    if let Expr::Var(v) = e {
+                        add(*v, ret.cloned());
+                    }
+                    exprs.push(e);
+                }
+                Node::If { cond: e, .. } | Node::Throw(e) | Node::Switch { value: e, .. } => exprs.push(e),
+                Node::Loop { kind: LoopKind::While(e) | LoopKind::DoWhile(e), .. } => exprs.push(e),
+                Node::ForEach { iterable: e, .. } | Node::Sync { lock: e, .. } => exprs.push(e),
+                _ => {}
+            }
+            for e in exprs {
+                visit_expr(e, &mut add);
+            }
+        });
+        for (v, sigs) in cands {
+            let vi = &body.vars[v as usize];
+            if vi.signature.is_some() || vi.is_this || vi.param.is_some() || out.contains_key(&v) {
+                continue;
+            }
+            let Some(ty) = vi.ty.as_deref() else { continue };
+            let first = &sigs[0];
+            if sigs.iter().any(|s| s != first) || !has_args(first) || has_type_vars(first) {
+                continue;
+            }
+            let Some(erased) = first.erased() else { continue };
+            if erased == ty {
+                out.insert(v, first.clone());
+            } else if let (Some(n), Sig::Class(parts)) = (type_arity(ty), first)
+                && let Some((_, args)) = parts.last()
+                && args.len() == n
+                && collection_interface(&erased, n)
+            {
+                // `ArrayList` where a `List<String>` goes: `ArrayList<String>`.
+                out.insert(v, Sig::Class(vec![(types::java_name(ty), args.clone())]));
+            }
+        }
+    }
+
+    /// Arguments of a call; overloads make boxing conversions significant.
+    fn call_args(&mut self, mc: &mut MethodCtx<'_>, m: &MethodRef, params: &[String], args: &[Expr]) {
+        let exact = self.overloaded(m);
+        let prev = std::mem::replace(&mut self.exact_boxing, exact);
+        self.args(mc, params, args);
+        self.exact_boxing = prev;
+    }
+
+    /// Whether another method of the same name and arity may be chosen instead: known from the
+    /// program's own classes; for others, the library methods where it matters (`List.remove`).
+    fn overloaded(&self, m: &MethodRef) -> bool {
+        let Some((d, c)) = self.p.class(&m.class) else {
+            return matches!(&*m.name, "remove" | "removeElement");
+        };
+        let Ok(cd) = d.class_data(c) else { return true };
+        cd.direct_methods
+            .iter()
+            .chain(&cd.virtual_methods)
+            .filter_map(|x| d.method(x.method))
+            .filter(|mi| d.string(mi.name) == &*m.name)
+            .filter(|mi| d.proto(mi.proto).is_some_and(|p| p.params.len() == m.params.len()))
+            .count()
+            > 1
     }
 
     fn concat(&mut self, mc: &mut MethodCtx<'_>, parts: &[&Expr]) {
@@ -2005,7 +2754,7 @@ fn expr_prec(e: &Expr, mc: &MethodCtx<'_>) -> u8 {
         Expr::Bin(op, a, b, _) => {
             if let Some(z) = zero_test(mc, *op, a, b) {
                 return match z {
-                    ZeroTest::Truthy(_) => 15,
+                    ZeroTest::Truthy(x) => expr_prec(x, mc),
                     ZeroTest::Falsy(_) => 13,
                     ZeroTest::Null(..) => 8,
                 };
@@ -2018,8 +2767,246 @@ fn expr_prec(e: &Expr, mc: &MethodCtx<'_>) -> u8 {
         Expr::Lit { bits, .. } if *bits < 0 => 13,
         Expr::Invoke(..) | Expr::New(..) if concat_parts(e).is_some() => 11,
         Expr::New(..) | Expr::NewArray(..) | Expr::ArrayLit(..) => 14,
+        Expr::Lambda(l, caps) if is_lambda_method(l) || !method_ref_form(l, caps) => 1,
         _ => 15,
     }
+}
+
+fn is_record(d: &DexFile, c: &dex::ClassDef) -> bool {
+    c.superclass.is_some_and(|s| d.type_desc(s) == "Ljava/lang/Record;") && c.access & dex::ACC_FINAL != 0
+}
+
+/// Statement lists of a node (read-only use on a clone).
+fn structure_children(n: &mut Node) -> Vec<&mut Vec<Node>> {
+    match n {
+        Node::If { then, els, .. } => vec![then, els],
+        Node::Loop { body, .. }
+        | Node::For { body, .. }
+        | Node::ForEach { body, .. }
+        | Node::Sync { body, .. } => {
+            vec![body]
+        }
+        Node::Switch { cases, .. } => cases.iter_mut().map(|c| &mut c.body).collect(),
+        Node::Try { body, catches, finally, .. } => {
+            let mut v = vec![body];
+            v.extend(catches.iter_mut().map(|c| &mut c.body));
+            v.push(finally);
+            v
+        }
+        _ => vec![],
+    }
+}
+
+/// `new C(...)` taking only primitive arguments, so `new C<>(...)` infers its type arguments
+/// from the target alone.
+fn plain_new(e: &Expr) -> bool {
+    matches!(e, Expr::New(m, _) if m.params.iter().all(|p| !p.starts_with(['L', '['])))
+}
+
+fn has_args(s: &Sig) -> bool {
+    matches!(s, Sig::Class(parts) if parts.iter().any(|p| !p.1.is_empty()))
+}
+
+fn has_type_vars(s: &Sig) -> bool {
+    match s {
+        Sig::Var(_) => true,
+        Sig::Array(t) => has_type_vars(t),
+        Sig::Prim(_) => false,
+        Sig::Class(parts) => parts.iter().flat_map(|p| &p.1).any(|a| match a {
+            SigArg::Any => false,
+            SigArg::Exact(t) | SigArg::Extends(t) | SigArg::Super(t) => has_type_vars(t),
+        }),
+    }
+}
+
+/// Number of type parameters of JDK collection classes (and a few other generic JDK classes)
+/// whose type arguments match the interfaces they implement one to one.
+fn type_arity(desc: &str) -> Option<usize> {
+    let n = desc.strip_prefix("Ljava/")?.strip_suffix(';')?;
+    Some(match n {
+        "util/ArrayList"
+        | "util/LinkedList"
+        | "util/Vector"
+        | "util/Stack"
+        | "util/HashSet"
+        | "util/LinkedHashSet"
+        | "util/TreeSet"
+        | "util/ArrayDeque"
+        | "util/PriorityQueue"
+        | "util/concurrent/CopyOnWriteArrayList"
+        | "util/concurrent/CopyOnWriteArraySet"
+        | "util/concurrent/ConcurrentLinkedQueue"
+        | "util/concurrent/ConcurrentLinkedDeque"
+        | "util/concurrent/LinkedBlockingQueue"
+        | "util/concurrent/LinkedBlockingDeque"
+        | "util/concurrent/ArrayBlockingQueue"
+        | "util/concurrent/PriorityBlockingQueue"
+        | "util/concurrent/ConcurrentSkipListSet"
+        | "util/concurrent/atomic/AtomicReference"
+        | "lang/ThreadLocal"
+        | "lang/InheritableThreadLocal"
+        | "lang/ref/WeakReference"
+        | "lang/ref/SoftReference"
+        | "util/concurrent/CompletableFuture" => 1,
+        "util/HashMap"
+        | "util/LinkedHashMap"
+        | "util/TreeMap"
+        | "util/Hashtable"
+        | "util/WeakHashMap"
+        | "util/IdentityHashMap"
+        | "util/concurrent/ConcurrentHashMap"
+        | "util/concurrent/ConcurrentSkipListMap" => 2,
+        _ => return None,
+    })
+}
+
+/// Interfaces of the collections in [`type_arity`] taking the same type arguments.
+fn collection_interface(desc: &str, arity: usize) -> bool {
+    let n = desc.strip_prefix("Ljava/").and_then(|d| d.strip_suffix(';')).unwrap_or("");
+    match arity {
+        1 => matches!(
+            n,
+            "util/List"
+                | "util/Collection"
+                | "lang/Iterable"
+                | "util/Set"
+                | "util/SortedSet"
+                | "util/NavigableSet"
+                | "util/Queue"
+                | "util/Deque"
+                | "util/concurrent/BlockingQueue"
+                | "util/concurrent/BlockingDeque"
+        ),
+        2 => {
+            matches!(n, "util/Map" | "util/SortedMap" | "util/NavigableMap" | "util/concurrent/ConcurrentMap")
+        }
+        _ => false,
+    }
+}
+
+/// Primitive descriptor of a wrapper class.
+fn wrapped(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "Ljava/lang/Integer;" => "I",
+        "Ljava/lang/Long;" => "J",
+        "Ljava/lang/Short;" => "S",
+        "Ljava/lang/Byte;" => "B",
+        "Ljava/lang/Character;" => "C",
+        "Ljava/lang/Boolean;" => "Z",
+        "Ljava/lang/Float;" => "F",
+        "Ljava/lang/Double;" => "D",
+        _ => return None,
+    })
+}
+
+/// `x.intValue()` and the like.
+fn is_unboxing(e: &Expr) -> bool {
+    matches!(e, Expr::Invoke(InvokeKind::Virtual, m, a)
+        if a.len() == 1 && m.params.is_empty() && wrapped(&m.class).is_some_and(|p| *m.ret == *p)
+            && m.name.ends_with("Value"))
+}
+
+/// A boxing (`Integer.valueOf(i)`) or unboxing (`x.intValue()`) call the context makes implicit:
+/// the operand and the type it is printed with.
+fn implicit_boxing<'e>(
+    mc: &MethodCtx<'_>,
+    e: &'e Expr,
+    expect: Option<&str>,
+) -> Option<(&'e Expr, &'static str)> {
+    let expect = expect?;
+    let Expr::Invoke(kind, m, a) = e else { return None };
+    let prim = wrapped(&m.class)?;
+    match kind {
+        InvokeKind::Static
+            if &*m.name == "valueOf" && a.len() == 1 && m.params.len() == 1 && m.params[0] == prim =>
+        {
+            // Literals of byte, short and char only box in assignments to exactly their wrapper.
+            let arg = match &a[0] {
+                Expr::Lit { .. } => matches!(prim, "I" | "J" | "F" | "D" | "Z"),
+                x => mc.type_of(x).as_deref() == Some(prim),
+            };
+            let target = expect == &*m.class
+                || matches!(
+                    expect,
+                    "Ljava/lang/Object;" | "Ljava/io/Serializable;" | "Ljava/lang/Comparable;"
+                )
+                || (expect == "Ljava/lang/Number;" && !matches!(prim, "Z" | "C"));
+            (arg && target).then_some((&a[0], prim))
+        }
+        InvokeKind::Virtual if is_unboxing(e) && expect == prim => Some((&a[0], prim)),
+        _ => None,
+    }
+}
+
+/// `(T[]..) Array.newInstance(C.class, new int[]{dims})` as `(base element type, dims)`.
+fn multi_array<'e>(t: &'e str, e: &'e Expr) -> Option<(&'e str, &'e [Expr])> {
+    let Expr::Invoke(InvokeKind::Static, m, args) = e else { return None };
+    if &*m.class != "Ljava/lang/reflect/Array;" || &*m.name != "newInstance" || m.params.len() != 2 {
+        return None;
+    }
+    let [class, Expr::ArrayLit(_, dims)] = args.as_slice() else { return None };
+    let c: &str = match class {
+        Expr::Class(c) => c,
+        // d8 loads primitive classes as `Integer.TYPE`.
+        Expr::SGet(f) if &*f.name == "TYPE" => match &*f.class {
+            "Ljava/lang/Integer;" => "I",
+            "Ljava/lang/Long;" => "J",
+            "Ljava/lang/Short;" => "S",
+            "Ljava/lang/Byte;" => "B",
+            "Ljava/lang/Character;" => "C",
+            "Ljava/lang/Boolean;" => "Z",
+            "Ljava/lang/Float;" => "F",
+            "Ljava/lang/Double;" => "D",
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let base = t.trim_start_matches('[');
+    let depth = t.len() - base.len();
+    let cdepth = c.len() - c.trim_start_matches('[').len();
+    (!dims.is_empty() && c.trim_start_matches('[') == base && depth == dims.len() + cdepth)
+        .then_some((base, dims.as_slice()))
+}
+
+/// Whether the lambda's target is a synthetic `lambda$` method (its body is the lambda's).
+fn is_lambda_method(l: &Lambda) -> bool {
+    l.target.name.starts_with("lambda$")
+}
+
+/// Whether the lambda prints as a method reference (`Type::name`, `recv::name`, `Type::new`).
+fn method_ref_form(l: &Lambda, caps: &[Expr]) -> bool {
+    match caps.len() {
+        0 => true,
+        1 => l.has_receiver(),
+        _ => false,
+    }
+}
+
+/// Synthetic `lambda$` methods of the given classes that their lambdas print inline.
+fn lambda_methods(p: &Program, classes: &[Arc<str>]) -> HashSet<MethodKey> {
+    let mut out = HashSet::new();
+    for c in classes {
+        let Some((d, def)) = p.class(c) else { continue };
+        if d.call_sites.is_empty() {
+            continue;
+        }
+        let Ok(cd) = d.class_data(def) else { continue };
+        for m in cd.direct_methods.iter().chain(&cd.virtual_methods) {
+            if m.code_off == 0 {
+                continue;
+            }
+            let Ok((insns, _)) = d.code(m.code_off).and_then(|code| code.decode()) else { continue };
+            for i in insns.iter().filter(|i| matches!(i.op, 0xfc | 0xfd)) {
+                if let Some(CallSite::Lambda(l)) = d.call_site(i.index)
+                    && is_lambda_method(l)
+                    && classes.contains(&l.target.class)
+                {
+                    out.insert((l.target.class.clone(), l.target.name.clone(), l.target.desc().into()));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn signature(d: &DexFile, set: &[Annotation]) -> Option<String> {
@@ -2059,11 +3046,19 @@ fn strip_enum_super(mut nodes: Vec<Node>) -> Vec<Node> {
 /// Removes `CONST = new E("CONST", n, args…)` and `$VALUES = …` from an enum's `<clinit>`
 /// (directly or through a temporary); returns the constants with their extra constructor
 /// arguments.
-fn take_enum_constants(desc: &str, nodes: &mut Vec<Node>) -> Vec<(String, Vec<Expr>)> {
-    let ctor_args = |e: &Expr, name: &str| -> Option<Vec<Expr>> {
+/// Enum constants from `<clinit>`: `(name, constructor arguments, class body)`.
+fn take_enum_constants(
+    desc: &str,
+    nodes: &mut Vec<Node>,
+    body_class: &dyn Fn(&str) -> bool,
+) -> Vec<(String, Vec<Expr>, Option<Arc<str>>)> {
+    let of_enum = |c: &str| c == desc || body_class(c);
+    let ctor_args = |e: &Expr, name: &str| -> Option<(Vec<Expr>, Option<Arc<str>>)> {
         match e {
-            Expr::New(m, args) if &*m.class == desc => match args.as_slice() {
-                [Expr::Str(n), Expr::Lit { .. }, rest @ ..] if **n == *name => Some(rest.to_vec()),
+            Expr::New(m, args) if of_enum(&m.class) => match args.as_slice() {
+                [Expr::Str(n), Expr::Lit { .. }, rest @ ..] if **n == *name => {
+                    Some((rest.to_vec(), (*m.class != *desc).then(|| m.class.clone())))
+                }
                 _ => None,
             },
             _ => None,
@@ -2072,7 +3067,7 @@ fn take_enum_constants(desc: &str, nodes: &mut Vec<Node>) -> Vec<(String, Vec<Ex
     let temps: HashMap<VarId, Expr> = nodes
         .iter()
         .filter_map(|n| match n {
-            Node::Stmt(Stmt::Assign(v, e @ Expr::New(m, _))) if &*m.class == desc => Some((*v, e.clone())),
+            Node::Stmt(Stmt::Assign(v, e @ Expr::New(m, _))) if of_enum(&m.class) => Some((*v, e.clone())),
             _ => None,
         })
         .collect();
@@ -2086,13 +3081,13 @@ fn take_enum_constants(desc: &str, nodes: &mut Vec<Node>) -> Vec<(String, Vec<Ex
                 Expr::Var(v) => (temps.get(v), Some(*v)),
                 e => (Some(e), None),
             };
-            if let Some(args) = e.and_then(|e| ctor_args(e, &f.name)) {
-                out.push((f.name.to_string(), args));
+            if let Some((args, body)) = e.and_then(|e| ctor_args(e, &f.name)) {
+                out.push((f.name.to_string(), args, body));
                 used_temps.extend(temp);
             }
         }
     }
-    let names: HashSet<String> = out.iter().map(|(n, _)| n.clone()).collect();
+    let names: HashSet<String> = out.iter().map(|(n, ..)| n.clone()).collect();
     nodes.retain(|n| match n {
         Node::Stmt(Stmt::SPut(f, _)) if &*f.class == desc => {
             !names.contains(&*f.name) && &*f.name != "$VALUES"
@@ -2154,11 +3149,21 @@ struct MethodCtx<'b> {
     declare_here: HashSet<((u32, usize), VarId)>,
     /// Generic types inferred for locals without debug signatures.
     generic: HashMap<VarId, Sig>,
+    /// The method returns a parameterized type, or is a lambda body: `return new C<>()`.
+    generic_ret: bool,
 }
 
 impl<'b> MethodCtx<'b> {
-    fn new(w: &Writer<'_>, body: &'b Body, param_names: Option<&[String]>) -> Self {
-        let mut used = HashSet::new();
+    fn new(
+        w: &Writer<'_>,
+        body: &'b Body,
+        param_names: Option<&[String]>,
+        reserved: Option<&HashSet<String>>,
+        live: Option<&HashMap<VarId, usize>>,
+    ) -> Self {
+        let mut used = reserved.cloned().unwrap_or_default();
+        // Variables the printed code never mentions (inlined temporaries) take no name.
+        let named = |v: usize| live.is_none_or(|l| l.contains_key(&(v as VarId)));
         let n = body.vars.len();
         let mut names = vec![String::new(); n];
         let mut declared = vec![false; n];
@@ -2173,16 +3178,23 @@ impl<'b> MethodCtx<'b> {
             declared[t as usize] = true;
         }
         let simple = |d: &str| w.p.simple_name(d);
+        // Source names first, so temporaries don't take them.
         for (v, vi) in body.vars.iter().enumerate() {
-            if !names[v].is_empty() {
-                continue;
+            if names[v].is_empty()
+                && named(v)
+                && let Some(n) = vi.name.as_deref().filter(|n| valid_ident(n))
+            {
+                names[v] = unique(n, &mut used);
             }
-            let base = vi
-                .name
-                .clone()
-                .filter(|n| valid_ident(n))
-                .unwrap_or_else(|| base_name(vi.ty.as_deref().unwrap_or("I"), &simple));
-            names[v] = unique(&base, &mut used);
+        }
+        for (v, vi) in body.vars.iter().enumerate() {
+            if names[v].is_empty() {
+                names[v] = if named(v) {
+                    unique(&base_name(vi.ty.as_deref().unwrap_or("I"), &simple), &mut used)
+                } else {
+                    format!("v{v}")
+                };
+            }
         }
         Self {
             body,
@@ -2195,6 +3207,7 @@ impl<'b> MethodCtx<'b> {
             declare_before: HashMap::new(),
             declare_here: HashSet::new(),
             generic: HashMap::new(),
+            generic_ret: w.lambda_depth > 0,
         }
     }
 
@@ -2382,10 +3395,16 @@ fn walk_refs(
                     path.truncate(base);
                 }
             }
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
+                for r in resources {
+                    r.visit_exprs(&mut |e| e.visit_vars(&mut |v| add(v, refs)));
+                }
                 walk_refs(body, counter, path, refs, first_assign, headers);
                 for c in catches {
                     walk_refs(&c.body, counter, path, refs, first_assign, headers);
+                }
+                if !finally.is_empty() || (catches.is_empty() && resources.is_empty()) {
+                    walk_refs(finally, counter, path, refs, first_assign, headers);
                 }
             }
             Node::Sync { lock, body } => {
@@ -2414,8 +3433,14 @@ fn mark_catch_vars(nodes: &[Node], declared: &mut [bool]) {
                 mark_catch_vars(body, declared);
             }
             Node::Switch { cases, .. } => cases.iter().for_each(|c| mark_catch_vars(&c.body, declared)),
-            Node::Try { body, catches } => {
+            Node::Try { body, catches, finally, resources } => {
+                for r in resources {
+                    if let Stmt::Assign(v, _) = r {
+                        declared[*v as usize] = true;
+                    }
+                }
                 mark_catch_vars(body, declared);
+                mark_catch_vars(finally, declared);
                 for c in catches {
                     if let Some(v) = c.var {
                         declared[v as usize] = true;
@@ -2466,9 +3491,10 @@ fn has_continue(nodes: &[Node], label: u32, innermost: bool) -> bool {
         }
         Node::Sync { body, .. } => has_continue(body, label, innermost),
         Node::Switch { cases, .. } => cases.iter().any(|c| has_continue(&c.body, label, innermost)),
-        Node::Try { body, catches } => {
+        Node::Try { body, catches, finally, .. } => {
             has_continue(body, label, innermost)
                 || catches.iter().any(|c| has_continue(&c.body, label, innermost))
+                || has_continue(finally, label, innermost)
         }
         _ => false,
     })
@@ -2499,9 +3525,10 @@ fn loops_to_for(nodes: &mut Vec<Node>, body: &Body, counts: &HashMap<VarId, usiz
             Node::Switch { cases, .. } => {
                 cases.iter_mut().for_each(|c| loops_to_for(&mut c.body, body, counts))
             }
-            Node::Try { body: b, catches } => {
+            Node::Try { body: b, catches, finally, .. } => {
                 loops_to_for(b, body, counts);
                 catches.iter_mut().for_each(|c| loops_to_for(&mut c.body, body, counts));
+                loops_to_for(finally, body, counts);
             }
             _ => {}
         }
@@ -2620,6 +3647,71 @@ fn loops_to_for(nodes: &mut Vec<Node>, body: &Body, counts: &HashMap<VarId, usiz
 
 /// Locals returned from a method whose return type is a type variable get that type, and so do
 /// locals copied (or cast) into them.
+/// Generic types for locals holding a lambda of a standard functional interface, from the types
+/// the lambda is instantiated with (`Function<Integer, String> f = x -> ...`). Without them
+/// (no debug info) the raw interface would make the lambda's parameters `Object`.
+fn lambda_locals(nodes: &[Node], body: &Body, out: &mut HashMap<VarId, Sig>) {
+    fn walk(nodes: &[Node], f: &mut dyn FnMut(&Stmt)) {
+        for n in nodes {
+            match n {
+                Node::Stmt(s) => f(s),
+                Node::If { then, els, .. } => {
+                    walk(then, f);
+                    walk(els, f);
+                }
+                Node::Loop { body, .. }
+                | Node::For { body, .. }
+                | Node::ForEach { body, .. }
+                | Node::Sync { body, .. } => walk(body, f),
+                Node::Switch { cases, .. } => cases.iter().for_each(|c| walk(&c.body, f)),
+                Node::Try { body, catches, finally, .. } => {
+                    walk(body, f);
+                    catches.iter().for_each(|c| walk(&c.body, f));
+                    walk(finally, f);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(nodes, &mut |s| {
+        let Stmt::Assign(v, Expr::Lambda(l, _)) = s else { return };
+        let vi = &body.vars[*v as usize];
+        if vi.signature.is_some() || vi.ty.as_deref() != Some(&*l.iface) || out.contains_key(v) {
+            return;
+        }
+        let p = |k: usize| l.params.get(k).map(String::as_str);
+        let r = Some(&*l.ret);
+        let args: Vec<Option<&str>> = match l.iface.strip_prefix("Ljava/util/").unwrap_or("") {
+            "function/Function;" => vec![p(0), r],
+            "function/BiFunction;" => vec![p(0), p(1), r],
+            "function/Supplier;" | "concurrent/Callable;" => vec![r],
+            "function/IntFunction;" | "function/LongFunction;" | "function/DoubleFunction;" => vec![r],
+            "function/Consumer;"
+            | "function/Predicate;"
+            | "function/UnaryOperator;"
+            | "function/BinaryOperator;"
+            | "Comparator;"
+            | "function/ToIntFunction;"
+            | "function/ToLongFunction;"
+            | "function/ToDoubleFunction;"
+            | "function/ObjIntConsumer;" => vec![p(0)],
+            "function/BiConsumer;" | "function/BiPredicate;" => vec![p(0), p(1)],
+            _ => return,
+        };
+        if args.is_empty() || !args.iter().all(|a| a.is_some_and(types::is_reference)) {
+            return;
+        }
+        let sig = format!(
+            "{}<{}>;",
+            l.iface.trim_end_matches(';'),
+            args.iter().map(|a| a.unwrap_or_default()).collect::<String>()
+        );
+        if let Some(s) = types::parse_field_sig(&sig) {
+            out.insert(*v, s);
+        }
+    });
+}
+
 fn generic_locals(nodes: &[Node], body: &Body, ret: &Sig, out: &mut HashMap<VarId, Sig>) {
     let mut moves: Vec<(VarId, VarId)> = vec![];
     let mut returned: Vec<VarId> = vec![];
@@ -2642,9 +3734,10 @@ fn generic_locals(nodes: &[Node], body: &Body, ret: &Sig, out: &mut HashMap<VarI
                 | Node::ForEach { body, .. }
                 | Node::Sync { body, .. } => walk(body, moves, returned),
                 Node::Switch { cases, .. } => cases.iter().for_each(|c| walk(&c.body, moves, returned)),
-                Node::Try { body, catches } => {
+                Node::Try { body, catches, finally, .. } => {
                     walk(body, moves, returned);
                     catches.iter().for_each(|c| walk(&c.body, moves, returned));
+                    walk(finally, moves, returned);
                 }
                 _ => {}
             }

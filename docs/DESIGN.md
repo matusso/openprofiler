@@ -12,8 +12,8 @@ formats are specified separately:
 **Product goals**
 - A complete JVM profiler: CPU, memory, heap analysis, threads, locks, probes, telemetry, snapshots,
   comparisons, remote and container attach, and an MCP server for AI agents.
-- A native decompiler for Android apps (`.apk`, `.dex`) in the same UI, so the code behind a hot
-  spot or a third-party library can be read without another tool.
+- A native decompiler for Android apps (`.apk`, `.dex`) and JVM bytecode (`.jar`, `.class`) in the
+  same UI, so the code behind a hot spot or a third-party library can be read without another tool.
 - **Fast.** Open a 10 GB HPROF in under 3 minutes cold on a laptop with 16 GB RAM, and in under
   5 s on reopen. The agent should add at most 2% overhead with async sampling.
 - **Modern UX.** Dark and light themes, a command palette, keyboard-first navigation, fast flame
@@ -56,7 +56,7 @@ A single Rust workspace covers everything except the Java shim and the TypeScrip
  │         ├─ .opsnap / .oplink session ─┐                                      │
  │         ├─ HPROF session ─────────────┼─► openprofiler-heap (mmap CSR, dominators)
  │         ├─ JFR session ───────────────┘   openprofiler-model (trees, hot spots, diff)
- │         └─ dex session (.apk/.dex) ──────► openprofiler-dex (decompiler, resources)
+ │         └─ dex session (.apk/.dex/.jar) ─► openprofiler-dex (decompiler, resources)
  │ Exporters (HTML/CSV/JSON/SVG) · Compare · MCP server · IDE bridge             │
  │ Remote: ssh · docker/kubectl exec · openprofiler-relay upload + stdio tunnel  │
  └──────────────────────────────────────────────────────────────────────────────┘
@@ -92,7 +92,7 @@ crates/
   openprofiler-link/       daemon side of the agent-link protocol, .oplink replay
   openprofiler-remote/     ssh, docker and kubectl transports
   openprofiler-relay/      static helper binary (relay, list, attach, dump, pty)
-  openprofiler-dex/        DEX/APK reader, smali, Dalvik-to-Java decompiler, Android resources
+  openprofiler-dex/        DEX/APK and class-file/JAR readers, smali and bytecode views, decompiler
   openprofiler-daemon/     Query API server, sessions, exporters, insights, MCP, IDE bridge
   openprofiler-cli/        the `openprofiler` binary
 java/openprofiler-boot/    boot classes: telemetry sampler, dumps, Controller
@@ -216,7 +216,10 @@ across all indexes, on disk and mmap'd.
   session bar with recording controls and a timeline scrubber, and an inspector panel.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
-  smali tabs, back/forward history, and a usages panel; a Resources tab shows decoded resources.
+  smali (or, for JVM classes, bytecode) tabs, back/forward history, and a usages panel; a Resources
+  tab shows decoded resources (or a jar's other files).
+- The Open dialog takes a path on the daemon's machine, recent paths, and a file browser over that
+  machine's directories (`/fs/list`); on the desktop also the system file dialog.
 - The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
   in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
   (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
@@ -247,13 +250,69 @@ agent to publish that file and opens a live session.
 
 ### 3.13 Decompiler (`openprofiler-dex`, daemon `decompile` module)
 
-A native Dalvik-to-Java decompiler. The daemon holds one `Program` per `dex` session and serves
-it through the `/code/*` Query API; the CLI (`openprofiler decompile`) and MCP use the same calls.
+A native decompiler for Dalvik and JVM bytecode. The daemon holds one `Program` per `dex` session
+and serves it through the `/code/*` Query API; the CLI (`openprofiler decompile`) and MCP use the
+same calls.
 
 - **Input.** `.dex` files (`dex\n` magic) and zip containers (`.apk`, `.xapk`, `.apks`, `.apkm`,
   `.aab`): `classes*.dex` at the root, `*/dex/classes*.dex` in bundles, or inside nested APKs.
   Zip entries are found through the central directory (APK protectors corrupt local headers).
   Every read is bounds-checked; malformed input produces errors, never panics.
+- **JVM class files** (`jvm/`). `.class` files (`CAFEBABE` magic with a class-file major version,
+  which tells them from Mach-O universal binaries) and zips of them (`.jar`, `.war`, `.ear`,
+  `.aar`, and `.jmod` behind its `JM` header); archives without class files load the jars inside
+  them. Class files become the same program model as dex files: constant pools are interned into
+  shared string/type/proto/field/method tables, attributes become the system annotations the
+  printer reads (`Signature`, `InnerClass`, `EnclosingClass`/`EnclosingMethod`, `Throws`), and
+  `ConstantValue`s become static values. Indexing parses every class (in parallel) but translates
+  no code; a method's code is translated when it is first decompiled:
+  - The operand stack becomes registers: local slot `n` is register `n`, stack word `d` is
+    register `max_locals + d`, then parameters are rotated to the top of the frame as in Dalvik.
+    A forward data-flow pass gives the stack shape at every instruction (one per instruction, as
+    the verifier requires); `dup*`/`swap` become parallel moves.
+  - `new` + `dup` + `<init>` construct the allocation's own register, so the shared pass forms
+    `new T(...)`. `invokedynamic` with `StringConcatFactory` becomes a `StringBuilder` chain
+    (printed as `a + b`); with `LambdaMetafactory` it becomes a lambda expression carrying the
+    implementation method and captured values. `multianewarray` becomes `Array.newInstance`,
+    printed back as `new T[a][b]`. A handler starting with `astore` catches straight into the
+    local.
+  - The exception table becomes non-overlapping try ranges whose handler lists keep table order,
+    including handlers shadowed by an earlier one of the same type: an enclosing `try`'s handlers
+    then stay a suffix of the inner list, which is how regions nest.
+  - Line numbers and `LocalVariableTable`/`LocalVariableTypeTable` (or `MethodParameters`) become
+    debug info, so names and generic local types survive.
+  - `jsr`/`ret` subroutines (`finally` in class files for Java 1.4 and earlier) are not inlined:
+    each `jsr` stores a key for its call site as the return address and jumps, and `ret` becomes
+    a switch over the call sites' return points. The code is correct but usually not fully
+    structured.
+  The printer adds what dex code doesn't need: lambda bodies (synthetic `lambda$` methods) are
+  printed in place and the methods hidden (the class is printed again with a method shown if one of
+  its lambdas can't be inlined); other targets print as method references; records print as
+  `record R(...)` without their generated members; enum constants with class bodies print the
+  body inline; locals holding a lambda of a `java.util.function` interface get its generic type
+  when debug info doesn't have one, and other locals get generic types from the program's
+  fields, methods and the method's return type their values flow through (all must agree;
+  `ArrayList` flowing into `List<String>` becomes `ArrayList<String>`); `new` of a generic class
+  assigned to a generic target, or returned from a lambda or a method with a parameterized
+  return type (constructors with only primitive arguments), prints a diamond. The low-level view of a JVM class is its
+  original bytecode (`jvm/disasm.rs`) with offsets, resolved constants and linked member
+  references. A directory of class files (`target/classes`) opens like a jar.
+- **Recovered source constructs** (shared by both inputs, `structure.rs` and the printer):
+  `finally` from the copies compilers inline before each exit plus the catch-all that rethrows
+  (an exit whose value `F` could change is the shared code after the try, not the part);
+  try-with-resources from javac's suppressing close handler (nested resources share one
+  statement; `catch`/`finally` around it are hoisted); `switch` on strings from the
+  `hashCode()` switch and the index switch (javac and d8 forms, hash collisions included);
+  boxing and unboxing calls are dropped where the context converts implicitly, except for
+  arguments of overloaded methods (`List.remove`) and `==` between two unboxed values;
+  conditionals from branches assigning one variable, in source order (the fall-through arm comes
+  first, under the negated branch condition) and chained through the else side
+  (`a > 0 ? "pos" : a < 0 ? "neg" : "zero"`), keeping boxing explicit where a reference is
+  expected and only one side boxes; casts of calls returning a type argument of a receiver with
+  known generic type (`words.get(i)` of a `List<String>`; the program's signatures, or a table of
+  JDK collection and functional-interface methods) are dropped, as are casts of
+  `Stream.collect(Collectors...)` on a stream of known element type where the result is
+  returned or assigned (the compiler infers it from the target).
 - **Pipeline per method** (`method.rs`, `structure.rs`, `java.rs`):
   1. Decode instructions (`insn.rs`), split basic blocks at branches, switch targets and try
      boundaries; exception edges only leave blocks that can throw.
@@ -289,8 +348,12 @@ it through the `/code/*` Query API; the CLI (`openprofiler decompile`) and MCP u
 - **Resources** (`res/`). Binary XML (manifest, layouts) and `resources.arsc` (values files per
   configuration, `public.xml`), with names resolved through the table and a framework name list.
 - **Quality checks.** `tests/corpus.rs` decompiles a corpus built with javac + d8 (with and
-  without debug info), recompiles the output with javac and runs a harness that must print the
-  same as the original classes.
+  without debug info) and the same classes as jars, recompiles the output with javac and runs a
+  harness that must print the same as the original classes. `tests/jvm.rs` does the same for a
+  `--release 21` corpus of modern constructs (records, sealed types, switch expressions, patterns,
+  lambdas, streams, try-with-resources, local and anonymous classes). The `decompile` example
+  with `--stats` reports fallbacks over a whole archive (on the JDK's `java.base.jmod`: 3,347
+  classes, no failed methods, about 1.2% printed with a restructure note; on Guava, 0.2%).
 
 ## 4. Roadmap
 
@@ -301,7 +364,7 @@ it through the `/code/*` Query API; the CLI (`openprofiler decompile`) and MCP u
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
 | 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes | Not started |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, web mode, CI gate | Mostly done |
-| 5 Polish and ecosystem | Native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
+| 5 Polish and ecosystem | Native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
 

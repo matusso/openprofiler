@@ -445,6 +445,8 @@ export interface NavigateRequest {
 export interface CodeSummary {
   /** Decompiler name and version (`openprofiler-dex 0.1.0`). */
   engine: string;
+  /** `jvm` for class files (the low-level view is JVM bytecode), `dex` for Android code. */
+  format?: "dex" | "jvm";
   classes: number;
   packages: number;
   resources: number;
@@ -633,4 +635,26 @@ export interface MBeanTrackRequest {
   label?: string;
   unit?: Unit;
   enabled?: boolean;
+}
+
+// ---------- File browser ----------
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  /** Seconds since the Unix epoch. */
+  modified?: number | null;
+  /** What the daemon opens it as (by extension). */
+  kind?: "profile" | "heap" | "code" | null;
+}
+
+/** A directory on the machine running the daemon. */
+export interface FsListing {
+  path: string;
+  parent?: string | null;
+  home?: string | null;
+  entries: FsEntry[];
+  truncated: boolean;
 }

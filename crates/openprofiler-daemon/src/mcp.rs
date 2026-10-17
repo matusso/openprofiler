@@ -53,7 +53,7 @@ pub fn tools() -> Vec<Value> {
         tool("status", "List open sessions with their state and capabilities.", json!({}), &[]),
         tool(
             "load_snapshot",
-            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap), or an Android app for the decompiler (.apk, .dex, .xapk, .apks, .aab). Optionally open a baseline for comparison.",
+            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap), or code for the decompiler: an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war, .ear, .jmod, .class). Optionally open a baseline for comparison.",
             json!({ "path": { "type": "string" }, "baseline": { "type": "string" } }),
             &["path"],
         ),
@@ -170,7 +170,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "decompile",
-            "Decompiled Java source (or smali) of a class in a decompiler session (.apk/.dex). Without `class`, lists the packages and classes directly under `package` (default: top level).",
+            "Decompiled Java source (or the low-level view: smali for Android code, JVM bytecode for class files) of a class in a decompiler session (.apk/.dex/.jar/.class). Without `class`, lists the packages and classes directly under `package` (default: top level).",
             json!({ "session": session, "class": { "type": "string", "description": "Fully qualified class name" },
                     "package": { "type": "string" },
                     "view": { "type": "string", "enum": ["java", "smali"], "default": "java" },
@@ -231,7 +231,7 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "openprofiler", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "OpenProfiler is a JVM profiler. Start with load_snapshot (files) or list_jvms + attach (live), then insights, hotspots and expand. Node and object ids are stable within a session. Android apps (.apk, .dex) opened with load_snapshot are browsed with decompile, search_code and find_usages.",
+                "instructions": "OpenProfiler is a JVM profiler. Start with load_snapshot (files) or list_jvms + attach (live), then insights, hotspots and expand. Node and object ids are stable within a session. Android apps (.apk, .dex) and JVM bytecode (.jar, .class) opened with load_snapshot are browsed with decompile, search_code and find_usages.",
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),

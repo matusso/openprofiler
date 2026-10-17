@@ -2,6 +2,7 @@
 //! cross references, decompiled-code cache, search and resources.
 
 use crate::dex::{self, ClassDef, DexFile, Value};
+use crate::jvm;
 use crate::types;
 use crate::zip::{self, Zip};
 use anyhow::{Context, Result, anyhow, bail};
@@ -182,19 +183,42 @@ fn is_code_entry(name: &str) -> bool {
 }
 
 impl Program {
-    /// Opens an `.apk` (or `.xapk`/`.apks`/`.aab`/zip with dex files) or a `.dex` file.
+    /// Opens an `.apk` (or `.xapk`/`.apks`/`.aab`/zip with dex files), a `.dex` file, or JVM
+    /// bytecode: a `.class` file, a `.jar`/`.war`/`.ear`/`.jmod`/zip with class files, or a
+    /// directory of class files.
     pub fn open(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if path.is_dir() {
+            // A directory of class files (`target/classes`).
+            let files = jvm::class_files(path)?;
+            if files.is_empty() {
+                bail!("{name}: no .class files in the directory");
+            }
+            let (d, warnings) = jvm::build(&name, files)?;
+            let mut p = Self::build(&name, vec![d], None)?;
+            p.warnings = warnings;
+            return Ok(p);
+        }
+        let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         Self::from_bytes(&name, data)
     }
 
-    pub fn from_bytes(name: &str, data: Vec<u8>) -> Result<Self> {
+    pub fn from_bytes(name: &str, mut data: Vec<u8>) -> Result<Self> {
         if dex::is_dex(&data) {
             return Self::build(name, vec![DexFile::parse(name, data)?], None);
         }
+        if jvm::is_class(&data) {
+            let (d, warnings) = jvm::build(name, vec![(name.to_owned(), data)])?;
+            let mut p = Self::build(name, vec![d], None)?;
+            p.warnings = warnings;
+            return Ok(p);
+        }
+        // A .jmod is a zip behind a 4-byte header.
+        if data.starts_with(b"JM\x01\x00") && zip::is_zip(&data[4..]) {
+            data.drain(..4);
+        }
         if !zip::is_zip(&data) {
-            bail!("{name}: not an APK or DEX file");
+            bail!("{name}: not an APK, DEX, JAR or class file");
         }
         let mut warnings = vec![];
         let (dexes, container) = {
@@ -225,15 +249,51 @@ impl Program {
                     }
                 }
             }
+            // JVM archives: class files at any depth, or inside nested jars (.ear, fat jars
+            // without their own classes).
+            let jvm_code = dexes.is_empty()
+                && zip.entries.iter().any(|e| is_class_entry(&e.name) || is_jvm_archive(&e.name));
+            if jvm_code {
+                let mut files = vec![];
+                let mut direct: Vec<&zip::Entry> =
+                    zip.entries.iter().filter(|e| is_class_entry(&e.name)).collect();
+                // Multi-release jars: the base version first (the first definition wins).
+                direct.sort_by_key(|e| e.name.starts_with("META-INF/versions/"));
+                for e in direct {
+                    match zip.read(e) {
+                        Ok(b) => files.push((e.name.clone(), b)),
+                        Err(err) => warnings.push(format!("skipped {}: {err:#}", e.name)),
+                    }
+                }
+                if files.is_empty() {
+                    for e in zip.entries.iter().filter(|e| is_jvm_archive(&e.name)) {
+                        let Ok(inner) = zip.read(e) else { continue };
+                        let Ok(z) = Zip::parse(&inner) else { continue };
+                        for x in z.entries.iter().filter(|x| is_class_entry(&x.name)) {
+                            if let Ok(b) = z.read(x) {
+                                files.push((format!("{}!{}", e.name, x.name), b));
+                            }
+                        }
+                    }
+                }
+                if !files.is_empty() {
+                    let (d, w) = jvm::build(name, files)?;
+                    warnings.extend(w);
+                    dexes.push(d);
+                }
+            }
             let entries = zip
                 .entries
                 .into_iter()
-                .filter(|e| !is_code_entry(&e.name) && !e.name.ends_with('/'))
+                .filter(|e| {
+                    !e.name.ends_with('/')
+                        && !(if jvm_code { is_class_entry(&e.name) } else { is_code_entry(&e.name) })
+                })
                 .collect();
             (dexes, Container { data: vec![], entries })
         };
         if dexes.is_empty() {
-            bail!("{name}: no classes*.dex inside");
+            bail!("{name}: no classes*.dex or .class files inside");
         }
         let mut p = Self::build(name, dexes, Some(Container { data, ..container }))?;
         p.warnings = warnings;
@@ -321,6 +381,17 @@ impl Program {
             enums: Mutex::default(),
             warnings: vec![],
         })
+    }
+
+    /// The class file a class was loaded from (JVM programs).
+    pub fn class_file(&self, desc: &str) -> Option<&jvm::classfile::ClassFile> {
+        let e = self.classes.get(desc)?;
+        self.dexes[e.dex].jvm.as_ref()?.class_file(e.def)
+    }
+
+    /// Whether the program was loaded from JVM class files.
+    pub fn is_jvm(&self) -> bool {
+        self.dexes.iter().any(DexFile::is_jvm)
     }
 
     pub fn class(&self, desc: &str) -> Option<(&DexFile, &ClassDef)> {
@@ -486,7 +557,7 @@ impl Program {
             .iter()
             .find(|m| d.method(m.method).is_some_and(|mi| d.string(mi.name) == "<clinit>"))?;
         let code = d.code(clinit.code_off).ok()?;
-        let (insns, _) = crate::insn::decode_all(&code.insns).ok()?;
+        let (insns, _) = code.decode().ok()?;
         let mut strs: HashMap<u16, String> = HashMap::new();
         let mut ints: HashMap<u16, i64> = HashMap::new();
         let mut out: BTreeMap<i64, String> = BTreeMap::new();
@@ -523,6 +594,8 @@ impl Program {
         }
         serde_json::json!({
             "engine": concat!("openprofiler-dex ", env!("CARGO_PKG_VERSION")),
+            // `jvm` for class files (the low-level view is JVM bytecode), `dex` otherwise.
+            "format": if self.is_jvm() { "jvm" } else { "dex" },
             "classes": self.top_levels.len(),
             "packages": pkgs.len(),
             "resources": self.resource_rows().len(),
@@ -611,6 +684,7 @@ impl Program {
         }
         let raw = match view {
             View::Java => crate::java::print_class(self, top),
+            View::Smali if self.is_jvm() => jvm::disasm::print_class(self, top),
             View::Smali => crate::smali::print_class(self, top),
         };
         let code = Arc::new(self.finish(top, view, raw));
@@ -920,6 +994,14 @@ impl Program {
     }
 }
 
+fn is_class_entry(name: &str) -> bool {
+    name.ends_with(".class") && !name.ends_with("module-info.class")
+}
+
+fn is_jvm_archive(name: &str) -> bool {
+    [".jar", ".war"].iter().any(|x| name.ends_with(x))
+}
+
 fn dex_order(name: &str) -> (usize, u32) {
     let base = name.rsplit('/').next().unwrap_or(name);
     let n = base.trim_start_matches("classes").trim_end_matches(".dex").parse().unwrap_or(1);
@@ -942,7 +1024,8 @@ fn resource_type(name: &str) -> &'static str {
         "ttf" | "otf" => "font",
         "mp3" | "ogg" | "wav" => "sound",
         "mp4" | "webm" => "video",
-        "jar" | "zip" | "apk" | "dex" => "archive",
+        "jar" | "war" | "zip" | "apk" | "dex" | "jmod" => "archive",
+        "yml" | "yaml" | "mf" | "sql" | "conf" => "text",
         "kotlin_builtins" | "kotlin_module" => "kotlin",
         _ if name.starts_with("META-INF/") => "meta",
         _ => "other",

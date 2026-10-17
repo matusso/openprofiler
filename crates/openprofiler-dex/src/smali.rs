@@ -185,7 +185,7 @@ fn print_method(out: &mut String, d: &DexFile, m: &EncodedMethod) {
     let _ = writeln!(out, "    .registers {}", code.registers);
     let regs = Regs { first_param: code.registers.saturating_sub(code.ins) };
     let debug = d.debug_info(&code).unwrap_or_default();
-    let (insns, payloads) = match insn::decode_all(&code.insns) {
+    let (insns, payloads) = match code.decode() {
         Ok(x) => x,
         Err(e) => {
             let _ = writeln!(out, "    # {e:#}\n.end method\n");
@@ -236,7 +236,7 @@ fn print_method(out: &mut String, d: &DexFile, m: &EncodedMethod) {
         let ops = operands(d, i, &regs);
         let _ = writeln!(out, "    {}{}{}", i.name(), if ops.is_empty() { "" } else { " " }, ops);
     }
-    let end = code.insns.len() as u32;
+    let end = code.units() as u32;
     if labels.contains(&end) {
         let _ = writeln!(out, "    :L{end:04x}");
     }

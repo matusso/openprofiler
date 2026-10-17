@@ -21,13 +21,13 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start or exit. |
 | **Remote and containers** | Attach over ssh, `docker exec` and `kubectl exec`, including ephemeral debug containers for distroless images. The agent port is never exposed. (Daemon API today; UI and CLI support planned.) |
 | **Automation** | A CLI, a CI regression gate (`--fail-if "cpu.total > +10%"`), and an MCP server so AI agents can profile and read results. |
-| **Decompiler** | A built-in Dalvik-to-Java decompiler: browse an `.apk` or `.dex` as Java source with a package tree, smali view, go to declaration, find usages, name and full-text search, and decoded `AndroidManifest.xml`, layouts and `resources.arsc`. Classes decompile on demand. |
+| **Decompiler** | A built-in Java decompiler for Android apps and JVM bytecode: browse an `.apk`, `.dex`, `.jar`, `.war` or `.class` as Java source with a package tree, smali or bytecode view, go to declaration, find usages, name and full-text search, lambdas and records, and decoded `AndroidManifest.xml`, layouts and `resources.arsc`. Classes decompile on demand. |
 | **IDE** | IntelliJ IDEA plugin and VS Code / VSCodium extension: CPU heat in the editor, navigation to source, launch with the agent. |
 | **Security** | The agent link uses TLS 1.3 with a pinned fingerprint and a mandatory random token. |
 
 Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, `.opsnap` snapshots and
 `.oplink` offline recordings. The decompiler opens `.apk` (and `.xapk`, `.apks`, `.aab`) and `.dex`
-files.
+files, and JVM bytecode: `.jar`, `.war`, `.ear`, `.jmod`, `.aar` and `.class`.
 
 ## Install
 
@@ -91,10 +91,11 @@ without a daemon, use offline mode: `=mode=offline,file=app.oplink`. Options are
 `OPENPROFILER_AGENT_OPTIONS`. See [the agent-link spec](docs/spec/agent-link.md) for all options
 and the trigger file format.
 
-### Decompile Android apps
+### Decompile Android apps and jars
 
 The decompiler is built in (`crates/openprofiler-dex`, written in Rust; no JVM or external tool
-needed). It reads `.apk`, `.xapk`, `.apks`, `.aab` and `.dex` files:
+needed). It reads Android apps (`.apk`, `.xapk`, `.apks`, `.aab`, `.dex`) and JVM bytecode (`.jar`,
+`.war`, `.ear`, `.jmod`, `.aar`, `.class`, or a directory of class files such as `target/classes`):
 
 ```sh
 openprofiler daemon --web app.apk                     # browse it in the UI (Code view)
@@ -102,9 +103,20 @@ openprofiler decompile app.apk                        # list classes
 openprofiler decompile app.apk com.example.MainActivity          # print Java source (--smali for smali)
 openprofiler decompile app.apk --search api_key --code           # search the decompiled source
 openprofiler decompile app.apk -o out/                # write every class as .java (or .smali)
+openprofiler decompile lib.jar com.example.Service --bytecode    # JVM bytecode of a class
 ```
 
-In the UI, open the file like any other (⌘O or drop it). The **Code** view has the package tree,
+Jars, wars and ears open with the classes at any depth (`BOOT-INF/classes`, `WEB-INF/classes`);
+archives without their own classes, such as an `.ear`, load the jars inside them. In multi-release
+jars the base version of a class wins. Java output covers lambdas and method references (lambda
+bodies are printed in place), string concatenation, `switch` on strings, `finally` blocks and
+try-with-resources, implicit boxing, records, enums with constant bodies, and generic types
+(without debug info, local generics are inferred from the fields, methods and returns their
+values flow through); the low-level tab shows the original bytecode.
+
+In the UI, open the file like any other (⌘O or drop it); **Browse…** in the Open dialog
+navigates the directories of the machine running the daemon, and can open a directory of
+classes. The **Code** view has the package tree,
 search over class, method and field names (tick *In code* to search source text), Java and smali
 tabs, and a **Resources** tab with the decoded `AndroidManifest.xml`, binary XML layouts,
 `resources.arsc` values and images. Click a reference to go to its declaration, click a
@@ -114,7 +126,7 @@ Opening an app only indexes it; classes decompile on first view and are cached. 
 21,000 classes opens in about half a second and decompiles completely in about 2 s on a laptop.
 Methods whose control flow can't be fully structured are still printed, with a
 `/* Code restructure failed */` note; methods that can't be decompiled at all fall back to a
-comment and an `UnsupportedOperationException`. JVM bytecode (`.jar`, `.class`) is not supported.
+comment and an `UnsupportedOperationException`.
 
 ### Compare, export and gate in CI
 
@@ -161,7 +173,7 @@ Both use the agent next to the daemon; set the agent path in the plugin settings
                                       ├─ openprofiler-jfr       JFR import
                                       ├─ openprofiler-heap      out-of-core heap analysis
                                       ├─ openprofiler-snapshot  .opsnap files
-                                      ├─ openprofiler-dex       .apk / .dex decompiler
+                                      ├─ openprofiler-dex       .apk / .dex / .jar decompiler
                                       └─ openprofiler-remote    ssh / docker / kubectl ──► openprofiler-relay
 ```
 
@@ -221,7 +233,7 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 | `crates/openprofiler-remote`, `crates/openprofiler-relay` | ssh, docker and kubectl transports; the static relay binary |
 | `crates/openprofiler-daemon` | Query API server, insights, exporters, MCP, IDE bridge |
 | `crates/openprofiler-cli` | The `openprofiler` binary |
-| `crates/openprofiler-dex` | DEX/APK reader, smali disassembler, Dalvik-to-Java decompiler, Android resource decoding |
+| `crates/openprofiler-dex` | DEX/APK and class-file/JAR readers, smali and bytecode views, the Java decompiler, Android resource decoding |
 | `java/` | Boot classes, public `openprofiler-api`, test workload |
 | `ui/` | React + TypeScript UI, Tauri desktop shell |
 | `ide/intellij` | IntelliJ IDEA plugin (Kotlin) |

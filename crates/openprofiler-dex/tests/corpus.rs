@@ -1,12 +1,12 @@
-//! End-to-end checks on the corpus (`tests/data/corpus`, built by `regen.sh` with javac + d8):
-//! every class decompiles without falling back, and — when a JDK is available — the output
-//! recompiles with javac and behaves exactly like the original classes.
+//! End-to-end checks on the corpus (`tests/data/corpus`, built by `regen.sh` with javac + d8, and
+//! as plain jars): every class decompiles without falling back, and — when a JDK is available —
+//! the output recompiles with javac and behaves exactly like the original classes.
 
 use openprofiler_dex::{Program, View};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const FIXTURES: [&str; 2] = ["corpus.dex", "corpus-release.dex"];
+const FIXTURES: [&str; 4] = ["corpus.dex", "corpus-release.dex", "corpus.jar", "corpus-nodebug.jar"];
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/corpus").join(name)
@@ -26,7 +26,7 @@ fn decompile_all(p: &Program) -> Vec<(String, String)> {
 fn decompiles_without_fallbacks() {
     for f in FIXTURES {
         let p = Program::open(&data(f)).unwrap();
-        assert!(p.top_levels.len() >= 5, "{f}: {:?}", p.top_levels);
+        assert!(p.top_levels.len() >= 4, "{f}: {:?}", p.top_levels);
         for (name, code) in decompile_all(&p) {
             assert!(!code.contains("restructure failed"), "{f} {name}:\n{code}");
             assert!(!code.contains("decompilation failed"), "{f} {name}:\n{code}");
@@ -55,12 +55,13 @@ fn readable_constructs() {
         "return a != null && b != null && a.equals(b);",
         "case CIRCLE:",
         "synchronized (obj) {",
-        "} catch (NumberFormatException e2) {",
+        "} catch (NumberFormatException e) {",
         "public static <T extends Comparable<T>> T maxOf(List<T> items) {",
         "for (T t : items) {",
         "CIRCLE(\"c\"),",
         "return Shapes.this.registered;",
         "out.add(new AnonymousClass1());",
+        "case \"alpha\":",
     ] {
         assert!(all.contains(want), "missing `{want}` in:\n{all}");
     }

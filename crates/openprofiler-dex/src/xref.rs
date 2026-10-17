@@ -1,7 +1,8 @@
 //! Cross references: which classes, methods and fields a class's code mentions, gathered from
 //! bytecode and declarations without decompiling.
 
-use crate::insn::{self, IndexKind};
+use crate::insn::IndexKind;
+use crate::ir::CallSite;
 use crate::program::{NodeKey, Program};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ pub fn class_refs(p: &Program, desc: &Arc<str>, out: &mut HashSet<NodeKey>) {
             continue;
         }
         let Ok(code) = d.code(m.code_off) else { continue };
-        let Ok((insns, _)) = insn::decode_all(&code.insns) else { continue };
+        let Ok((insns, _)) = code.decode() else { continue };
         for i in insns {
             match i.index_kind() {
                 IndexKind::Type => add_type(p, d.type_desc(i.index), out),
@@ -58,6 +59,15 @@ pub fn class_refs(p: &Program, desc: &Arc<str>, out: &mut HashSet<NodeKey>) {
                         let name = d.string(mi.name);
                         let pd = d.proto_desc(mi.proto);
                         if let Some(k) = p.resolve_method(class, name, &pd) {
+                            out.insert(k);
+                        }
+                    }
+                }
+                IndexKind::CallSite => {
+                    if let Some(CallSite::Lambda(l)) = d.call_site(i.index) {
+                        add_type(p, &l.target.class, out);
+                        add_type(p, &l.iface, out);
+                        if let Some(k) = p.resolve_method(&l.target.class, &l.target.name, &l.target.desc()) {
                             out.insert(k);
                         }
                     }

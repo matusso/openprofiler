@@ -1,5 +1,6 @@
-//! Decompiler sessions: Android apps (`.apk`, `.xapk`, `.apks`, `.aab`) and `.dex` files turned
-//! back into Java source by `openprofiler-dex`, in process. Classes are decompiled on demand and
+//! Decompiler sessions: Android apps (`.apk`, `.xapk`, `.apks`, `.aab`), `.dex` files and JVM
+//! bytecode (`.jar`, `.war`, `.ear`, `.jmod`, `.class`) turned back into Java source by
+//! `openprofiler-dex`, in process. Classes are decompiled on demand and
 //! cached, so opening a large app only indexes it.
 
 use crate::engine::Session;
@@ -113,5 +114,54 @@ mod tests {
         assert!(smali["code"].as_str().unwrap().contains(".method"));
         assert!(handle(&s, "class", json!({ "name": "corpus.Nope" })).is_err());
         assert_eq!(handle(&s, "resources", json!({})).unwrap()["resources"], json!([]));
+    }
+
+    #[test]
+    fn opens_jvm_bytecode() {
+        let jar = corpus().with_file_name("corpus.jar");
+        assert_eq!(crate::engine::detect_format(&jar).unwrap(), crate::engine::FileFormat::Archive);
+        let engine = crate::Engine::new();
+        let s = engine.open_blocking(&jar).unwrap();
+        assert_eq!(s.kind, crate::SessionKind::Dex);
+        let cls = handle(&s, "class", json!({ "name": "corpus.Shapes" })).unwrap();
+        let code = cls["code"].as_str().unwrap();
+        assert!(code.contains("return () -> System.out.println(msg + this.registered);"), "{code}");
+        let res = handle(&s, "resources", json!({})).unwrap();
+        assert!(
+            res["resources"].as_array().unwrap().iter().any(|r| r["name"] == "META-INF/MANIFEST.MF"),
+            "{res}"
+        );
+
+        // A directory of class files (`target/classes`).
+        let classes = std::env::temp_dir().join(format!("op-classdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&classes);
+        let data = std::fs::read(&jar).unwrap();
+        let zip = openprofiler_dex::zip::Zip::parse(&data).unwrap();
+        for e in zip.entries.iter().filter(|e| e.name.ends_with(".class")) {
+            let out = classes.join(&e.name);
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            std::fs::write(out, zip.read(e).unwrap()).unwrap();
+        }
+        assert_eq!(crate::engine::detect_format(&classes).unwrap(), crate::engine::FileFormat::ClassDir);
+        let d = engine.open_blocking(&classes).unwrap();
+        let code = handle(&d, "class", json!({ "name": "corpus.Control" })).unwrap();
+        assert!(code["code"].as_str().unwrap().contains("public class Control"));
+        let empty = classes.join("corpus").join("none");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(crate::engine::detect_format(&empty).is_err());
+        let _ = std::fs::remove_dir_all(&classes);
+
+        // A bare class file.
+        let dir = std::env::temp_dir().join(format!("op-class-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let class = dir.join("Hello.class");
+        let mut bytes = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52];
+        bytes.extend([0, 0]);
+        std::fs::write(&class, &bytes).unwrap();
+        assert_eq!(crate::engine::detect_format(&class).unwrap(), crate::engine::FileFormat::Class);
+        // Mach-O universal binaries share the magic.
+        std::fs::write(&class, [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2, 0, 0]).unwrap();
+        assert!(crate::engine::detect_format(&class).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
