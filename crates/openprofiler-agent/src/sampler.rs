@@ -181,6 +181,11 @@ fn sample_all(
                     state = ThreadState::NetIo;
                 }
             }
+            if !ids.is_empty()
+                && let Some(label) = crate::probes::label_frame_of(ti)
+            {
+                ids.push(label);
+            }
             let stack = c.stacks.intern_leaf_first(&ids);
             if let Some(w) = weight
                 && state == ThreadState::Runnable

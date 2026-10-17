@@ -1,4 +1,5 @@
-//! Prints a summary of an `.oplink` recording: sample counts, top leaf frames, telemetry keys.
+//! Prints a summary of an `.oplink` recording: sample counts, top leaf frames, telemetry keys,
+//! probe hot spots, events and control objects.
 //! Usage: cargo run -p openprofiler-link --example oplink_summary -- <file.oplink>
 
 use std::collections::HashMap;
@@ -39,5 +40,39 @@ fn main() -> anyhow::Result<()> {
         p.monitors.len(),
         p.thread_states.len()
     );
+    let pr = &p.probes;
+    for (i, info) in pr.probes.iter().enumerate() {
+        let mut by_payload: HashMap<&str, (u64, i64)> = HashMap::new();
+        for c in pr.calls.iter().filter(|c| c.probe as usize == i) {
+            let e = by_payload.entry(p.symbols.str(c.payload)).or_default();
+            e.0 += c.count as u64;
+            e.1 += c.duration;
+        }
+        let events = pr.events.iter().filter(|e| e.probe as usize == i).count();
+        let controls = pr.controls.iter().filter(|e| e.probe as usize == i).count();
+        println!(
+            "probe {} ({}): {} payloads, {events} events, {controls} control events",
+            info.id,
+            info.name,
+            by_payload.len()
+        );
+        let mut top: Vec<_> = by_payload.into_iter().collect();
+        top.sort_by_key(|e| std::cmp::Reverse(e.1.1));
+        for (payload, (n, d)) in top.iter().take(5) {
+            println!("    {n:>6} calls {:>9.3} ms  {payload}", *d as f64 / 1e6);
+        }
+        if let Some(e) =
+            pr.events.iter().find(|e| e.probe as usize == i && (e.context.is_some() || e.detail.is_some()))
+        {
+            println!(
+                "    event: {} detail={:?} context={:?} error={:?}",
+                p.symbols.str(e.payload),
+                e.detail,
+                e.context,
+                e.error
+            );
+        }
+    }
+    println!("bookmarks: {}", p.bookmarks.iter().map(|b| b.label.as_str()).collect::<Vec<_>>().join(", "));
     Ok(())
 }

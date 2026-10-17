@@ -414,6 +414,21 @@ fn handle_request<S: Write>(
                 fail(&mut resp, &e);
             }
         }
+        Some(Kind::SetInstrumentation(r)) if crate::events::has_cap(a, "instrument") => {
+            let probes = match r.probes.as_slice() {
+                [] => None,
+                [n] if n == "none" => Some(vec![]),
+                _ => Some(r.probes),
+            };
+            crate::instrument::configure(r.include, r.exclude, probes);
+            resp.result = Some(v1::response::Result::Instrumentation(instrumentation_info(a)));
+        }
+        Some(Kind::Instrumentation(_)) if crate::events::has_cap(a, "instrument") => {
+            resp.result = Some(v1::response::Result::Instrumentation(instrumentation_info(a)));
+        }
+        Some(Kind::SetInstrumentation(_) | Kind::Instrumentation(_)) => {
+            fail(&mut resp, "instrumentation unavailable (JVM refused class retransformation)")
+        }
         Some(_) => fail(&mut resp, "unsupported request"),
         None => fail(&mut resp, "empty request"),
     }
@@ -424,6 +439,20 @@ fn handle_request<S: Write>(
         r?;
     }
     Ok(())
+}
+
+fn instrumentation_info(a: &Agent) -> v1::InstrumentationInfo {
+    let i = crate::instrument::info();
+    let probes = a.collector.lock().probe_infos().to_vec();
+    v1::InstrumentationInfo {
+        include: i.include,
+        exclude: i.exclude,
+        available_probes: probes.into_iter().filter(|p| i.probes.contains(&p.id)).collect(),
+        enabled_probes: i.enabled_probes,
+        instrumented_classes: i.classes as u32,
+        instrumented_methods: i.methods as u32,
+        disabled_methods: i.disabled,
+    }
 }
 
 fn is_mbean(kind: &Option<v1::request::Kind>) -> bool {

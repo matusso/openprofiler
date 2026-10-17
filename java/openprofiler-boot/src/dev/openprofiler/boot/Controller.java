@@ -40,4 +40,10 @@ public final class Controller {
     public static void bookmark(String label, String color) {
         Agent.bookmark(label, color);
     }
+
+    /** Records a call of custom probe {@code probe} ({@code custom.<probe>}) that took {@code durationNanos}. */
+    public static void probeEvent(String probe, String payload, long durationNanos, String error) {
+        long end = Probes.epochNanos();
+        Probes.custom(probe).record(payload, end - durationNanos, durationNanos, error, null);
+    }
 }

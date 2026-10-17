@@ -43,6 +43,8 @@ import type {
   ServerEvent,
   Session,
   FsListing,
+  InstrumentationInfo,
+  ProbesRequest,
   Summary,
   TelemetryRequest,
   TelemetryResponse,
@@ -225,6 +227,12 @@ export class OpenProfilerClient {
   saveSnapshot = (id: string, path: string) => this.post(`/sessions/${id}/snapshot`, { path });
   bookmark = (id: string, label: string) => this.post(`/sessions/${id}/bookmark`, { label });
   gc = (id: string) => this.post(`/sessions/${id}/gc`);
+
+  // Probes (any session) and instrumentation (live)
+  probes = <T>(id: string, req: ProbesRequest) => this.post<T>(`/sessions/${id}/probes`, req);
+  instrumentation = (id: string) => this.get<InstrumentationInfo>(`/sessions/${id}/instrumentation`);
+  setInstrumentation = (id: string, req: { include: string[]; exclude: string[]; probes: string[] }) =>
+    this.post<InstrumentationInfo>(`/sessions/${id}/instrumentation`, req);
 
   // MBeans (live); `server` is an MBeanServerInfo id, "" for the platform server
   mbeanServers = (id: string) => this.post<{ servers: MBeanServerInfo[] }>(`/sessions/${id}/mbean-servers`);

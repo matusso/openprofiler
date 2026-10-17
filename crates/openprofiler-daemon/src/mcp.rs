@@ -27,7 +27,7 @@ fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value
 }
 
 pub fn tools() -> Vec<Value> {
-    let kind = json!({ "type": "string", "enum": ["cpu", "wall", "alloc", "monitor", "wait", "io", "exception"], "default": "cpu" });
+    let kind = json!({ "type": "string", "enum": ["cpu", "wall", "alloc", "monitor", "wait", "io", "exception", "calls", "probe"], "default": "cpu" });
     let session = json!({ "type": "string", "description": "Session id from load_snapshot/attach/status" });
     let mbean_server = json!({ "type": "string", "description": "MBean server id from list_mbean_servers; omit for the platform server" });
     vec![
@@ -62,7 +62,8 @@ pub fn tools() -> Vec<Value> {
             "Top methods by self time (CPU) or self weight (allocation, monitor, ...). Each result has a node id expandable with `expand` (back traces).",
             json!({ "session": session, "kind": kind, "limit": { "type": "integer", "default": 15 },
                     "aggregation": { "type": "string", "enum": ["method", "class", "package"] },
-                    "thread": { "type": "string", "description": "Only threads whose name contains this text" } }),
+                    "thread": { "type": "string", "description": "Only threads whose name contains this text" },
+                    "payload": { "type": "string", "description": "kind=probe: only calls with this probe payload (an SQL statement, a URL)" } }),
             &["session"],
         ),
         tool(
@@ -108,7 +109,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "set_triggers",
-            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit) and actions (heap_dump {path}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor, run_gc), plus optional cooldown and max_fires.",
+            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit, method {class, method}) and actions (heap_dump {path}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor|calls|probes, run_gc), plus optional cooldown and max_fires.",
             json!({ "session": session, "triggers": { "type": "array", "items": { "type": "object" } } }),
             &["session", "triggers"],
         ),
@@ -192,9 +193,22 @@ pub fn tools() -> Vec<Value> {
             &["session", "node"],
         ),
         tool(
-            "probe_events",
-            "Probe events (JDBC, HTTP, ...) of a session. Requires a live agent with probes enabled.",
-            json!({ "session": session, "probe": { "type": "string" } }),
+            "probes",
+            "Probe data (JDBC SQL, HTTP server/client URLs, JPA, Kafka, gRPC, exceptions, files, sockets, custom probes). view=list (probes with totals; start here), hotspots (payloads by total time for one probe), events (individual calls with detail, error and request context), controls (connections/files/sockets with leak flags), timeline, telemetry. For the code paths behind a payload use hotspots with kind=probe and payload=<payload>.",
+            json!({ "session": session, "probe": { "type": "string", "description": "Probe id from view=list, e.g. jdbc" },
+                    "view": { "type": "string", "enum": ["list", "hotspots", "events", "controls", "timeline", "telemetry"], "default": "list" },
+                    "search": { "type": "string", "description": "Only payloads containing this text" },
+                    "errors_only": { "type": "boolean" },
+                    "limit": { "type": "integer", "default": 50 } }),
+            &["session"],
+        ),
+        tool(
+            "instrumentation",
+            "Read or change a live agent's bytecode instrumentation: include/exclude class patterns (e.g. com.acme.*) get exact call counts (kind=calls trees), probes lists the enabled probe ids (empty = all, [\"none\"] = none). Without arguments returns the current settings.",
+            json!({ "session": session,
+                    "include": { "type": "array", "items": { "type": "string" } },
+                    "exclude": { "type": "array", "items": { "type": "string" } },
+                    "probes": { "type": "array", "items": { "type": "string" } } }),
             &["session"],
         ),
     ]
@@ -315,6 +329,9 @@ impl McpServer {
                 let s = self.session(args, "session")?;
                 let kind = kind_arg(args)?;
                 let mut filter = FilterDto::default();
+                if let Some(payload) = args["payload"].as_str() {
+                    filter.classes = Some(vec![payload.to_string()]);
+                }
                 if let Some(t) = args["thread"].as_str() {
                     let th = threads(&s)?;
                     filter.threads = Some(
@@ -494,8 +511,14 @@ impl McpServer {
                 let req = json!({ "node": args["node"], "limit": args["limit"].as_u64().unwrap_or(100) });
                 crate::decompile::handle(&s, "usages", req)
             }
+            "probes" => {
+                let s = self.session(args, "session")?;
+                let mut req: crate::probes::ProbesRequest = serde_json::from_value(args.clone())?;
+                req.limit = req.limit.or(Some(50));
+                crate::probes::probes(&s, &req)
+            }
             "heap_dump"
-            | "probe_events"
+            | "instrumentation"
             | "set_triggers"
             | "list_mbeans"
             | "get_mbean"
@@ -518,7 +541,7 @@ impl McpServer {
                     "connect_jmx" => "mbean-connect",
                     "subscribe_mbean" => "mbean-subscribe",
                     "mbean_notifications" => "mbean-notifications",
-                    _ => "probe-events",
+                    _ => "instrumentation",
                 };
                 tokio::runtime::Handle::current()
                     .block_on(async move { crate::live::control(&engine, &s, action, args.clone()).await })

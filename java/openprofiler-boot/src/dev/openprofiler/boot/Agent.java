@@ -44,6 +44,7 @@ public final class Agent {
             return;
         }
         started = true;
+        Probes.init();
         Telemetry.startThread();
     }
 

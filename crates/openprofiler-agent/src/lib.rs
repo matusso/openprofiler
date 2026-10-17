@@ -13,10 +13,13 @@
 
 mod collector;
 mod events;
+#[doc(hidden)]
+pub mod instrument;
 mod java;
 mod jvm;
 mod options;
 mod park;
+mod probes;
 mod recording;
 mod resolve;
 mod sampler;
@@ -114,6 +117,9 @@ const CAP_GROUPS: &[(&str, &[u32])] = &[
     ("monitor_usage", &[CAN_GET_MONITOR_INFO]),
     ("oom", &[CAN_GENERATE_RESOURCE_EXHAUSTION_HEAP_EVENTS, CAN_GENERATE_RESOURCE_EXHAUSTION_THREADS_EVENTS]),
     ("virtual_threads", &[CAN_SUPPORT_VIRTUAL_THREADS]),
+    ("instrument", &[CAN_RETRANSFORM_CLASSES]),
+    ("all_class_hooks", &[CAN_GENERATE_ALL_CLASS_HOOK_EVENTS]),
+    ("retransform_any", &[CAN_RETRANSFORM_ANY_CLASS]),
 ];
 
 fn request_capabilities(jvmti: Jvmti, opts: &Options) -> Vec<String> {
@@ -123,6 +129,7 @@ fn request_capabilities(jvmti: Jvmti, opts: &Options) -> Vec<String> {
         let wanted = match *name {
             "virtual_threads" => opts.vthreads,
             "monitor_usage" => opts.owner_rate > 0,
+            "instrument" | "all_class_hooks" | "retransform_any" => opts.instrumentation,
             _ => true,
         };
         if !wanted || !bits.iter().all(|&b| potential.get(b)) {

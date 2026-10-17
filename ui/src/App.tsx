@@ -20,7 +20,7 @@ import { LocksView } from "./views/LocksView";
 import { MBeansView } from "./views/MBeansView";
 import { MemoryView } from "./views/MemoryView";
 import { OverviewView } from "./views/OverviewView";
-import { Placeholder } from "./views/Placeholder";
+import { ProbesView } from "./views/ProbesView";
 import { ThreadsView } from "./views/ThreadsView";
 import { Welcome } from "./views/Welcome";
 
@@ -204,12 +204,7 @@ function Main() {
     case "compare":
       return <CompareView />;
     case "probes":
-      return (
-        <Placeholder
-          title="Probes"
-          text="JDBC, HTTP, JPA, Kafka and other probes arrive with instrumentation (roadmap phase 3). Their events, hot spots, timelines and control objects will appear here."
-        />
-      );
+      return <ProbesView />;
     case "mbeans":
       return <MBeansView />;
   }

@@ -16,9 +16,11 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Memory** | Allocation call tree and hot spots, live versus collected objects, GC and heap telemetry. |
 | **Heap dumps** | Out-of-core HPROF analysis: dominator tree, retained sizes (identical to Eclipse MAT), biggest objects, references, paths to GC roots, and leak and waste inspections. A 10 GB dump opens in about 25 s cold and under 5 ms warm. |
 | **Threads and locks** | Thread history, states, thread dumps, monitor and `java.util.concurrent` contention with lock owners, virtual threads. |
+| **Probes** | SQL statements with bind parameters, HTTP requests in and out, JPA, Kafka, gRPC, exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools and `CompletableFuture`s. Custom probes with one annotation. |
+| **Exact call counts** | Bytecode instrumentation of the packages you choose: invocation counts and times in the call tree, with auto-tuning of hot, trivial methods. |
 | **Telemetry** | Heap, GC, CPU, threads and classes over time, with a global time range that filters every view. |
 | **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG or collapsed stacks. |
-| **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start or exit. |
+| **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start, exit or when a method is called. |
 | **Remote and containers** | Attach over ssh, `docker exec` and `kubectl exec`, including ephemeral debug containers for distroless images. The agent port is never exposed. (Daemon API today; UI and CLI support planned.) |
 | **Automation** | A CLI, a CI regression gate (`--fail-if "cpu.total > +10%"`), and an MCP server so AI agents can profile and read results. |
 | **Decompiler** | A built-in Java decompiler for Android apps and JVM bytecode: browse an `.apk`, `.dex`, `.jar`, `.war` or `.class` as Java source with a package tree, smali or bytecode view, go to declaration, find usages, name and full-text search, lambdas and records, and decoded `AndroidManifest.xml`, layouts and `resources.arsc`. Classes decompile on demand. |
@@ -91,6 +93,31 @@ without a daemon, use offline mode: `=mode=offline,file=app.oplink`. Options are
 `OPENPROFILER_AGENT_OPTIONS`. See [the agent-link spec](docs/spec/agent-link.md) for all options
 and the trigger file format.
 
+### Probes and exact call counts
+
+Probes are on by default (`probes=jdbc:http_server` picks some, `probes=none` turns them off) and
+work after a dynamic attach too. Exact call counts are opt-in per package:
+
+```sh
+java -agentpath:/path/to/libopenprofiler_agent.so=port=0,instrument=com.acme.*:org.example.* -jar app.jar
+```
+
+In the UI, the **Probes** view shows each probe's hot spots (select a payload for its call tree),
+events with the request they belong to, a timeline, control objects such as open connections
+(with leaks: objects garbage collected without close), and telemetry; for live sessions it also
+edits the instrumented packages and enabled probes. Exact counts are the **Calls** kind of the CPU
+view. To record your own operations, annotate methods with `dev.openprofiler.api.Probe` from
+`openprofiler-api.jar`:
+
+```java
+@Probe(value = "orders", payload = "place order {0}")
+void place(String orderId) { ... }
+```
+
+or call `OpenProfiler.probeEvent("orders", "place order " + id, nanos)`. HTTP and gRPC server
+requests become root frames of the call tree (`[GET /owners/{id}]`), including work they hand to
+executors, fork/join pools, `CompletableFuture`s, new threads and Kotlin coroutines.
+
 ### Decompile Android apps and jars
 
 The decompiler is built in (`crates/openprofiler-dex`, written in Rust; no JVM or external tool
@@ -144,7 +171,7 @@ openprofiler mcp        # MCP server on stdio
 
 Register the command with any MCP client. Tools include `list_jvms`, `attach`, `load_snapshot`,
 `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`, `compare`, `thread_dump`,
-`set_triggers`, the MBean tools (`list_mbean_servers`, `connect_jmx`, `list_mbeans`,
+`set_triggers`, `probes`, `instrumentation`, the MBean tools (`list_mbean_servers`, `connect_jmx`, `list_mbeans`,
 `get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`, `mbean_notifications`), plus
 `decompile`, `search_code` and `find_usages` for apps opened in the decompiler.
 
@@ -241,15 +268,16 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 
 ## Project status
 
-OpenProfiler is in early development. The offline analyzer, the live agent and most of remote
-attach work today. Bytecode instrumentation and probes (JDBC, HTTP, …) have not been started.
+OpenProfiler is in early development. The offline analyzer, the live agent, probes and bytecode
+instrumentation, and most of remote attach work today. The probes for JPA, Kafka, gRPC, Netty,
+OkHttp and Apache HttpClient are not yet tested against those libraries.
 
 | Phase | State |
 |---|---|
 | Foundations | Done |
 | Offline analyzer (HPROF, JFR, UI, CLI, MCP) | Done |
 | Live agent (sampling, allocations, locks, telemetry, dumps, triggers) | Done |
-| Probes and instrumentation | Not started |
+| Probes and instrumentation | Done (library version matrix open) |
 | Remote and cloud | Mostly done |
 | Polish and ecosystem | Partial |
 

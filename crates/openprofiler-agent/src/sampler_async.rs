@@ -737,9 +737,14 @@ fn drain_loop(a: &'static Agent) {
                 };
                 ids.push(c.synthetic_frame(label));
             }
-            let stack = c.stacks.intern_leaf_first(&ids);
             // CPU used while a virtual thread is mounted belongs to the virtual thread.
             let thread = if vthread > 0 { vthread - 1 } else { thread };
+            if n > 0
+                && let Some(label) = crate::probes::label_frame_of(thread)
+            {
+                ids.push(label);
+            }
+            let stack = c.stacks.intern_leaf_first(&ids);
             c.add_sample(time, SampleKind::Cpu, thread, ThreadState::Runnable, stack, weight, None);
         }
         c.dropped_samples = DROPPED.load(Ordering::Relaxed);

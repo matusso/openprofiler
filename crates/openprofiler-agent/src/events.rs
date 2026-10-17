@@ -47,6 +47,7 @@ pub fn install(a: &Agent) -> JResult<()> {
         MonitorWaited: Some(monitor_waited),
         ResourceExhausted: Some(resource_exhausted),
         VirtualThreadEnd: Some(crate::vthreads::virtual_thread_end),
+        ClassFileLoadHook: Some(crate::instrument::class_file_load_hook),
         ..Default::default()
     };
     a.jvmti.set_callbacks(&cb)?;
@@ -74,6 +75,9 @@ pub fn install(a: &Agent) -> JResult<()> {
     }
     if has_cap(a, "virtual_threads") && !crate::vthreads::install(a) {
         a.caps.lock().retain(|c| c != "virtual_threads");
+    }
+    if !crate::instrument::install(a) {
+        a.caps.lock().retain(|c| !matches!(c.as_str(), "instrument" | "all_class_hooks" | "retransform_any"));
     }
     Ok(())
 }
@@ -111,6 +115,8 @@ pub fn set_recording(a: &Agent, kind: &str, on: bool, interval_us: u32) {
             a.monitor_on.store(on, Ordering::SeqCst);
             set_monitor_events(a, on);
         }
+        "calls" => crate::instrument::calls::ON.store(on, Ordering::SeqCst),
+        "probes" => crate::probes::ON.store(on, Ordering::SeqCst),
         _ => debug(&format!("ignoring recording toggle {kind}")),
     }
 }
@@ -122,6 +128,12 @@ pub fn on_live(a: &'static Agent, jni: *mut JNIEnv) {
     }
     match crate::java::init(jni) {
         Ok(h) => {
+            if has_cap(a, "instrument") {
+                crate::instrument::init_live(jni);
+                if crate::probes::bind(jni) {
+                    a.caps.lock().push("probes".into());
+                }
+            }
             *a.jvm_info.lock() = h.jvm_info(jni);
             let _ = a.java.set(h);
             if let Some(h) = a.java.get() {
@@ -252,6 +264,10 @@ pub fn capture_stack(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Option<u32
             .iter()
             .map(|f| c.resolver.frame(a.jvmti, &mut c.symbols, f.method, f.location, FrameKind::Unknown))
             .collect();
+        let mut ids = ids;
+        if let Some(label) = crate::probes::current_label_frame() {
+            ids.push(label);
+        }
         c.stacks.intern_leaf_first(&ids)
     };
     jni!(jni, PopLocalFrame, ptr::null_mut());
@@ -301,6 +317,7 @@ unsafe extern "C" fn thread_start(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, threa
 
 unsafe extern "C" fn thread_end(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, thread: jthread) {
     let Some(a) = agent() else { return };
+    crate::instrument::calls::flush_current();
     #[cfg(target_os = "linux")]
     crate::sampler_async::on_thread_end();
     if let Some(idx) = thread_index(a, jni, thread) {
@@ -310,14 +327,12 @@ unsafe extern "C" fn thread_end(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, thread:
 
 unsafe extern "C" fn class_load(_jvmti: *mut jvmtiEnv, _jni: *mut JNIEnv, _thread: jthread, _klass: jclass) {}
 
-unsafe extern "C" fn class_prepare(
-    _jvmti: *mut jvmtiEnv,
-    _jni: *mut JNIEnv,
-    _thread: jthread,
-    klass: jclass,
-) {
+unsafe extern "C" fn class_prepare(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, _thread: jthread, klass: jclass) {
     if let Some(a) = agent() {
-        load_methods(a, klass);
+        if a.async_possible() {
+            load_methods(a, klass);
+        }
+        crate::instrument::on_class_prepare(a, jni, klass);
     }
 }
 

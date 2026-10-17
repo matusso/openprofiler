@@ -9,6 +9,12 @@ export type Capability =
   | "wait"
   | "io"
   | "exception"
+  | "calls"
+  | "probe"
+  /** Probe data exists, or the live agent has probes. */
+  | "probes"
+  /** The live agent can instrument classes (Instrumentation panel). */
+  | "instrument"
   | "telemetry"
   | "threads"
   | "heap"
@@ -119,7 +125,18 @@ export interface TelemetryResponse {
   bookmarks: BookmarkDto[];
 }
 
-export type TreeKind = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception";
+export type TreeKind =
+  | "cpu"
+  | "wall"
+  | "alloc"
+  | "monitor"
+  | "wait"
+  | "io"
+  | "exception"
+  /** Exact instrumented calls: weight = self nanoseconds, count = invocations. */
+  | "calls"
+  /** Probe calls: weight = nanoseconds; filter.classes selects payloads. */
+  | "probe";
 export type ThreadStateName = "runnable" | "waiting" | "blocked" | "net_io" | "sleeping" | "unknown";
 export type Aggregation = "method" | "class" | "package";
 
@@ -657,4 +674,95 @@ export interface FsListing {
   home?: string | null;
   entries: FsEntry[];
   truncated: boolean;
+}
+
+// Probes
+
+export type ProbeView = "list" | "hotspots" | "events" | "timeline" | "telemetry" | "controls";
+
+export interface ProbesRequest {
+  probe?: string;
+  view: ProbeView;
+  range?: [number, number];
+  payload?: string;
+  search?: string;
+  errors_only?: boolean;
+  limit?: number;
+  open_threshold_ms?: number;
+}
+
+export interface ProbeSummary {
+  id: string;
+  name: string;
+  payload_label: string;
+  control_label: string | null;
+  calls: number;
+  total: number;
+  errors: number;
+  payloads: number;
+  events: number;
+  open_controls: number;
+  leaked_controls: number;
+}
+
+export interface ProbeHotspot {
+  payload: string;
+  calls: number;
+  total: number;
+  mean: number;
+  max: number;
+  errors: number;
+  threads: number;
+}
+
+export interface ProbeEventDto {
+  start: number;
+  duration: number;
+  payload: string;
+  thread: string;
+  error: string | null;
+  detail: string | null;
+  context: string | null;
+  control: number | null;
+  top_frame: string;
+}
+
+export interface ProbeLane {
+  probe: string;
+  name: string;
+  time: number[];
+  calls: number[];
+  duration: number[];
+  errors: number[];
+}
+
+export interface ProbeSeries {
+  key: string;
+  label: string;
+  unit: Unit;
+  time: number[];
+  value: number[];
+}
+
+export type ControlState = "open" | "long_open" | "closed" | "leaked";
+
+export interface ControlObjectDto {
+  id: number;
+  description: string;
+  opened: number;
+  closed: number | null;
+  open_for: number;
+  thread: string;
+  top_frame: string;
+  state: ControlState;
+}
+
+export interface InstrumentationInfo {
+  include: string[];
+  exclude: string[];
+  available_probes: { id: string; name: string; payload_label: string; control_label: string | null }[];
+  enabled_probes: string[];
+  instrumented_classes: number;
+  instrumented_methods: number;
+  disabled_methods: string[];
 }

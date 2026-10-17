@@ -47,8 +47,9 @@ type FsListing = { path: string; parent?: string; home?: string; entries: FsEntr
 ```ts
 type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
 type Capability = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception"
+                | "calls" | "probe"
                 | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording"
-                | "decompile" | "mbeans";
+                | "decompile" | "mbeans" | "probes" | "instrument";
 interface Session {
   id: string; kind: SessionKind; name: string; path?: string;
   state: "loading" | "ready" | "live" | "detached" | "failed";
@@ -98,7 +99,7 @@ Well-known keys: `heap.used`, `heap.committed`, `heap.max`, `nonheap.used`, `gc.
 
 ```ts
 interface TreeRequest {
-  kind: "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception";
+  kind: "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception" | "calls" | "probe";
   view: "calltree" | "backtraces";       // backtraces = inverted (hot spots are its roots)
   filter?: Filter;
   aggregation?: "method" | "class" | "package";
@@ -162,6 +163,39 @@ returned.
   one (live only).
 - `POST /api/v1/sessions/{id}/monitors` `{ range?, view: "events" | "stats" }` → events or
   per-monitor-class stats `{ monitor_class, count, total_duration, max_duration }[]`.
+
+## Probes
+
+Kind `calls` trees are exact instrumented call counts (weight = self nanoseconds, `count` =
+invocations). Kind `probe` trees are probe calls (weight = nanoseconds, `count` = calls); filter
+them with `filter.classes = [payload]` for the call tree or back traces of one SQL statement or URL.
+
+`POST /api/v1/sessions/{id}/probes` (live sessions and snapshots):
+
+```ts
+interface ProbesRequest {
+  view: "list" | "hotspots" | "events" | "timeline" | "telemetry" | "controls";
+  probe?: string;              // probe id; required except for list and timeline
+  range?: [number, number];
+  payload?: string;            // events: only this payload
+  search?: string;             // events, hotspots: payloads containing this (case-insensitive)
+  errors_only?: boolean;       // events
+  limit?: number;              // default 1000
+  open_threshold_ms?: number;  // controls: flag objects open longer than this (default 60000)
+}
+```
+
+| view | response |
+|---|---|
+| `list` | `{ probes: { id, name, payload_label, control_label?, calls, total, errors, payloads, events, open_controls, leaked_controls }[] }` |
+| `hotspots` | `{ total, hotspots: { payload, calls, total, mean, max, errors, threads }[] }` by total time |
+| `events` | `{ events: { start, duration, payload, thread, error?, detail?, context?, control?, top_frame }[] }` |
+| `timeline` | `{ lanes: { probe, name, time[], calls[], duration[], errors[] }[] }` per second |
+| `telemetry` | `{ series: TelemetrySeries[] }`: `calls` (per second) and `mean` (nanoseconds) |
+| `controls` | `{ controls: { id, description, opened, closed?, open_for, thread, top_frame, state: "open" \| "long_open" \| "closed" \| "leaked" }[] }` |
+
+`context` is the request the call was made for (`GET /owners/{id}`), also across threads.
+`leaked` control objects were garbage collected without being closed.
 
 ## Heap
 
@@ -281,13 +315,20 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 
 ## Live control (live sessions)
 
-- `POST .../recording` `{ kind: "cpu"|"alloc"|"monitor"|"telemetry", enabled: boolean, interval_ms? }`
+- `POST .../recording` `{ kind: "cpu"|"alloc"|"monitor"|"telemetry"|"calls"|"probes", enabled: boolean, interval_ms? }`
 - `POST .../heap-dump` → creates a new `hprof` session from a dump streamed back by the agent.
 - `POST .../snapshot` `{ path }` → writes a `.opsnap` file.
 - `POST .../bookmark` `{ label }`
 - `POST .../gc` → runs a full GC.
 - `POST .../triggers` `{ triggers: Trigger[] }` → replaces the agent's triggers (format in
   [agent-link.md](agent-link.md#triggers)); returns `{ installed }`.
+- `GET .../instrumentation` → the agent's instrumentation settings; `POST` with
+  `{ include?: string[], exclude?: string[], probes?: string[] }` replaces them (class patterns
+  such as `com.acme.*` get exact call counts; `probes` empty = all, `["none"]` = none) and
+  retransforms affected classes. Both return `{ include, exclude, available_probes: { id, name,
+  payload_label, control_label? }[], enabled_probes, instrumented_classes, instrumented_methods,
+  disabled_methods }` (`disabled_methods`: removed by auto-tuning). Needs the `instrument`
+  capability.
 
 ## MBeans (live sessions with the `mbeans` capability)
 

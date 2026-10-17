@@ -32,7 +32,7 @@ NetBeans plugins.
 |---|---|---|
 | In-JVM native agent | **Rust** `cdylib` with hand-written JVMTI bindings (`jvmti-sys`) | No runtime and no GC, signal-safe code, and static musl builds are possible. |
 | In-JVM Java shim | Java 11 bytecode on the boot class path | Probe logic must touch application objects. Static callees keep the hot path cheap. |
-| Bytecode rewriting | **First:** ASM inside the shim. **Later:** a Rust classfile rewriter in ClassFileLoadHook. | ASM gets correct StackMapTables quickly. The Rust rewriter avoids class-loading recursion at boot. |
+| Bytecode rewriting | A Rust class-file rewriter in `ClassFileLoadHook` (`openprofiler-agent/src/instrument`) | No Java runs while a class loads (no class-loading recursion, no ASM dependency in the boot classes); injected code never changes the types at existing frames, so `StackMapTable`s are remapped rather than recomputed. |
 | Analysis engines | **Rust** (`rayon`, `memmap2`, `zstd`, `prost`) | Heap graphs with over 100M nodes, tree aggregation, diffs. |
 | Daemon / query server | Rust (`tokio`, `axum` HTTP + WebSocket) | One process serves the desktop UI, the web UI, the CLI and MCP. |
 | UI | **Tauri 2 + React + TypeScript**, canvas renderers | A native desktop shell, and the same UI works in a browser. |
@@ -81,7 +81,7 @@ Design principles:
 ```
 crates/
   jvmti-sys/               JVMTI/JNI bindings with version-sized callback structs
-  openprofiler-agent/      cdylib: Agent_OnLoad/OnAttach, samplers, events, triggers, agent-link server
+  openprofiler-agent/      cdylib: Agent_OnLoad/OnAttach, samplers, events, triggers, instrumentation, agent-link server
   openprofiler-proto/      protobuf schemas (agent-link, triggers)
   openprofiler-model/      symbols, stack trie, samples; call tree, hot spots, flame, call graph, diff
   openprofiler-snapshot/   .opsnap container read/write
@@ -95,8 +95,8 @@ crates/
   openprofiler-dex/        DEX/APK and class-file/JAR readers, smali and bytecode views, decompiler
   openprofiler-daemon/     Query API server, sessions, exporters, insights, MCP, IDE bridge
   openprofiler-cli/        the `openprofiler` binary
-java/openprofiler-boot/    boot classes: telemetry sampler, dumps, Controller
-java/openprofiler-api/     public Controller API
+java/openprofiler-boot/    boot classes: telemetry sampler, dumps, Controller, probe SPI and probes
+java/openprofiler-api/     public Controller API and the @Probe annotation
 ui/                        React UI and Tauri desktop shell
 ide/intellij/              IntelliJ IDEA plugin
 ide/vscode/                VS Code / VSCodium extension
@@ -134,6 +134,31 @@ dumper that writes directly into a snapshot is planned.
 **Telemetry:** a once-per-second sampler in the boot classes (MXBeans and GC notifications) pushes
 compact records into a native time-series ring.
 
+**Instrumentation** (`instrument/`): `ClassFileLoadHook` rewrites classes as they load or are
+retransformed. A method gets an entry sequence, an exit sequence before every return and a
+catch-all handler that runs the exit hooks for exceptions and rethrows (in constructors only after
+the `super(...)` call, since a handler cannot cover uninitialized `this`). Branch offsets, switch
+padding, the exception table, line and local-variable tables and `StackMapTable` frames (including
+`Uninitialized` offsets) are remapped; the handler's frame has no locals, which is valid at every
+instruction it covers. Methods with `jsr`/`ret`, overflowing branches or code over 64 KB are left
+alone. What gets injected:
+- *Call counting* for classes matching `instrument=` patterns: native `Hooks.callEnter/callExit`
+  keep a per-thread shadow stack and call trie in native thread-local storage, flushed about once a
+  second as `calls` samples (self time, invocations), so the existing tree, hot spot and flame
+  views show exact counts. Auto-tuning removes hot methods whose self time is close to the hook
+  overhead (at least 50,000 calls in 5 s, mean self time under 400 ns).
+- *Probe interceptions* (`Hooks.enter/exit/exitThrow` with `this`, boxed arguments and the return
+  value), *custom probes* (`@Probe` methods) and *method triggers* (`Hooks.trigger`).
+
+Interceptions match one class or every subtype of a class or interface. The hook sees supertypes
+only by name, and a class loads before its supertypes, so subtype masks are completed at
+`ClassPrepare` and late matches are retransformed. Instrumented classes in named (JDK) modules get
+a reads edge to the boot loader's unnamed module before their code runs. Classes loaded earlier
+(bootstrap classes; everything on dynamic attach) are found by scanning the loaded classes
+(subtypes through `IsAssignableFrom`) and retransformed. `SetInstrumentation` changes the patterns
+and probes at run time. The rewriter is checked by rewriting a javac corpus with every hook and
+running it under the verifier (`tests/rewrite.rs`).
+
 **Offline mode:** writes an `.oplink` recording locally on triggers or at exit, using the same code
 that serves live sessions.
 
@@ -141,11 +166,29 @@ that serves live sessions.
 
 - Static callee classes. The hot path is a static flag check followed by a JNI call.
 - Public API (`openprofiler-api`): `OpenProfiler.startCpuRecording()`, `saveSnapshot(path)`,
-  `bookmark(text)`, and later a custom-probe API.
-- Planned for probes: a `Probe` SPI with interceptions, `onEnter`/`onExit`, and emitters for
-  payloads, events, control objects and telemetry. Library-specific helpers are defined into the
-  application's class loader, sharded by library version. A context-propagation layer covers
-  executors, `CompletableFuture`, Reactor, Kotlin coroutines and virtual threads.
+  `bookmark(text)`, `probeEvent(probe, payload, duration)`, and the `@Probe(value, payload)`
+  annotation that turns a method into a custom probe (payload templates `{0}`, `{this}`). The API
+  looks for the agent again while it is absent, so it also works after a dynamic attach.
+- **Probe SPI** (`Probe`, `Interception`, `Call`): a probe lists its interceptions (a method of a
+  class or of all its subtypes, optionally with boxed arguments or exit-only for constructors) and
+  fills a `Call` in `onEnter`/`onExit` (payload, detail, error, control object). Emitters open and
+  close control objects (tracked in weak identity maps, so objects collected without close are
+  reported) and set the thread's request label. The runtime (`Probes`) guards against re-entrancy,
+  records only the outermost of nested calls of one probe, drops calls whose exit was missed, and
+  never throws into application code. Probes reach library objects reflectively through public
+  supertypes (`Reflect`), cached per class with `ClassValue`, so no helper classes have to be
+  defined into application class loaders.
+- Probes: JDBC (SQL, bind parameters, physical and pooled connections), JPA (javax and Jakarta),
+  HTTP server (Servlet, JDK `HttpServer`, Netty handlers) and client (JDK `HttpClient`,
+  `HttpURLConnection`, OkHttp, Apache HttpClient 4/5), Kafka, gRPC, exceptions, files, sockets.
+  The native side aggregates every call per second, payload and stack, and keeps individual events
+  within a per-probe budget (slow calls always).
+- **Request labels and async context.** HTTP and gRPC server probes set the thread's request label
+  (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
+  stacks (call trees split by request) and the context of its probe events. An internal probe
+  carries the label across `FutureTask`, `ForkJoinTask` (`CompletableFuture`, parallel streams),
+  `ThreadPoolExecutor.execute`, `Thread.start` (also virtual threads) and Kotlin coroutine
+  dispatch.
 
 ### 3.4 Agent-link protocol
 
@@ -212,7 +255,7 @@ across all indexes, on disk and mmap'd.
 
 ### 3.10 UI
 
-- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Events, MBeans, Code, Compare), a top
+- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Probes, Events, MBeans, Code, Compare), a top
   session bar with recording controls and a timeline scrubber, and an inspector panel.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
@@ -220,6 +263,11 @@ across all indexes, on disk and mmap'd.
   tab shows decoded resources (or a jar's other files).
 - The Open dialog takes a path on the daemon's machine, recent paths, and a file browser over that
   machine's directories (`/fs/list`); on the desktop also the system file dialog.
+- The Probes view: probes with totals; per probe, payload hot spots (selecting one shows its back
+  traces and call tree), an events table (filter, errors only, request context), a timeline lane
+  per probe, control objects with leak flags, and probe telemetry (calls per second, mean time).
+  Live sessions edit the instrumentation (call-count patterns, enabled probes) there. Exact call
+  counts appear as the `Calls` kind of the CPU views.
 - The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
   in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
   (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
@@ -237,7 +285,8 @@ across all indexes, on disk and mmap'd.
   `prepare_profiling`, `load_snapshot`, `hotspots`, `expand`, `heap_dump`, `heap_data`, `insights`,
   `compare`, `thread_dump` and the MBean tools (`list_mbean_servers`, `connect_jmx`,
   `list_mbeans`, `get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`,
-  `mbean_notifications`); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
+  `mbean_notifications`), `probes` (list, hot spots, events, control objects, timeline, telemetry)
+  and `instrumentation`; `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge
@@ -362,9 +411,9 @@ same calls.
 | 0 Foundations | Workspace, CI, JVMTI bindings, protobuf specs, `.opsnap` spec | Done |
 | 1 Offline analyzer | HPROF/heap engine, JFR import, Query API, UI, CLI, MCP | Done |
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
-| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes | Not started |
+| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes | Done; version-matrix tests against real libraries open (#38) |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, web mode, CI gate | Mostly done |
-| 5 Polish and ecosystem | Native classfile rewriter, native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
+| 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
 
@@ -384,7 +433,7 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 |---|---|
 | `AsyncGetCallTrace` instability or removal | The sampler is abstracted; sync and JFR back ends exist or are planned. Track the JDK CPU-time JFR sampler (JDK 25+). |
 | VMStructs fragility across JDK builds | Used only as an optional guard; feature-detected and disabled gracefully. JDK matrix in CI. |
-| Bytecode instrumentation correctness | Start with ASM (`COMPUTE_FRAMES` with a class-loader-aware `getCommonSuperClass`); fuzz with the JDK class corpus; verify with `-Xverify`; skip methods over 64 KB. |
+| Bytecode instrumentation correctness | Injected code keeps the types at existing frames, so frames are remapped, not recomputed; a corpus test rewrites javac output with every hook and runs it under the verifier; methods with `jsr`/`ret`, overflowing branches or over 64 KB are skipped. |
 | Probe breadth across library versions | Probe SPI, a version-matrix harness with Testcontainers, prioritise by usage. |
 | Memory on huge heap dumps | Out-of-core design, disk-backed CSR, benchmark gates. |
 | Signal handler conflicts | Chain prior handlers, make the signal configurable, detect other profilers and warn. |

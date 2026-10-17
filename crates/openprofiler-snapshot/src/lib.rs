@@ -44,6 +44,7 @@ pub enum SectionKind {
     HeapDump = 12,
     Config = 13,
     Extension = 14,
+    Probes = 15,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +409,66 @@ impl SnapshotReader {
                 })
                 .collect();
         }
+        if let Some(pr) = self.one::<pb::Probes>(SectionKind::Probes)? {
+            p.probes.probes = pr
+                .probes
+                .into_iter()
+                .map(|i| ProbeInfo {
+                    id: i.id,
+                    name: i.name,
+                    payload_label: i.payload_label,
+                    control_label: i.control_label,
+                })
+                .collect();
+            if let Some(c) = pr.calls {
+                let mut t = 0i64;
+                for i in 0..c.probe.len() {
+                    t += c.time_delta.get(i).copied().unwrap_or(0);
+                    let at = |v: &Vec<u32>| v.get(i).copied().unwrap_or(0);
+                    let at64 = |v: &Vec<i64>| v.get(i).copied().unwrap_or(0);
+                    p.push_probe_call(ProbeCall {
+                        time: t,
+                        probe: c.probe[i],
+                        payload: at(&c.payload),
+                        thread: at(&c.thread),
+                        stack: at(&c.stack),
+                        count: at(&c.count),
+                        duration: at64(&c.duration),
+                        max: at64(&c.max),
+                        errors: at(&c.errors),
+                    });
+                }
+            }
+            p.probes.events = pr
+                .events
+                .into_iter()
+                .map(|e| ProbeEvent {
+                    start: e.start,
+                    duration: e.duration,
+                    probe: e.probe,
+                    payload: e.payload,
+                    thread: e.thread,
+                    stack: e.stack,
+                    error: e.error,
+                    control: e.control,
+                    detail: e.detail,
+                    context: e.context,
+                })
+                .collect();
+            p.probes.controls = pr
+                .controls
+                .into_iter()
+                .map(|c| ControlEvent {
+                    time: c.time,
+                    probe: c.probe,
+                    id: c.id,
+                    kind: if c.kind == 1 { ControlEventKind::Close } else { ControlEventKind::Open },
+                    description: c.description,
+                    thread: c.thread,
+                    stack: c.stack,
+                })
+                .collect();
+        }
         if let Some(b) = self.one::<pb::Bookmarks>(SectionKind::Bookmarks)? {
             p.bookmarks = b
                 .bookmarks
@@ -596,6 +657,9 @@ pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()>
         &pb::Stacks { parent: parent[1..].to_vec(), frame: frame[1..].to_vec() },
     )?;
     for (kind, s) in &p.samples {
+        if *kind == SampleKind::Probe {
+            continue;
+        }
         let all_one = s.count.iter().all(|&c| c == 1);
         let no_class = s.class.iter().all(|&c| c == u32::MAX);
         w.message(
@@ -706,6 +770,68 @@ pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()>
                 .collect(),
         },
     )?;
+    if !p.probes.probes.is_empty() {
+        let pr = &p.probes;
+        w.message(
+            SectionKind::Probes,
+            "probes",
+            &pb::Probes {
+                probes: pr
+                    .probes
+                    .iter()
+                    .map(|i| pb::ProbeInfo {
+                        id: i.id.clone(),
+                        name: i.name.clone(),
+                        payload_label: i.payload_label.clone(),
+                        control_label: i.control_label.clone(),
+                    })
+                    .collect(),
+                calls: Some(pb::ProbeCalls {
+                    time_delta: deltas(pr.calls.iter().map(|c| c.time)),
+                    probe: pr.calls.iter().map(|c| c.probe).collect(),
+                    payload: pr.calls.iter().map(|c| c.payload).collect(),
+                    thread: pr.calls.iter().map(|c| c.thread).collect(),
+                    stack: pr.calls.iter().map(|c| c.stack).collect(),
+                    count: pr.calls.iter().map(|c| c.count).collect(),
+                    duration: pr.calls.iter().map(|c| c.duration).collect(),
+                    max: pr.calls.iter().map(|c| c.max).collect(),
+                    errors: pr.calls.iter().map(|c| c.errors).collect(),
+                }),
+                events: pr
+                    .events
+                    .iter()
+                    .map(|e| pb::ProbeEvent {
+                        start: e.start,
+                        duration: e.duration,
+                        probe: e.probe,
+                        payload: e.payload,
+                        thread: e.thread,
+                        stack: e.stack,
+                        error: e.error.clone(),
+                        control: e.control,
+                        detail: e.detail.clone(),
+                        context: e.context.clone(),
+                    })
+                    .collect(),
+                controls: pr
+                    .controls
+                    .iter()
+                    .map(|c| pb::ControlEvent {
+                        time: c.time,
+                        probe: c.probe,
+                        id: c.id,
+                        kind: match c.kind {
+                            ControlEventKind::Open => 0,
+                            ControlEventKind::Close => 1,
+                        },
+                        description: c.description.clone(),
+                        thread: c.thread,
+                        stack: c.stack,
+                    })
+                    .collect(),
+            },
+        )?;
+    }
     w.message(
         SectionKind::Bookmarks,
         "bookmarks",
@@ -816,6 +942,45 @@ mod tests {
             stack: st,
         });
         p.bookmarks.push(Bookmark { time: 4, label: "b".into(), color: None });
+        let sql = p.symbols.intern_str("SELECT 1");
+        p.probes.probes.push(ProbeInfo {
+            id: "jdbc".into(),
+            name: "JDBC".into(),
+            payload_label: "SQL statement".into(),
+            control_label: Some("Connection".into()),
+        });
+        p.push_probe_call(ProbeCall {
+            time: 1_000_000_000,
+            probe: 0,
+            payload: sql,
+            thread: t,
+            stack: st,
+            count: 3,
+            duration: 300,
+            max: 200,
+            errors: 1,
+        });
+        p.probes.events.push(ProbeEvent {
+            start: 7,
+            duration: 200,
+            probe: 0,
+            payload: sql,
+            thread: t,
+            stack: st,
+            error: Some("java.sql.SQLException: x".into()),
+            control: Some(4),
+            detail: None,
+            context: Some("GET /a".into()),
+        });
+        p.probes.controls.push(ControlEvent {
+            time: 6,
+            probe: 0,
+            id: 4,
+            kind: ControlEventKind::Open,
+            description: "jdbc:h2:mem".into(),
+            thread: t,
+            stack: st,
+        });
         p.thread_dumps.push(ThreadDump {
             time: 5,
             label: "d".into(),
@@ -850,6 +1015,11 @@ mod tests {
         assert_eq!(q.monitors, p.monitors);
         assert_eq!(q.bookmarks, p.bookmarks);
         assert_eq!(q.thread_dumps, p.thread_dumps);
+        assert_eq!(q.probes.probes, p.probes.probes);
+        assert_eq!(q.probes.calls, p.probes.calls);
+        assert_eq!(q.probes.events, p.probes.events);
+        assert_eq!(q.probes.controls, p.probes.controls);
+        assert_eq!(q.samples[&SampleKind::Probe].weight, vec![300]);
         let out = dir.path().join("out.hprof");
         assert!(SnapshotReader::open(&path).unwrap().extract_heap(&out).unwrap());
         assert_eq!(std::fs::read(&out).unwrap(), heap_bytes);

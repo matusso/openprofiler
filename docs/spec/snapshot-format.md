@@ -43,7 +43,7 @@ checksum of the stored payload. Readers must verify the checksum.
 | 1 | Meta | `Meta`: source, JVM info, time range, CPU sampling interval, properties |
 | 2 | Symbols | `Symbols`: string table plus columnar method table (class, name, descriptor string ids) and frame table (method, line, kind) |
 | 3 | Stacks | `Stacks`: prefix-trie nodes. Node `i+1` = (`parent[i]`, `frame[i]`), node 0 is the empty stack |
-| 4 | Samples | `Samples`: one section per sample kind (cpu, wall, alloc, monitor, wait, io, exception), columnar, time delta-encoded |
+| 4 | Samples | `Samples`: one section per sample kind (cpu, wall, alloc, monitor, wait, io, exception, calls), columnar, time delta-encoded. Kind 8 (probe) is not stored; readers derive it from the Probes section |
 | 5 | Threads | `Threads` |
 | 6 | ThreadStates | `ThreadStates`: state intervals, columnar |
 | 7 | Telemetry | `Telemetry`: named series (`heap.used`, `cpu.process`, …), time delta-encoded |
@@ -54,6 +54,7 @@ checksum of the stored payload. Readers must verify the checksum.
 | 12 | HeapDump | Raw HPROF, codec 2 |
 | 13 | Config | Reserved: recording configuration |
 | 14 | Extension | Reserved: vendor or plugin data, identified by the index entry `name` |
+| 15 | Probes | `Probes`: registered probes, aggregated probe calls (columnar, time delta-encoded, payloads are string ids), probe events and control-object events |
 
 Unknown section kinds must be ignored.
 

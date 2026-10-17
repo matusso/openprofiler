@@ -54,6 +54,29 @@ struct SampleRow {
     class: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ProbeKey {
+    second: i64,
+    probe: u32,
+    payload: u32,
+    thread: u32,
+    stack: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProbeAgg {
+    count: u32,
+    duration: Nanos,
+    max: Nanos,
+    errors: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProbeCallRow {
+    key: ProbeKey,
+    agg: ProbeAgg,
+}
+
 #[derive(Debug, Clone)]
 pub struct MonitorRow {
     pub start: Nanos,
@@ -114,6 +137,11 @@ pub struct Collector {
     gc: Table<GcEvent>,
     bookmarks: Table<Bookmark>,
     thread_dumps: Table<v1::ThreadDump>,
+    probes: Vec<v1::ProbeInfo>,
+    probe_pending: HashMap<ProbeKey, ProbeAgg>,
+    probe_calls: Table<ProbeCallRow>,
+    probe_events: Table<v1::ProbeEvent>,
+    probe_controls: Table<v1::ControlEvent>,
     seq: u64,
     /// Whether acknowledged rows may be dropped.
     pub live: bool,
@@ -146,6 +174,11 @@ impl Collector {
             gc: Table::default(),
             bookmarks: Table::default(),
             thread_dumps: Table::default(),
+            probes: vec![],
+            probe_pending: HashMap::new(),
+            probe_calls: Table::default(),
+            probe_events: Table::default(),
+            probe_controls: Table::default(),
             seq: 0,
             live,
             last_span_cut: 0,
@@ -249,6 +282,66 @@ impl Collector {
         e.1 += 1;
     }
 
+    /// Adds `count` samples with a total `weight` at once (instrumented call counts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_samples(
+        &mut self,
+        time: Nanos,
+        kind: SampleKind,
+        thread: u32,
+        state: ThreadState,
+        stack: u32,
+        weight: u64,
+        count: u32,
+    ) {
+        let key =
+            BucketKey { second: time.div_euclid(NANOS_PER_SEC), kind, thread, state, stack, class: u32::MAX };
+        let e = self.pending.entry(key).or_insert((0, 0));
+        e.0 += weight;
+        e.1 += count;
+    }
+
+    /// Registers a probe; returns its index.
+    pub fn add_probe(&mut self, info: v1::ProbeInfo) -> u32 {
+        if let Some(i) = self.probes.iter().position(|p| p.id == info.id) {
+            return i as u32;
+        }
+        self.probes.push(info);
+        (self.probes.len() - 1) as u32
+    }
+
+    pub fn probe_infos(&self) -> &[v1::ProbeInfo] {
+        &self.probes
+    }
+
+    /// Aggregates one probe call into its one-second bucket.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_probe_call(
+        &mut self,
+        start: Nanos,
+        probe: u32,
+        payload: u32,
+        thread: u32,
+        stack: u32,
+        duration: Nanos,
+        error: bool,
+    ) {
+        let key = ProbeKey { second: start.div_euclid(NANOS_PER_SEC), probe, payload, thread, stack };
+        let a = self.probe_pending.entry(key).or_default();
+        a.count += 1;
+        a.duration += duration;
+        a.max = a.max.max(duration);
+        a.errors += error as u32;
+    }
+
+    pub fn add_probe_event(&mut self, ev: v1::ProbeEvent) {
+        self.probe_events.rows.push(ev);
+    }
+
+    pub fn add_control_event(&mut self, ev: v1::ControlEvent) {
+        self.probe_controls.rows.push(ev);
+    }
+
     /// Interns a synthetic frame such as `[GC active]`.
     pub fn synthetic_frame(&mut self, label: &str) -> u32 {
         let m = self.symbols.intern_method("", label, "");
@@ -288,10 +381,15 @@ impl Collector {
     }
 
     pub fn sample_rows(&self) -> usize {
-        self.samples.rows.len() + self.pending.len()
+        self.samples.rows.len() + self.pending.len() + self.probe_calls.rows.len() + self.probe_pending.len()
     }
 
     fn flush_pending(&mut self) {
+        if !self.probe_pending.is_empty() {
+            let mut rows: Vec<_> = self.probe_pending.drain().collect();
+            rows.sort_unstable_by_key(|(k, _)| (k.second, k.probe, k.thread, k.stack, k.payload));
+            self.probe_calls.rows.extend(rows.into_iter().map(|(key, agg)| ProbeCallRow { key, agg }));
+        }
         if self.pending.is_empty() {
             return;
         }
@@ -341,6 +439,10 @@ impl Collector {
             bookmarks: self.bookmarks.end(),
             seq: self.seq,
             thread_dumps: self.thread_dumps.end(),
+            probes: self.probes.len() as u64,
+            probe_calls: self.probe_calls.end(),
+            probe_events: self.probe_events.end(),
+            probe_controls: self.probe_controls.end(),
         }
     }
 
@@ -354,6 +456,9 @@ impl Collector {
             gc: self.gc.base,
             bookmarks: self.bookmarks.base,
             thread_dumps: self.thread_dumps.base,
+            probe_calls: self.probe_calls.base,
+            probe_events: self.probe_events.base,
+            probe_controls: self.probe_controls.base,
             ..Default::default()
         }
     }
@@ -376,6 +481,10 @@ impl Collector {
             bookmarks: w.bookmarks.clamp(r.bookmarks, e.bookmarks),
             seq: w.seq,
             thread_dumps: w.thread_dumps.clamp(r.thread_dumps, e.thread_dumps),
+            probes: w.probes.min(e.probes),
+            probe_calls: w.probe_calls.clamp(r.probe_calls, e.probe_calls),
+            probe_events: w.probe_events.clamp(r.probe_events, e.probe_events),
+            probe_controls: w.probe_controls.clamp(r.probe_controls, e.probe_controls),
         }
     }
 
@@ -541,6 +650,18 @@ impl Collector {
                 color: b.color.clone().unwrap_or_default(),
             })
             .collect();
+        let mut probe_calls = v1::ProbeCallBatch::default();
+        for r in self.probe_calls.since(from.probe_calls) {
+            probe_calls.time.push(r.key.second * NANOS_PER_SEC);
+            probe_calls.probe.push(r.key.probe);
+            probe_calls.payload.push(r.key.payload);
+            probe_calls.thread.push(r.key.thread);
+            probe_calls.stack.push(r.key.stack);
+            probe_calls.count.push(r.agg.count);
+            probe_calls.duration.push(r.agg.duration);
+            probe_calls.max.push(r.agg.max);
+            probe_calls.errors.push(r.agg.errors);
+        }
         Some(v1::DataBatch {
             from: Some(from),
             to: Some(to),
@@ -555,6 +676,10 @@ impl Collector {
             bookmarks,
             time: now,
             thread_dumps: self.thread_dumps.since(from.thread_dumps).to_vec(),
+            probes: self.probes.get(from.probes as usize..).unwrap_or_default().to_vec(),
+            probe_calls: Some(probe_calls),
+            probe_events: self.probe_events.since(from.probe_events).to_vec(),
+            probe_controls: self.probe_controls.since(from.probe_controls).to_vec(),
         })
     }
 
@@ -574,6 +699,15 @@ impl Collector {
         }
         if self.monitors.rows.len() > RETAIN_ROWS / 4 {
             self.monitors.drop_until(w.monitors);
+        }
+        if self.probe_calls.rows.len() > RETAIN_ROWS {
+            self.probe_calls.drop_until(w.probe_calls);
+        }
+        if self.probe_events.rows.len() > RETAIN_ROWS / 4 {
+            self.probe_events.drop_until(w.probe_events);
+        }
+        if self.probe_controls.rows.len() > RETAIN_ROWS / 4 {
+            self.probe_controls.drop_until(w.probe_controls);
         }
         // Dumps are large; once the daemon has them they are not kept.
         self.thread_dumps.drop_until(w.thread_dumps);

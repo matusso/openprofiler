@@ -34,7 +34,8 @@ message Hello {
   JvmInfo jvm = 3;
   // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "monitor_usage" (owners of
   // contended monitors), "park" (j.u.c lock hooks), "threads", "telemetry", "heap_dump",
-  // "thread_dump", "virtual_threads", "triggers", "mbeans", ...
+  // "thread_dump", "virtual_threads", "triggers", "mbeans", "instrument" (bytecode
+  // instrumentation), "probes", ...
   repeated string capabilities = 4;
   // Echo of the daemon's token (daemon -> agent direction uses Auth below).
   string token = 5;
@@ -101,6 +102,10 @@ message Watermark {
   // Monotonic sequence number of the batch that produced this watermark.
   uint64 seq = 12;
   uint64 thread_dumps = 13;
+  uint64 probes = 14;
+  uint64 probe_calls = 15;
+  uint64 probe_events = 16;
+  uint64 probe_controls = 17;
 }
 
 message SymbolDelta {
@@ -220,6 +225,57 @@ message Bookmark {
   string color = 3;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Probes (see agent-link.md, "Probes"). Payloads are string ids of the symbol table.
+// ---------------------------------------------------------------------------------------------
+
+// A registered probe. The table is positional: probe `i` is the i-th ever sent.
+message ProbeInfo {
+  string id = 1;
+  string name = 2;
+  string payload_label = 3;
+  // Empty if the probe has no control objects.
+  string control_label = 4;
+}
+
+// Probe calls aggregated per (second, probe, payload, thread, stack), columnar.
+message ProbeCallBatch {
+  repeated int64 time = 1;
+  repeated uint32 probe = 2;
+  repeated uint32 payload = 3;
+  repeated uint32 thread = 4;
+  repeated uint32 stack = 5;
+  repeated uint32 count = 6;
+  repeated int64 duration = 7;
+  repeated int64 max = 8;
+  repeated uint32 errors = 9;
+}
+
+message ProbeEvent {
+  int64 start = 1;
+  int64 duration = 2;
+  uint32 probe = 3;
+  uint32 payload = 4;
+  uint32 thread = 5;
+  uint32 stack = 6;
+  string error = 7;
+  // 0 if none.
+  uint64 control = 8;
+  string detail = 9;
+  string context = 10;
+}
+
+message ControlEvent {
+  int64 time = 1;
+  uint32 probe = 2;
+  uint64 id = 3;
+  // 0 open, 1 close.
+  uint32 kind = 4;
+  string description = 5;
+  uint32 thread = 6;
+  uint32 stack = 7;
+}
+
 // One flush of everything that changed between `from` and `to`. Order of application:
 // symbols, stacks, threads, then the rest.
 message DataBatch {
@@ -238,6 +294,10 @@ message DataBatch {
   int64 time = 12;
   // Thread dumps taken by the agent itself (triggers).
   repeated ThreadDump thread_dumps = 13;
+  repeated ProbeInfo probes = 14;
+  ProbeCallBatch probe_calls = 15;
+  repeated ProbeEvent probe_events = 16;
+  repeated ControlEvent probe_controls = 17;
 }
 
 // Daemon -> agent: everything up to `watermark` has been applied. In live mode the agent may
@@ -261,7 +321,8 @@ message HeapDumpRequest {
 }
 
 message SetRecording {
-  // "cpu", "alloc", "monitor", "telemetry", "thread_states".
+  // "cpu", "alloc", "monitor", "telemetry", "thread_states", "calls" (instrumented call counts),
+  // "probes".
   string kind = 1;
   bool enabled = 2;
   uint32 interval_us = 3;
@@ -304,6 +365,14 @@ message ThresholdCondition {
 // JVMTI ResourceExhausted: Java heap, metaspace or native threads.
 message OutOfMemoryCondition {}
 
+// When a method is called. `class_name` is a Java class name (`com.acme.Orders`); `method` a
+// method name, optionally with a descriptor (`place(Ljava/lang/String;)V`); `*` matches all
+// methods of the class.
+message MethodCondition {
+  string class_name = 1;
+  string method = 2;
+}
+
 // When the agent goes live (or when the trigger is installed on a live agent).
 message JvmStartCondition {}
 
@@ -340,6 +409,7 @@ message Trigger {
     OutOfMemoryCondition out_of_memory = 4;
     JvmStartCondition jvm_start = 5;
     JvmExitCondition jvm_exit = 6;
+    MethodCondition method = 10;
   }
   repeated TriggerAction actions = 7;
   // Minimum time between two firings.
@@ -543,6 +613,30 @@ message MBeanNotifications {
   uint64 missed = 4;
 }
 
+// Replaces the instrumentation settings and retransforms affected classes. Patterns are Java
+// class names with `*` (any characters) and `**`/trailing `.*` wildcards, e.g. `com.acme.*`.
+message SetInstrumentation {
+  // Classes whose methods get exact call counts and times (SampleKind calls).
+  repeated string include = 1;
+  repeated string exclude = 2;
+  // Enabled probe ids; empty = all. `none` disables every probe.
+  repeated string probes = 3;
+}
+
+// Answers Instrumentation with the current settings and statistics.
+message InstrumentationRequest {}
+
+message InstrumentationInfo {
+  repeated string include = 1;
+  repeated string exclude = 2;
+  repeated ProbeInfo available_probes = 3;
+  repeated string enabled_probes = 4;
+  uint32 instrumented_classes = 5;
+  uint32 instrumented_methods = 6;
+  // Methods removed by auto-tuning (hot and trivial), as `class.method`.
+  repeated string disabled_methods = 7;
+}
+
 message Request {
   uint64 id = 1;
   oneof kind {
@@ -563,6 +657,8 @@ message Request {
     MBeanConnectRequest mbean_connect = 16;
     MBeanSubscribeRequest mbean_subscribe = 17;
     MBeanNotificationsRequest mbean_notifications = 18;
+    SetInstrumentation set_instrumentation = 19;
+    InstrumentationRequest instrumentation = 20;
   }
 }
 
@@ -611,6 +707,8 @@ message Response {
     MBeanServerList mbean_servers = 10;
     // MBeanNotifications and MBeanSubscribe.
     MBeanNotifications mbean_notifications = 11;
+    // SetInstrumentation and Instrumentation.
+    InstrumentationInfo instrumentation = 12;
   }
 }
 
