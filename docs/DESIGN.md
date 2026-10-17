@@ -23,7 +23,7 @@ formats are specified separately:
 - **Secure by default.** The agent port uses TLS with a pinned fingerprint and a mandatory token.
 - Licence: Apache-2.0; the native agent is MPL-2.0.
 
-**Non-goals for v1:** Java < 11, IBM PHD import (later), Eclipse and NetBeans plugins.
+**Non-goals for v1:** Java < 11, Eclipse and NetBeans plugins.
 
 ## 2. Technology choices
 
@@ -516,7 +516,7 @@ same calls.
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
 | 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU overhead open (#38) |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, remote attach in UI/CLI/MCP, x86_64/aarch64/armhf bundle, web mode, read-only share links, CI gate | Done |
-| 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
+| 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, outliers and complexity analysis, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections, MongoDB/Cassandra/JMS/RMI/web service/LLM client probes | Done; Windows agent not yet run on Windows (#23) |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
 
