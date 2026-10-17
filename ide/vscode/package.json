@@ -2,7 +2,7 @@
   "name": "openprofiler",
   "displayName": "OpenProfiler",
   "description": "OpenProfiler JVM profiler integration: CPU gutter heat, navigate from the profiler to source, launch with the agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "openprofiler",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/matusso/openprofiler" },
