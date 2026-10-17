@@ -66,17 +66,26 @@ fn readable_constructs() {
         "if (s instanceof Circle) {",
         "r |= ~v;",
         "for (String s : xs) {",
-        "String s = a > 0 ? \"pos\" : a >= 0 ? \"zero\" : \"neg\";",
-        "int u = boxed == null ? -1 : boxed;",
-        "Integer x = !flag ? Integer.valueOf(n) : boxed;",
-        "m.computeIfAbsent(words.get(i), ",
+        "String s = a > 0 ? \"pos\" : a < 0 ? \"neg\" : \"zero\";",
+        "int u = boxed != null ? boxed : -1;",
+        "Integer x = flag ? boxed : Integer.valueOf(n);",
+        "out.add(r == null ? \"none\" : \"some\");",
+        "m.computeIfAbsent(words.get(i), k -> new ArrayList<>()).add(i);",
+        "return in.stream().filter(",
+        "return words.stream().collect(Collectors.groupingBy(",
         "return twice.apply(base) + l.size() + rep.apply(\"ab\", 2).length();",
     ] {
         assert!(all.contains(want), "missing `{want}` in:\n{all}");
     }
-    for unwanted in
-        ["extends Record", "addSuppressed", "hashCode()) {", "Integer.valueOf(base)", "(String) words.get"]
-    {
+    for unwanted in [
+        "extends Record",
+        "addSuppressed",
+        "hashCode()) {",
+        "Integer.valueOf(base)",
+        "(String) words.get",
+        "(List) ",
+        "(Map) ",
+    ] {
         assert!(!all.contains(unwanted), "unexpected `{unwanted}` in:\n{all}");
     }
     // Without debug info, local generics come from where values flow.

@@ -1288,6 +1288,7 @@ impl<'p> Writer<'p> {
         let mut live = HashMap::new();
         structure::count_refs(&st.nodes, &mut live);
         let mut mc = MethodCtx::new(self, body, param_names, reserved, Some(&live));
+        mc.generic_ret |= generic_ret.as_ref().is_some_and(has_args);
         if let Some(r) = &generic_ret
             && matches!(r, Sig::Var(_))
         {
@@ -1548,7 +1549,9 @@ impl<'p> Writer<'p> {
                     Some(e) => {
                         self.w("return ");
                         let rt = mc.body.ret.clone();
+                        self.diamond = mc.generic_ret && plain_new(e);
                         self.assigned(mc, e, 0, &rt);
+                        self.diamond = false;
                         self.w(";");
                     }
                     None => self.w("return;"),
@@ -1622,6 +1625,7 @@ impl<'p> Writer<'p> {
                     && let Some(sig) = mc.var_sig(v)
                     && (sig.erased().as_deref() == Some(&**ct) || matches!(sig, Sig::Var(_)))
                     && self.call_result(mc, inner).is_none_or(|r| r != sig)
+                    && !self.target_typed(mc, inner)
                 {
                     self.w("(");
                     self.sig(&sig);
@@ -1777,6 +1781,7 @@ impl<'p> Writer<'p> {
     // ------------------------------------------------------------ expressions
 
     /// An assigned or returned value: implicit widening conversions need no cast.
+    /// Casts of calls that infer their result from the target need none either.
     fn assigned(&mut self, mc: &mut MethodCtx<'_>, e: &Expr, prec: u8, expect: &str) {
         if let Expr::Cast(to, inner) = e
             && &**to == expect
@@ -1784,6 +1789,12 @@ impl<'p> Writer<'p> {
             && widens(&from, to)
         {
             return self.expr(mc, inner, prec, Some(&from));
+        }
+        if let Expr::Cast(to, inner) = e
+            && &**to == expect
+            && self.target_typed(mc, inner)
+        {
+            return self.expr(mc, inner, prec, Some(expect));
         }
         self.expr(mc, e, prec, Some(expect));
     }
@@ -2193,7 +2204,9 @@ impl<'p> Writer<'p> {
             [Node::Return(Some(e))] => {
                 let mut lmc = MethodCtx::new(self, &body, Some(&names), Some(&reserved), None);
                 let ret = body.ret.clone();
+                self.diamond = plain_new(e);
                 self.assigned(&mut lmc, e, 1, &ret);
+                self.diamond = false;
             }
             [Node::Stmt(Stmt::Expr(e @ (Expr::Invoke(..) | Expr::New(..))))] => {
                 let mut lmc = MethodCtx::new(self, &body, Some(&names), Some(&reserved), None);
@@ -2402,6 +2415,37 @@ impl<'p> Writer<'p> {
         })?;
         let ann = d.annotations(c).ok()?;
         signature(d, ann.methods.get(&em.method)?).and_then(|s| types::parse_method_sig(&s))
+    }
+
+    /// A call whose result type the compiler infers from the assignment target:
+    /// `stream.collect(Collectors.toList())` on a stream of known element type. JDK signatures
+    /// are not available, so this covers `Stream.collect` with a `Collectors` collector.
+    fn target_typed(&self, mc: &MethodCtx<'_>, e: &Expr) -> bool {
+        let Expr::Invoke(InvokeKind::Interface, m, args) = e else { return false };
+        &*m.class == "Ljava/util/stream/Stream;"
+            && &*m.name == "collect"
+            && matches!(&args[..], [recv, Expr::Invoke(InvokeKind::Static, c, _)]
+                if &*c.class == "Ljava/util/stream/Collectors;" && self.typed_stream(mc, recv))
+    }
+
+    /// A stream whose element type the compiler knows: a pipeline started from a value of
+    /// known generic type or from a static factory.
+    fn typed_stream(&self, mc: &MethodCtx<'_>, e: &Expr) -> bool {
+        if self.generic_type(mc, e).is_some() {
+            return true;
+        }
+        match e {
+            Expr::Invoke(InvokeKind::Static, m, _) => {
+                m.class.starts_with("Ljava/util/stream/") || &*m.class == "Ljava/util/Arrays;"
+            }
+            Expr::Invoke(InvokeKind::Virtual | InvokeKind::Interface, m, args) => {
+                let streams = m.class.starts_with("Ljava/util/stream/");
+                let source = matches!(&*m.name, "stream" | "parallelStream")
+                    && (type_arity(&m.class).is_some() || collection_interface(&m.class, 1));
+                (streams || source) && args.first().is_some_and(|r| self.typed_stream(mc, r))
+            }
+            _ => false,
+        }
     }
 
     /// Whether `new C<>()` can be written: generic classes of the program and of the JDK
@@ -2753,6 +2797,12 @@ fn structure_children(n: &mut Node) -> Vec<&mut Vec<Node>> {
     }
 }
 
+/// `new C(...)` taking only primitive arguments, so `new C<>(...)` infers its type arguments
+/// from the target alone.
+fn plain_new(e: &Expr) -> bool {
+    matches!(e, Expr::New(m, _) if m.params.iter().all(|p| !p.starts_with(['L', '['])))
+}
+
 fn has_args(s: &Sig) -> bool {
     matches!(s, Sig::Class(parts) if parts.iter().any(|p| !p.1.is_empty()))
 }
@@ -3099,6 +3149,8 @@ struct MethodCtx<'b> {
     declare_here: HashSet<((u32, usize), VarId)>,
     /// Generic types inferred for locals without debug signatures.
     generic: HashMap<VarId, Sig>,
+    /// The method returns a parameterized type, or is a lambda body: `return new C<>()`.
+    generic_ret: bool,
 }
 
 impl<'b> MethodCtx<'b> {
@@ -3155,6 +3207,7 @@ impl<'b> MethodCtx<'b> {
             declare_before: HashMap::new(),
             declare_here: HashSet::new(),
             generic: HashMap::new(),
+            generic_ret: w.lambda_depth > 0,
         }
     }
 

@@ -1013,15 +1013,15 @@ fn cleanup(nodes: Vec<Node>, vars: &[VarInfo]) -> Vec<Node> {
                     || (!els.is_empty()
                         && ends_with_jump(&els)
                         && (!ends_with_jump(&then) || size(&els) < size(&then)));
-                let (cond, mut then, mut els) =
-                    if swap { (cond.negate(), els, then) } else { (cond, then, els) };
-                // `v = c ? a : b`
-                if let ([Node::Stmt(Stmt::Assign(v1, a))], [Node::Stmt(Stmt::Assign(v2, b))]) =
+                // `v = c ? a : b`, in source order: compilers branch past the first arm, so the
+                // fall-through arm is `a` and the branch condition is negated.
+                if let ([Node::Stmt(Stmt::Assign(v2, b))], [Node::Stmt(Stmt::Assign(v1, a))]) =
                     (&then[..], &els[..])
                     && v1 == v2
                     && is_simple(a)
                     && is_simple(b)
                 {
+                    let cond = cond.negate();
                     let boolean = vars.get(*v1 as usize).and_then(|v| v.ty.as_deref()) == Some("Z");
                     let t = match (a, b) {
                         (Expr::Lit { bits: 1, .. }, Expr::Lit { bits: 0, .. }) if boolean => cond,
@@ -1035,6 +1035,8 @@ fn cleanup(nodes: Vec<Node>, vars: &[VarInfo]) -> Vec<Node> {
                     out.push(Node::Stmt(Stmt::Assign(*v1, t)));
                     continue;
                 }
+                let (cond, mut then, mut els) =
+                    if swap { (cond.negate(), els, then) } else { (cond, then, els) };
                 // `if (c) { ...; return; } else { rest }` → `if (c) { ...; return; } rest`
                 if !els.is_empty() && ends_with_jump(&then) {
                     out.push(Node::If { cond, then, els: vec![] });

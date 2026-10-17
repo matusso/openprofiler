@@ -293,7 +293,8 @@ same calls.
   when debug info doesn't have one, and other locals get generic types from the program's
   fields, methods and the method's return type their values flow through (all must agree;
   `ArrayList` flowing into `List<String>` becomes `ArrayList<String>`); `new` of a generic class
-  assigned to a generic target prints a diamond. The low-level view of a JVM class is its
+  assigned to a generic target, or returned from a lambda or a method with a parameterized
+  return type (constructors with only primitive arguments), prints a diamond. The low-level view of a JVM class is its
   original bytecode (`jvm/disasm.rs`) with offsets, resolved constants and linked member
   references. A directory of class files (`target/classes`) opens like a jar.
 - **Recovered source constructs** (shared by both inputs, `structure.rs` and the printer):
@@ -304,11 +305,14 @@ same calls.
   `hashCode()` switch and the index switch (javac and d8 forms, hash collisions included);
   boxing and unboxing calls are dropped where the context converts implicitly, except for
   arguments of overloaded methods (`List.remove`) and `==` between two unboxed values;
-  conditionals from branches assigning one variable, chained through the else side
+  conditionals from branches assigning one variable, in source order (the fall-through arm comes
+  first, under the negated branch condition) and chained through the else side
   (`a > 0 ? "pos" : a < 0 ? "neg" : "zero"`), keeping boxing explicit where a reference is
   expected and only one side boxes; casts of calls returning a type argument of a receiver with
   known generic type (`words.get(i)` of a `List<String>`; the program's signatures, or a table of
-  JDK collection and functional-interface methods) are dropped.
+  JDK collection and functional-interface methods) are dropped, as are casts of
+  `Stream.collect(Collectors...)` on a stream of known element type where the result is
+  returned or assigned (the compiler infers it from the target).
 - **Pipeline per method** (`method.rs`, `structure.rs`, `java.rs`):
   1. Decode instructions (`insn.rs`), split basic blocks at branches, switch targets and try
      boundaries; exception edges only leave blocks that can throw.
