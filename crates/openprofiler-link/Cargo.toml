@@ -21,6 +21,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 openprofiler-attach = { path = "../openprofiler-attach" }
+openprofiler-heap = { path = "../openprofiler-heap" }
 tempfile.workspace = true
 
 [lints]

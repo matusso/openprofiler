@@ -136,8 +136,32 @@ through `LockSupport.park` hooks, with lock owners. Events above the threshold a
 (within a per-second budget), shorter contention is sampled by blocked time, and stacks are
 resolved off the application thread, so heavy contention is not made worse.
 
-**Heap dumps:** `HotSpotDiagnosticMXBean.dumpHeap` (HPROF), streamed back to the daemon. A native
-dumper that writes directly into a snapshot is planned.
+**Heap dumps:** `HotSpotDiagnosticMXBean.dumpHeap` (HPROF) by default, streamed back to the
+daemon. The agent also has a native dumper (`dumper=native`, `heapdump.rs`): a JVMTI
+`FollowReferences` walk in a private JVMTI environment (its tags never meet the agent's) that writes
+HPROF 1.0.2, the format the heap engine and `.opsnap` heap sections already read, so retained sizes
+are computed the same way as for HotSpot's dumps. Object ids are synthetic: an object's tag is its
+id, assigned on discovery from a running sum of `GetObjectSize`, so ids look like a densely packed
+heap; compressed references are detected from object array sizes and written to a hint record
+(`compressedRefs=…`, UTF8 id all ones), which the engine prefers over its address heuristic.
+HotSpot reports all references and primitive values of an object in one burst while visiting it,
+so each instance is written as soon as the next object starts and the walk keeps no per-object
+state. Classes are collected up front for instance layouts and JVMTI field indices (interface
+fields first, then `Object`'s down to the class's own, statics included); statics, super, loader,
+signers and protection domain come from the walk. Constant-pool references go into a synthetic
+`<resolved_references>` `Object[]` per class, as in HotSpot's dumps. Stack and JNI locals carry
+their thread's serial, so they become references from the thread object. Only reachable objects
+are dumped. On JDK 27 the native dump of a test app has the same instances, field values and
+retained sizes for application structures as HotSpot's; reachable objects are within 1% and their
+shallow size within 3% (HotSpot's dumps hold more `java.lang.invoke` objects and `int[]`; the
+synthetic arrays also hold resolved classes, which some hidden classes are reachable through only).
+
+*Recorded objects:* while allocation recording is on, every sampled allocation is tagged in another
+private JVMTI environment (tags die with their objects; switching recording on starts a new set).
+A recorded-only dump (`recorded_only`) walks the heap once remembering each object's first
+referrer (4 bytes per object), keeps the live recorded objects and their referrer chains up to the
+GC roots, and walks again writing only those (references to other objects are written as null)
+plus all classes.
 
 **Telemetry:** a once-per-second sampler in the boot classes (MXBeans and GC notifications) pushes
 compact records into a native time-series ring.

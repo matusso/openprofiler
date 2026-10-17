@@ -84,8 +84,10 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "heap_dump",
-            "Trigger a heap dump in a live session; returns the new heap session id.",
-            json!({ "session": session }),
+            "Trigger a heap dump in a live session; returns the new heap session id. dumper=native walks the heap in the agent (JVMTI) instead of HotSpot's dumpHeap; recorded_only dumps only the objects recorded by allocation recording and their paths from the GC roots.",
+            json!({ "session": session,
+                    "dumper": { "type": "string", "enum": ["hotspot", "native"], "default": "hotspot" },
+                    "recorded_only": { "type": "boolean", "default": false } }),
             &["session"],
         ),
         tool(
@@ -118,7 +120,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "set_triggers",
-            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit, method {class, method}) and actions (heap_dump {path}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor|calls|probes, run_gc), plus optional cooldown and max_fires.",
+            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit, method {class, method}) and actions (heap_dump {path, dumper: hotspot|native, recorded_only}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor|calls|probes, run_gc), plus optional cooldown and max_fires.",
             json!({ "session": session, "triggers": { "type": "array", "items": { "type": "object" } } }),
             &["session", "triggers"],
         ),

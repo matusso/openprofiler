@@ -164,11 +164,147 @@ pub struct jvmtiStackInfo {
     pub frame_count: jint,
 }
 
-/// Opaque: the agent uses the heap-iteration callbacks only through `HeapCallbacks` pointers.
+pub type jvmtiHeapIterationCallback = Option<
+    unsafe extern "C" fn(
+        class_tag: jlong,
+        size: jlong,
+        tag_ptr: *mut jlong,
+        length: jint,
+        user_data: *mut c_void,
+    ) -> jint,
+>;
+pub type jvmtiHeapReferenceCallback = Option<
+    unsafe extern "C" fn(
+        reference_kind: jvmtiHeapReferenceKind,
+        reference_info: *const jvmtiHeapReferenceInfo,
+        class_tag: jlong,
+        referrer_class_tag: jlong,
+        size: jlong,
+        tag_ptr: *mut jlong,
+        referrer_tag_ptr: *mut jlong,
+        length: jint,
+        user_data: *mut c_void,
+    ) -> jint,
+>;
+pub type jvmtiPrimitiveFieldCallback = Option<
+    unsafe extern "C" fn(
+        kind: jvmtiHeapReferenceKind,
+        info: *const jvmtiHeapReferenceInfo,
+        object_class_tag: jlong,
+        object_tag_ptr: *mut jlong,
+        value: jvalue,
+        value_type: jvmtiPrimitiveType,
+        user_data: *mut c_void,
+    ) -> jint,
+>;
+pub type jvmtiArrayPrimitiveValueCallback = Option<
+    unsafe extern "C" fn(
+        class_tag: jlong,
+        size: jlong,
+        tag_ptr: *mut jlong,
+        element_count: jint,
+        element_type: jvmtiPrimitiveType,
+        elements: *const c_void,
+        user_data: *mut c_void,
+    ) -> jint,
+>;
+
 #[repr(C)]
 pub struct jvmtiHeapCallbacks {
-    pub callbacks: [*const c_void; 16],
+    pub heap_iteration_callback: jvmtiHeapIterationCallback,
+    pub heap_reference_callback: jvmtiHeapReferenceCallback,
+    pub primitive_field_callback: jvmtiPrimitiveFieldCallback,
+    pub array_primitive_value_callback: jvmtiArrayPrimitiveValueCallback,
+    pub string_primitive_value_callback: *const c_void,
+    pub reserved: [*const c_void; 11],
 }
+
+impl Default for jvmtiHeapCallbacks {
+    fn default() -> Self {
+        Self {
+            heap_iteration_callback: None,
+            heap_reference_callback: None,
+            primitive_field_callback: None,
+            array_primitive_value_callback: None,
+            string_primitive_value_callback: std::ptr::null(),
+            reserved: [std::ptr::null(); 11],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct jvmtiHeapReferenceInfoField {
+    pub index: jint,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct jvmtiHeapReferenceInfoStackLocal {
+    pub thread_tag: jlong,
+    pub thread_id: jlong,
+    pub depth: jint,
+    pub method: jmethodID,
+    pub location: jlocation,
+    pub slot: jint,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct jvmtiHeapReferenceInfoJniLocal {
+    pub thread_tag: jlong,
+    pub thread_id: jlong,
+    pub depth: jint,
+    pub method: jmethodID,
+}
+
+/// `field`, `array` and `constant_pool` share the single `index` member.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union jvmtiHeapReferenceInfo {
+    pub field: jvmtiHeapReferenceInfoField,
+    pub stack_local: jvmtiHeapReferenceInfoStackLocal,
+    pub jni_local: jvmtiHeapReferenceInfoJniLocal,
+    pub reserved: [jlong; 8],
+}
+
+// Heap reference kinds.
+pub const JVMTI_HEAP_REFERENCE_CLASS: jvmtiHeapReferenceKind = 1;
+pub const JVMTI_HEAP_REFERENCE_FIELD: jvmtiHeapReferenceKind = 2;
+pub const JVMTI_HEAP_REFERENCE_ARRAY_ELEMENT: jvmtiHeapReferenceKind = 3;
+pub const JVMTI_HEAP_REFERENCE_CLASS_LOADER: jvmtiHeapReferenceKind = 4;
+pub const JVMTI_HEAP_REFERENCE_SIGNERS: jvmtiHeapReferenceKind = 5;
+pub const JVMTI_HEAP_REFERENCE_PROTECTION_DOMAIN: jvmtiHeapReferenceKind = 6;
+pub const JVMTI_HEAP_REFERENCE_INTERFACE: jvmtiHeapReferenceKind = 7;
+pub const JVMTI_HEAP_REFERENCE_STATIC_FIELD: jvmtiHeapReferenceKind = 8;
+pub const JVMTI_HEAP_REFERENCE_CONSTANT_POOL: jvmtiHeapReferenceKind = 9;
+pub const JVMTI_HEAP_REFERENCE_SUPERCLASS: jvmtiHeapReferenceKind = 10;
+pub const JVMTI_HEAP_REFERENCE_JNI_GLOBAL: jvmtiHeapReferenceKind = 21;
+pub const JVMTI_HEAP_REFERENCE_SYSTEM_CLASS: jvmtiHeapReferenceKind = 22;
+pub const JVMTI_HEAP_REFERENCE_MONITOR: jvmtiHeapReferenceKind = 23;
+pub const JVMTI_HEAP_REFERENCE_STACK_LOCAL: jvmtiHeapReferenceKind = 24;
+pub const JVMTI_HEAP_REFERENCE_JNI_LOCAL: jvmtiHeapReferenceKind = 25;
+pub const JVMTI_HEAP_REFERENCE_THREAD: jvmtiHeapReferenceKind = 26;
+pub const JVMTI_HEAP_REFERENCE_OTHER: jvmtiHeapReferenceKind = 27;
+
+// Primitive types (the JNI type signature characters).
+pub const JVMTI_PRIMITIVE_TYPE_BOOLEAN: jvmtiPrimitiveType = b'Z' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_BYTE: jvmtiPrimitiveType = b'B' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_CHAR: jvmtiPrimitiveType = b'C' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_SHORT: jvmtiPrimitiveType = b'S' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_INT: jvmtiPrimitiveType = b'I' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_LONG: jvmtiPrimitiveType = b'J' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_FLOAT: jvmtiPrimitiveType = b'F' as u32;
+pub const JVMTI_PRIMITIVE_TYPE_DOUBLE: jvmtiPrimitiveType = b'D' as u32;
+
+// Heap visit control flags.
+pub const JVMTI_VISIT_OBJECTS: jint = 0x100;
+pub const JVMTI_VISIT_ABORT: jint = 0x8000;
+
+// Class status bits.
+pub const JVMTI_CLASS_STATUS_PREPARED: jint = 2;
+pub const JVMTI_CLASS_STATUS_ARRAY: jint = 16;
+pub const JVMTI_CLASS_STATUS_PRIMITIVE: jint = 32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

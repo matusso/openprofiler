@@ -343,8 +343,12 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
         "heap-dump" => {
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
             let path = dump_dir().join(format!("{}-{ts}.hprof", live.0.pid.unwrap_or(0)));
-            let live_only = req["live_only"].as_bool().unwrap_or(true);
-            let out = c.heap_dump(&path, live_only, !live.0.remote).await?;
+            let opts = openprofiler_link::HeapDumpOptions {
+                live_only: req["live_only"].as_bool().unwrap_or(true),
+                dumper: req["dumper"].as_str().unwrap_or_default().into(),
+                recorded_only: req["recorded_only"].as_bool().unwrap_or(false),
+            };
+            let out = c.heap_dump_with(&path, &opts, !live.0.remote).await?;
             let hs = engine.open(&out.path)?;
             Ok(json!({ "session": hs.info(), "path": out.path, "size": out.size }))
         }

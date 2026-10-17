@@ -257,6 +257,9 @@ pub fn set_recording(a: &Agent, kind: &str, on: bool, interval_us: u32) {
             }
         }
         "alloc" if has_cap(a, "alloc") => {
+            if on && !a.alloc_on.swap(true, Ordering::SeqCst) {
+                crate::heapdump::reset_recorded(a.vm);
+            }
             a.alloc_on.store(on, Ordering::SeqCst);
             let _ = a.jvmti.enable_event(JVMTI_EVENT_SAMPLED_OBJECT_ALLOC, on);
         }
@@ -548,7 +551,7 @@ unsafe extern "C" fn sampled_object_alloc(
     _jvmti: *mut jvmtiEnv,
     jni: *mut JNIEnv,
     thread: jthread,
-    _object: jobject,
+    object: jobject,
     klass: jclass,
     size: jlong,
 ) {
@@ -556,6 +559,7 @@ unsafe extern "C" fn sampled_object_alloc(
     if !a.alloc_on.load(Ordering::Relaxed) || a.shutting_down.load(Ordering::Relaxed) {
         return;
     }
+    crate::heapdump::record(object);
     let Some(idx) = thread_index(a, jni, thread) else { return };
     let Some(stack) = capture_stack(a, jni, ptr::null_mut()) else { return };
     let mut c = a.collector.lock();

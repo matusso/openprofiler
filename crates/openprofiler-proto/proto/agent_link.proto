@@ -318,6 +318,12 @@ message HeapDumpRequest {
   bool live_only = 2;
   // If set and the daemon shares the filesystem, the agent writes here and sends no blob.
   string local_path = 3;
+  // "hotspot" (default: HotSpotDiagnosticMXBean.dumpHeap) or "native" (JVMTI heap walk in the
+  // agent; reachable objects only, so live_only is implied). Both write HPROF.
+  string dumper = 4;
+  // Only the objects recorded by allocation recording, their referrer chains from the GC roots
+  // and all classes. Uses the native dumper.
+  bool recorded_only = 5;
 }
 
 message SetRecording {
@@ -384,6 +390,9 @@ message HeapDumpAction {
   // count) are substituted.
   string path = 1;
   bool live_only = 2;
+  // As in HeapDumpRequest.
+  string dumper = 3;
+  bool recorded_only = 4;
 }
 
 message TriggerAction {

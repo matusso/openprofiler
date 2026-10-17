@@ -319,7 +319,11 @@ pub(crate) fn build(
             prev_array = s.last_array;
         }
     }
-    let compressed_detected = compressed_detected && id_size == 8;
+    let compressed_detected = match h.hint(&top, "compressedRefs").as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        _ => compressed_detected,
+    } && id_size == 8;
     let mut pair_buf = Big::<[u64; 2]>::zeroed(n_objs);
     pair_buf[0] = [0, BOOT_LOADER_OFFSET];
     {

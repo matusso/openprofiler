@@ -13,6 +13,7 @@
 
 mod collector;
 mod events;
+mod heapdump;
 #[doc(hidden)]
 pub mod instrument;
 mod java;
@@ -178,6 +179,10 @@ unsafe fn init(vm: *mut JavaVM, options: *const c_char, attach: bool) -> jint {
     caps.push("telemetry".into());
     caps.push("thread_dump".into());
     caps.push("heap_dump".into());
+    if caps.iter().any(|c| c == "tagging") {
+        // JVMTI heap walk in a private environment (`heapdump`), also of recorded objects.
+        caps.push("native_heap_dump".into());
+    }
     caps.push("triggers".into());
     caps.push("mbeans".into());
 
@@ -222,6 +227,9 @@ unsafe fn init(vm: *mut JavaVM, options: *const c_char, attach: bool) -> jint {
         return 0;
     }
     let agent = AGENT.get().unwrap();
+    if agent.alloc_on.load(Ordering::SeqCst) {
+        heapdump::reset_recorded(vm);
+    }
 
     // An explicit boot jar goes on the boot class path; otherwise the embedded classes are
     // defined into the bootstrap loader once the VM is live (avoids disabling CDS for app classes).

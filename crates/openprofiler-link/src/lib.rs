@@ -109,6 +109,16 @@ pub enum LinkState {
     Closed(String),
 }
 
+/// How the agent takes a heap dump.
+#[derive(Debug, Clone, Default)]
+pub struct HeapDumpOptions {
+    pub live_only: bool,
+    /// `"hotspot"` (or empty: `HotSpotDiagnosticMXBean.dumpHeap`) or `"native"` (JVMTI heap walk).
+    pub dumper: String,
+    /// Only objects recorded by allocation recording and their paths from the GC roots.
+    pub recorded_only: bool,
+}
+
 /// What a heap dump request produced.
 #[derive(Debug, Clone)]
 pub struct HeapDumpOutcome {
@@ -308,11 +318,24 @@ impl LinkClient {
         live_only: bool,
         agent_writes_locally: bool,
     ) -> Result<HeapDumpOutcome> {
+        let opts = HeapDumpOptions { live_only, ..Default::default() };
+        self.heap_dump_with(path, &opts, agent_writes_locally).await
+    }
+
+    /// Like [`Self::heap_dump`], with a choice of dumper.
+    pub async fn heap_dump_with(
+        &self,
+        path: &Path,
+        opts: &HeapDumpOptions,
+        agent_writes_locally: bool,
+    ) -> Result<HeapDumpOutcome> {
         let abs = std::path::absolute(path)?;
         let req = v1::HeapDumpRequest {
             format: "hprof".into(),
-            live_only,
+            live_only: opts.live_only,
             local_path: if agent_writes_locally { abs.display().to_string() } else { String::new() },
+            dumper: opts.dumper.clone(),
+            recorded_only: opts.recorded_only,
         };
         let r = self
             .request(v1::request::Kind::HeapDump(req), (!agent_writes_locally).then(|| abs.clone()))

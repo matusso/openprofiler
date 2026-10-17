@@ -75,6 +75,7 @@ openprofiler list                                     # local JVMs
 openprofiler attach <pid> --duration 10s              # live hot spots in the terminal
 openprofiler record --pid <pid> --duration 60s -o app.opsnap          # record a snapshot
 openprofiler record --pid <pid> --heap -o app.opsnap                  # ... with a heap dump at the end
+openprofiler record --pid <pid> --recorded-only -o app.opsnap         # ... only objects allocation recording sampled
 openprofiler record --pid <pid> --triggers triggers.json -o app.opsnap  # dumps on thresholds, OOM, timers
 openprofiler dump <pid> -o heap.hprof                 # heap dump only
 ```

@@ -257,7 +257,9 @@ export class OpenProfilerClient {
   // Live control
   setRecording = (id: string, kind: string, enabled: boolean, interval_ms?: number) =>
     this.post(`/sessions/${id}/recording`, { kind, enabled, interval_ms });
-  heapDump = (id: string) => this.post<Session>(`/sessions/${id}/heap-dump`);
+  /** `dumper: "native"` walks the heap in the agent; `recorded_only` dumps only recorded objects. */
+  heapDump = (id: string, opts?: { dumper?: "hotspot" | "native"; recorded_only?: boolean }) =>
+    this.post<Session>(`/sessions/${id}/heap-dump`, opts);
   saveSnapshot = (id: string, path: string) => this.post(`/sessions/${id}/snapshot`, { path });
   bookmark = (id: string, label: string) => this.post(`/sessions/${id}/bookmark`, { label });
   gc = (id: string) => this.post(`/sessions/${id}/gc`);

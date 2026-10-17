@@ -177,6 +177,13 @@ enum Cmd {
         /// Also embed a heap dump taken at the end.
         #[arg(long)]
         heap: bool,
+        /// Heap dumper: hotspot (HotSpotDiagnosticMXBean.dumpHeap) or native (JVMTI heap walk).
+        #[arg(long, default_value = "hotspot", value_parser = ["hotspot", "native"])]
+        heap_dumper: String,
+        /// Embed only the objects recorded by allocation recording and their paths from the GC
+        /// roots (native dumper; implies --heap).
+        #[arg(long)]
+        recorded_only: bool,
         /// JSON trigger file to install in the agent (see docs/spec/agent-link.md).
         #[arg(long)]
         triggers: Option<PathBuf>,
@@ -294,19 +301,29 @@ async fn run(cli: Cli) -> Result<()> {
             engine.close(&s.id)?;
             Ok(())
         }
-        Cmd::Record { pid, remote, duration, interval, heap, triggers, output } => {
+        Cmd::Record {
+            pid,
+            remote,
+            duration,
+            interval,
+            heap,
+            heap_dumper,
+            recorded_only,
+            triggers,
+            output,
+        } => {
             let engine = Engine::new();
             let s = attach_live(&engine, pid, remote.attach_options(interval)?).await?;
             install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Recording {} for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
-            let heap_path = if heap {
+            let heap_path = if heap || recorded_only {
                 eprintln!("Taking heap dump…");
                 let r = openprofiler_daemon::live::control(
                     &engine,
                     &s,
                     "heap-dump",
-                    json!({ "live_only": true }),
+                    json!({ "live_only": true, "dumper": heap_dumper, "recorded_only": recorded_only }),
                 )
                 .await?;
                 Some(PathBuf::from(r["path"].as_str().unwrap_or_default()))

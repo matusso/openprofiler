@@ -369,7 +369,7 @@ fn handle_request<S: Write>(
                         req.id
                     ))
                 };
-                match h.dump_heap(jni, &path.display().to_string(), r.live_only) {
+                match crate::heapdump::dump_with(a, h, jni, &path, &r.dumper, r.recorded_only, r.live_only) {
                     Ok(()) => {
                         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                         let blob_id = if local { 0 } else { req.id.max(1) };

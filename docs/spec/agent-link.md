@@ -190,7 +190,7 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 | request | effect | response |
 |---|---|---|
 | `ThreadDump` | `ThreadMXBean.dumpAllThreads` (+ virtual threads via `HotSpotDiagnosticMXBean.dumpThreads` on JDK 21+) | `ThreadDump` |
-| `HeapDump{format, live_only, local_path}` | `HotSpotDiagnosticMXBean.dumpHeap` | `HeapDumpResult`; without `local_path` the HPROF follows as `BlobChunk`s (1 MiB, `last` on the final one) |
+| `HeapDump{format, live_only, local_path, dumper, recorded_only}` | `HotSpotDiagnosticMXBean.dumpHeap`; with `dumper: "native"` or `recorded_only` a JVMTI heap walk in the agent (capability `native_heap_dump`; reachable objects only; `recorded_only` keeps the objects sampled by allocation recording and their paths from the GC roots) | `HeapDumpResult`; without `local_path` the HPROF follows as `BlobChunk`s (1 MiB, `last` on the final one) |
 | `SetRecording{kind, enabled, interval_us}` | toggles `cpu`, `alloc`, `monitor`, `calls`, `probes` | `ok` |
 | `UpdateConfig{config}` | applies a whole `SessionConfig` | `ok` |
 | `SaveSnapshot{path}` | writes an `.oplink` recording on the agent's filesystem | `SnapshotResult` |
@@ -299,7 +299,7 @@ maximum).
 | `start_recording` / `stop_recording` `"cpu"\|"alloc"\|"monitor"\|"calls"\|"probes"` | like `SetRecording` |
 | `bookmark` `"label"` or `{label, color}` | adds a bookmark |
 | `thread_dump` | takes a dump and adds it to the data plane (`DataBatch.thread_dumps`) |
-| `heap_dump {path, live_only}` | writes an HPROF file on the agent's filesystem |
+| `heap_dump {path, live_only, dumper, recorded_only}` | writes an HPROF file on the agent's filesystem (`dumper`: `hotspot` or `native`, as in `HeapDump`) |
 | `save_snapshot` `"path"` | writes an `.oplink` recording on the agent's filesystem |
 | `run_gc` | `ForceGarbageCollection` |
 
