@@ -410,13 +410,20 @@ carry a stack, closes do not.
 | `http_client` | JDK `HttpClient` (`send`, `sendAsync`), `HttpURLConnection`, OkHttp 3/4/5 `RealCall.execute`, Apache HttpClient 4/5 classic `doExecute` (relative request URIs get the target host) | method and URL (ids replaced, no query); detail: status | — |
 | `kafka` | `KafkaProducer.send`, `KafkaConsumer.poll` (empty polls ignored), `commitSync` | `send <topic>`, `poll <subscription>` | — |
 | `grpc` | `ClientCalls` unary calls (blocking, future, async; the method of a `ClientCall` is read from the call), unary server calls | full method name; server calls set the request label | — |
+| `mongodb` | `InternalStreamConnection.sendAndReceive` (sync driver), `sendAndReceiveAsync` until `getCommandResult` decodes the reply with that message id (reactive streams and async drivers); handshakes and heartbeats skipped | `<command> <db>.<collection>` (`find matrix.orders`) | — |
+| `cassandra` | DataStax 4.x `Session.execute(Request, GenericType)` (sync and async, until the `CompletionStage` completes), 3.x `AbstractSession.execute(Statement)` and `executeAsync` (until the future's listener runs) | CQL (bound statements: the prepared CQL; batches: `BATCH <n>: <first CQL>`); detail: rows | — |
+| `jms` | `MessageProducer.send`, `JMSProducer.send`, `MessageConsumer.receive`, `JMSConsumer.receive`/`receiveBody` (receives that time out ignored), `MessageListener.onMessage` (javax and Jakarta, all subtypes) | `send <destination>`, `receive <destination>`, `process <destination>`; listeners set the request label `JMS <destination>` and record what they do | — |
+| `rmi` | `UnicastRef.invoke` (stubs and dynamic proxies), `UnicastServerRef.dispatch` named at `logCall` (skeleton calls such as the registry and DGC skipped) | `call <Interface>.<method>`, `serve <Interface>.<method>`; served calls set the request label `RMI <Interface>.<method>` | — |
+| `webservices` | JAX-WS clients (Metro `SEIStub.invoke`, CXF `JaxWsClientProxy.invoke`, `Dispatch.invoke`/`invokeOneWay`, javax and Jakarta) and endpoints (Metro `server.sei.Invoker.invoke`, CXF `AbstractInvoker.performInvocation`) | `call <Service>.<operation>` (detail: endpoint address), `dispatch <address>`, `serve <Service>.<operation>`; served operations set the request label `SOAP <Service>.<operation>` | — |
+| `llm` | OpenAI Java SDK chat completions, responses and embeddings (blocking and async), Anthropic Java SDK messages (blocking and async), LangChain4j `ChatModel.chat(ChatRequest)` and 0.x `ChatLanguageModel` `chat`/`generate(List)`, Spring AI `ChatModel.call(Prompt)`; async calls until the future completes; streaming not recorded | `<operation> <model>` (`chat.completions gpt-4o-mini`, `messages claude-sonnet-4-5`, `chat <model>`); detail: `tokens <in> in, <out> out` | — |
 | `exceptions` | `Throwable` constructors | exception class; detail: message | — |
 | `files` | `FileInputStream`/`FileOutputStream`/`RandomAccessFile` (open, bulk read/write, close) | `read <path>`, `write <path>`; detail: bytes | open files |
 | `sockets` | `Socket.connect`, `ServerSocket.accept`, `Socket.close` | `connect <address>`, `accept <address>` | open sockets |
 | `custom.<name>` | `@Probe(value = "<name>", payload = "…")` methods, `OpenProfiler.probeEvent` | the formatted template (`{0}`, `{this}`) | — |
 
-**Request labels.** A probe serving a request (`http_server`, `grpc` server) sets the thread's
-label for the duration of the call. The label is the root frame of the thread's CPU, wall,
+**Request labels.** A probe serving a request (`http_server`, `grpc`, `rmi` and `webservices`
+servers, `jms` listeners) sets the thread's label for the duration of the call. The label is the
+root frame of the thread's CPU, wall,
 allocation, monitor, `calls` and probe stacks (`[GET /owners/{id}]`), so call trees split by
 request, and the `context` of its probe events. An internal `async` probe carries the label across
 hand-offs: `FutureTask` (executor `submit`, scheduled executors, Reactor schedulers),
@@ -436,7 +443,10 @@ from I/O callbacks (not from a scheduler or executor the request handed work to)
 and EclipseLink 2.7/4; Tomcat 9–11, Jetty 9.4–12 and Undertow 2.2/2.3 (javax and Jakarta); Netty
 4.1/4.2; Reactor Netty 1.0–1.2 and Spring WebFlux 5.3–6.2; Vert.x 4.5/5; OkHttp 3–5 and Apache
 HttpClient 4/5; Kafka clients 2.8–4.0; grpc-java 1.40–1.69; Reactor core 3.4–3.7 and Kotlin
-coroutines 1.6–1.10. Each case records with the agent in offline mode and checks payloads,
+coroutines 1.6–1.10; the MongoDB sync driver 3.12–5.2 and reactive streams driver 4.11/5.2; the
+DataStax Cassandra driver 3.11 and 4.11–4.18; JMS with Artemis 2.31/2.38 and ActiveMQ 5.18/6.1
+clients (against an Artemis broker); JAX-WS with Metro 2.3/4.0 and CXF 3.6/4.0; the OpenAI
+and Anthropic Java SDKs, LangChain4j 0.36/1.2 and Spring AI 1.0 (against a local fake API). Each case records with the agent in offline mode and checks payloads,
 events, control objects, request context and call-tree links
 (`crates/openprofiler-link/examples/oplink_check.rs`).
 

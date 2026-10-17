@@ -1,0 +1,5 @@
+# Generations by model, with the tokens the response reports.
+count   | llm | gpt-4o-mini | 15
+every   | llm | gpt-4o-mini | detail~tokens 12 in, 3 out
+event   | llm | gpt-4o-mini | context~GET /owners/{id}
+stack   | llm | gpt-4o-mini | Main.main

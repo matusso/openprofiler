@@ -507,7 +507,7 @@ fn probe_calls(p: &Profile, id: &str, needle: &str) -> u64 {
 async fn check_probes(client: &LinkClient) {
     let caps = client.hello().capabilities;
     assert!(caps.iter().any(|c| c == "probes"), "probes capability: {caps:?}");
-    wait_for(client, "JDBC, HTTP, custom and file probe calls", |p| {
+    wait_for(client, "JDBC, HTTP, custom, file and RMI probe calls", |p| {
         probe_calls(p, "jdbc", "SELECT * FROM orders WHERE id = ?") > 0
             && probe_calls(p, "jdbc", "UPDATE stats") > 0
             && probe_calls(p, "http_server", "GET /orders/{id}") > 0
@@ -516,6 +516,8 @@ async fn check_probes(client: &LinkClient) {
             && probe_calls(p, "custom.manual", "tick") > 0
             && probe_calls(p, "exceptions", "java.lang.NumberFormatException") > 0
             && probe_calls(p, "files", "write ") > 0
+            && probe_calls(p, "rmi", "call Pricing.price") > 0
+            && probe_calls(p, "rmi", "serve Pricing.price") > 0
     })
     .await;
     wait_for(client, "JDBC events with bind parameters and the request as context", |p| {
@@ -551,6 +553,7 @@ async fn check_probes(client: &LinkClient) {
     // Exact call counts, split by request.
     wait_for(client, "instrumented calls under the request label", |p| {
         has_frame(p, SampleKind::Calls, "[GET /orders/{id}]")
+            && has_frame(p, SampleKind::Calls, "[RMI Pricing.price]")
             && has_frame(p, SampleKind::Calls, "ProbeWorkload.leaf")
     })
     .await;

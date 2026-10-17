@@ -205,7 +205,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "probes",
-            "Probe data (JDBC SQL, HTTP server/client URLs, JPA, Kafka, gRPC, exceptions, files, sockets, custom probes). view=list (probes with totals; start here), hotspots (payloads by total time for one probe), events (individual calls with detail, error and request context), controls (connections/files/sockets with leak flags), timeline, telemetry. For the code paths behind a payload use hotspots with kind=probe and payload=<payload>.",
+            "Probe data (JDBC SQL, HTTP server/client URLs, JPA, Kafka, gRPC, MongoDB, Cassandra CQL, JMS, RMI, SOAP web services, AI/LLM calls with tokens, exceptions, files, sockets, custom probes). view=list (probes with totals; start here), hotspots (payloads by total time for one probe), events (individual calls with detail, error and request context), controls (connections/files/sockets with leak flags), timeline, telemetry. For the code paths behind a payload use hotspots with kind=probe and payload=<payload>.",
             json!({ "session": session, "probe": { "type": "string", "description": "Probe id from view=list, e.g. jdbc" },
                     "view": { "type": "string", "enum": ["list", "hotspots", "events", "controls", "timeline", "telemetry"], "default": "list" },
                     "search": { "type": "string", "description": "Only payloads containing this text" },

@@ -48,3 +48,27 @@ coroutines-1.8         coroutines -        coroutines.version=1.8.1 kotlin.versi
 coroutines-1.6         coroutines -        coroutines.version=1.6.4 kotlin.version=2.1.0
 vertx-5.0              vertx     -         vertx.version=5.0.4
 vertx-4.5              vertx     -         vertx.version=4.5.21
+mongodb-5.2            mongodb   mongo     mongodb.version=5.2.1
+mongodb-4.11           mongodb   mongo     mongodb.version=4.11.5
+mongodb-3.12           mongodb   mongo     mongodb.version=3.12.14
+mongodb-reactive-5.2   mongodb-reactive mongo mongodb.version=5.2.1
+mongodb-reactive-4.11  mongodb-reactive mongo mongodb.version=4.11.5
+cassandra-4.18          cassandra4 cassandra cassandra.group=org.apache.cassandra cassandra.version=4.18.1
+cassandra-4.17          cassandra4 cassandra cassandra.group=com.datastax.oss cassandra.version=4.17.0
+cassandra-4.11          cassandra4 cassandra cassandra.group=com.datastax.oss cassandra.version=4.11.3
+cassandra-3.11          cassandra3 cassandra cassandra.version=3.11.5
+jms-artemis-2.38        jms       artemis   jms.group=org.apache.activemq jms.artifact=artemis-jakarta-client jms.version=2.38.0 jms.factory=org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory slf4j.version=2.0.16
+jms-artemis-2.31        jms       artemis   jms.group=org.apache.activemq jms.artifact=artemis-jms-client jms.version=2.31.2 jms.factory=org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory slf4j.version=2.0.16 ee=javax
+jms-activemq-6.1        jms       artemis   jms.group=org.apache.activemq jms.artifact=activemq-client jms.version=6.1.4 jms.factory=org.apache.activemq.ActiveMQConnectionFactory slf4j.version=2.0.16
+jms-activemq-5.18       jms       artemis   jms.group=org.apache.activemq jms.artifact=activemq-client jms.version=5.18.6 jms.factory=org.apache.activemq.ActiveMQConnectionFactory slf4j.version=2.0.16 ee=javax
+jaxws-metro-4.0         jaxws-metro -       metro.version=4.0.3
+jaxws-metro-2.3         jaxws-metro -       metro.version=2.3.7 ee=javax
+jaxws-cxf-4.0           jaxws-cxf -         cxf.version=4.0.6 slf4j.version=2.0.16
+jaxws-cxf-3.6           jaxws-cxf -         cxf.version=3.6.5 slf4j.version=1.7.36 ee=javax
+llm-openai-2.8           llm-openai -        openai.version=2.8.1
+llm-openai-1.6           llm-openai -        openai.version=1.6.1
+llm-anthropic-2.2        llm-anthropic -     anthropic.version=2.2.0
+llm-anthropic-1.4        llm-anthropic -     anthropic.version=1.4.0
+llm-langchain4j-1.2      llm-langchain4j -   langchain4j.version=1.2.0
+llm-langchain4j-0.36     llm-langchain4j-0 - langchain4j.version=0.36.2
+llm-spring-ai-1.0        llm-spring-ai -     springai.version=1.0.0

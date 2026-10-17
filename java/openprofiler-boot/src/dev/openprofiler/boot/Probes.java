@@ -34,7 +34,9 @@ final class Probes {
     static void init() {
         Probe[] builtin = {
             new JdbcProbe(), new JpaProbe(), new HttpServerProbe(), new HttpClientProbe(), new KafkaProbe(),
-            new GrpcProbe(), new ExceptionProbe(), new FileProbe(), new SocketProbe(), new AsyncProbe(),
+            new GrpcProbe(), new MongoProbe(), new CassandraProbe(), new JmsProbe(), new RmiProbe(),
+            new WebServiceProbe(), new LlmProbe(), new ExceptionProbe(), new FileProbe(), new SocketProbe(),
+            new AsyncProbe(),
         };
         try {
             for (Probe p : builtin) {

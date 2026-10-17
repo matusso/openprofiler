@@ -1,0 +1,9 @@
+# Commands by command and collection; handshakes and heartbeats are not recorded.
+count   | mongodb | insert matrix.orders | 20
+event   | mongodb | find matrix.orders | context~GET /owners/{id}
+stack   | mongodb | insert matrix.orders | Main.main
+call    | mongodb | update matrix.orders
+call    | mongodb | aggregate matrix.orders
+call    | mongodb | delete matrix.orders
+nocall  | mongodb | hello
+nocall  | mongodb | ismaster

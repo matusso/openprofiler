@@ -6,8 +6,8 @@
 #   java/matrix/run.sh                 # every case
 #   java/matrix/run.sh jdbc- grpc      # cases whose name starts with one of the arguments
 #
-# Needs Docker (Maven resolves the dependencies in a container, and PostgreSQL, MySQL and Kafka run
-# in containers) and a JDK 17+ on the host (JAVA_HOME, or `java` on the PATH). Work files go to
+# Needs Docker (Maven resolves the dependencies in a container, and PostgreSQL, MySQL, Kafka,
+# MongoDB, Cassandra and ActiveMQ Artemis run in containers) and a JDK 17+ on the host (JAVA_HOME, or `java` on the PATH). Work files go to
 # target/probe-matrix/<case>/; KEEP_SERVICES=1 leaves the service containers running.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -48,7 +48,7 @@ trap stop_services EXIT
 
 wait_for() { # name, command...
   local name="$1"; shift
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 180); do
     if "$@" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
@@ -80,6 +80,16 @@ service() {
           -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
           -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
           apache/kafka:3.9.1 >/dev/null ;;
+      mongo)
+        docker run -d --name opmatrix-mongo -p 57017:27017 mongo:7.0 >/dev/null ;;
+      cassandra)
+        # Clients reach the node at the contact point's address.
+        docker run -d --name opmatrix-cassandra -p 59042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M \
+          -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 cassandra:4.1 >/dev/null ;;
+      artemis)
+        # Core and OpenWire clients on one acceptor.
+        docker run -d --name opmatrix-artemis -p 56161:61616 -e ANONYMOUS_LOGIN=true \
+          apache/activemq-artemis:2.38.0 >/dev/null ;;
       *) echo "unknown service $s" >&2; return 1 ;;
     esac
   fi
@@ -88,6 +98,9 @@ service() {
     postgres) wait_for postgres docker exec opmatrix-postgres pg_isready -U matrix -d matrix ;;
     mysql) wait_for mysql docker exec opmatrix-mysql mysql -umatrix -pmatrix -h127.0.0.1 -e 'select 1' matrix ;;
     kafka) wait_for kafka docker exec opmatrix-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:59092 --list ;;
+    mongo) wait_for mongo docker exec opmatrix-mongo mongosh --quiet --eval 'db.runCommand({ping: 1})' ;;
+    cassandra) wait_for cassandra docker exec opmatrix-cassandra cqlsh -e 'describe keyspaces' ;;
+    artemis) wait_for artemis bash -c 'docker logs opmatrix-artemis 2>&1 | grep -q AMQ221007' ;;
   esac
 }
 
@@ -134,7 +147,8 @@ run_case() { # name scenario services props...
   if [[ "$ee" == javax ]]; then
     # Sources are written against Jakarta EE; javax cases use the old package names.
     find "$dir/src" "$dir/classes" -type f \( -name '*.java' -o -name '*.kt' -o -name '*.xml' \) \
-      -exec sed -i.bak -e 's/jakarta\.servlet/javax.servlet/g' -e 's/jakarta\.persistence/javax.persistence/g' {} \;
+      -exec sed -i.bak -e 's/jakarta\.servlet/javax.servlet/g' -e 's/jakarta\.persistence/javax.persistence/g' \
+        -e 's/jakarta\.jms/javax.jms/g' -e 's/jakarta\.xml\.ws/javax.xml.ws/g' -e 's/jakarta\.jws/javax.jws/g' {} \;
     find "$dir" -name '*.bak' -delete
   fi
   for s in $services; do [[ "$s" != - ]] && service "$s"; done

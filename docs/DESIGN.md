@@ -225,20 +225,25 @@ that serves live sessions.
 - Probes: JDBC (SQL, bind parameters, physical and pooled connections), JPA (javax and Jakarta),
   HTTP server (Servlet, also asynchronous; JDK `HttpServer`; Netty handlers; Reactor Netty, so
   WebFlux; Vert.x, so Quarkus) and client (JDK `HttpClient`, `HttpURLConnection`, OkHttp, Apache
-  HttpClient 4/5), Kafka, gRPC, exceptions, files, sockets. Threads aggregate their calls per
+  HttpClient 4/5), Kafka, gRPC, MongoDB (sync and reactive), Cassandra (DataStax 3.x/4.x), JMS
+  (javax and Jakarta), RMI, SOAP web services (JAX-WS: Metro, CXF), AI/LLM clients (OpenAI and
+  Anthropic SDKs, LangChain4j, Spring AI; model and tokens), exceptions, files, sockets.
+  Asynchronous calls (Cassandra, MongoDB reactive, async LLM clients) are timed until their future
+  or reply completes. Threads aggregate their calls per
   second, payload and stack, and the native side keeps individual events within a per-probe budget
   (slow calls always). Stacks of probe calls are sampled per (probe, request, payload) at most every
   10 ms (events always get their own), since walking deep stacks on every call would dominate the
   cost of the probes.
-- **Request labels and async context.** HTTP and gRPC server probes set the thread's request label
-  (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
+- **Request labels and async context.** HTTP, gRPC, RMI and SOAP server probes and JMS message
+  listeners set the thread's request label (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
   stacks (call trees split by request) and the context of its probe events. An internal probe
   carries the label across `FutureTask`, `ForkJoinTask` (`CompletableFuture`, parallel streams),
   `ThreadPoolExecutor.execute`, `Thread.start` (also virtual threads), Kotlin coroutine dispatch
   and JBoss Threads' `EnhancedQueueExecutor`. Asynchronous servers are labelled while they
   dispatch a request and record it when its response completes.
 - **Version matrix** (`java/matrix/`): every probe runs against real libraries and versions
-  (PostgreSQL, MySQL and Kafka in containers) and the recordings are checked for payloads, events,
+  (PostgreSQL, MySQL, Kafka, MongoDB, Cassandra and ActiveMQ Artemis in containers; LLM clients
+  against a local fake API) and the recordings are checked for payloads, events,
   control objects, request context and call-tree links. The demo benchmark (`java/bench/`) measures
   the overhead on Spring Petclinic and the Quarkus Hibernate ORM quickstart.
 

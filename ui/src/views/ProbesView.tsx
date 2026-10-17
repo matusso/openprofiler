@@ -741,8 +741,9 @@ export function ProbesView() {
                 <div className="spinner" />
               ) : (
                 <p style={{ maxWidth: 480 }}>
-                  No probe calls yet. Probes record JDBC, JPA, HTTP, Kafka, gRPC, exceptions, files, sockets
-                  and custom <span className="mono">@Probe</span> methods while the application runs.
+                  No probe calls yet. Probes record JDBC, JPA, HTTP, Kafka, gRPC, MongoDB, Cassandra, JMS,
+                  RMI, web services, LLM clients, exceptions, files, sockets and custom{" "}
+                  <span className="mono">@Probe</span> methods while the application runs.
                 </p>
               )}
             </div>

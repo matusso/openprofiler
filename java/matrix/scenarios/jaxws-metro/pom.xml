@@ -1,0 +1,13 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>matrix</groupId>
+  <artifactId>jaxws-metro</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.sun.xml.ws</groupId>
+      <artifactId>jaxws-rt</artifactId>
+      <version>${metro.version}</version>
+    </dependency>
+  </dependencies>
+</project>
