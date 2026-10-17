@@ -9,16 +9,22 @@
 //! flushed into the collector as [`SampleKind::Calls`] rows (weight = self nanoseconds, count =
 //! invocations) on the global stack of the node's path. A thread's current request label, if a
 //! probe set one, becomes the root frame of its paths.
+//!
+//! Each node also keeps the inclusive time and the slowest call of its path (call site), flushed
+//! as call-site rows for outlier detection. While the call tracer runs ([`start_trace`]), every
+//! entry and exit is also appended to a per-thread buffer and flushed as trace events, until the
+//! trace's deadline or event cap.
 
 use crate::agent;
 use crate::events::thread_index;
 use crate::jvm::jvmti;
 use jvmti_sys::*;
-use openprofiler_model::{SampleKind, ThreadState};
+use openprofiler_model::{CallSiteStat, SampleKind, ThreadState, TraceEvent};
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Whether call counting records anything (`SetRecording calls`).
@@ -32,6 +38,69 @@ const TUNE_MAX_SELF_NS: u64 = 400;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 /// Label nodes use method ids with this bit set (the low bits are the label's frame id).
 const LABEL: u32 = 1 << 31;
+
+/// Default call-tracer limits.
+pub const TRACE_DURATION: Duration = Duration::from_secs(10);
+pub const TRACE_EVENTS: u64 = 1_000_000;
+/// A thread's trace buffer is flushed once it holds this many events.
+const TRACE_FLUSH: usize = 4096;
+
+/// Whether the call tracer is running (checked on every call; the rest only while it runs).
+static TRACING: AtomicBool = AtomicBool::new(false);
+/// Trace deadline, nanoseconds since [`clock`]'s base.
+static TRACE_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// Events the running trace may still record.
+static TRACE_LEFT: AtomicI64 = AtomicI64::new(0);
+/// Events recorded by the current (or last) trace.
+static TRACE_RECORDED: AtomicU64 = AtomicU64::new(0);
+
+/// `(Instant, epoch nanos)` taken once, to turn instants into wall-clock times.
+fn clock() -> (Instant, i64) {
+    static BASE: OnceLock<(Instant, i64)> = OnceLock::new();
+    *BASE.get_or_init(|| (Instant::now(), crate::collector::now_nanos()))
+}
+
+fn epoch(t: Instant) -> i64 {
+    let (base, epoch) = clock();
+    epoch + t.saturating_duration_since(base).as_nanos() as i64
+}
+
+/// Starts the call tracer for `duration` or `max_events` events, whichever comes first.
+pub fn start_trace(duration: Duration, max_events: u64) {
+    let (base, _) = clock();
+    let until = Instant::now().saturating_duration_since(base) + duration;
+    TRACE_UNTIL.store(until.as_nanos() as u64, Ordering::SeqCst);
+    TRACE_LEFT.store(max_events.min(i64::MAX as u64) as i64, Ordering::SeqCst);
+    TRACE_RECORDED.store(0, Ordering::SeqCst);
+    TRACING.store(true, Ordering::SeqCst);
+}
+
+pub fn stop_trace() {
+    TRACING.store(false, Ordering::SeqCst);
+}
+
+/// `(running, events recorded)` of the current or last trace.
+pub fn trace_status() -> (bool, u64) {
+    let running = TRACING.load(Ordering::Relaxed)
+        && TRACE_LEFT.load(Ordering::Relaxed) > 0
+        && clock().0.elapsed().as_nanos() as u64 <= TRACE_UNTIL.load(Ordering::Relaxed);
+    (running, TRACE_RECORDED.load(Ordering::Relaxed))
+}
+
+/// Whether an event at `now` may be traced; consumes one event of the budget.
+fn trace_take(now: Instant) -> bool {
+    if !TRACING.load(Ordering::Relaxed) {
+        return false;
+    }
+    if now.saturating_duration_since(clock().0).as_nanos() as u64 > TRACE_UNTIL.load(Ordering::Relaxed)
+        || TRACE_LEFT.fetch_sub(1, Ordering::Relaxed) <= 0
+    {
+        TRACING.store(false, Ordering::Relaxed);
+        return false;
+    }
+    TRACE_RECORDED.fetch_add(1, Ordering::Relaxed);
+    true
+}
 
 /// Methods disabled by auto-tuning (bit per method id) until their class is retransformed.
 static DISABLED: [AtomicU64; 4096] = [const { AtomicU64::new(0) }; 4096];
@@ -51,6 +120,9 @@ struct Node {
     frame: u32,
     count: u32,
     self_ns: u64,
+    /// Inclusive time and slowest call since the last flush.
+    total_ns: u64,
+    max_ns: u64,
     /// Global stack id, 0 until first flushed.
     stack: u32,
 }
@@ -70,12 +142,30 @@ struct ThreadCalls {
     index: HashMap<(u32, u32), u32>,
     stack: Vec<Frame>,
     last_flush: Instant,
+    /// Call tracer events not yet flushed: (time, frame, exit).
+    trace: Vec<(Instant, u32, bool)>,
 }
 
 impl ThreadCalls {
     fn new(thread: Option<u32>) -> Self {
-        let root = Node { parent: 0, method: u32::MAX, frame: 0, count: 0, self_ns: 0, stack: 0 };
-        Self { thread, nodes: vec![root], index: HashMap::new(), stack: vec![], last_flush: Instant::now() }
+        let root = Node {
+            parent: 0,
+            method: u32::MAX,
+            frame: 0,
+            count: 0,
+            self_ns: 0,
+            total_ns: 0,
+            max_ns: 0,
+            stack: 0,
+        };
+        Self {
+            thread,
+            nodes: vec![root],
+            index: HashMap::new(),
+            stack: vec![],
+            last_flush: Instant::now(),
+            trace: vec![],
+        }
     }
 
     fn child(&mut self, parent: u32, method: u32) -> u32 {
@@ -84,7 +174,16 @@ impl ThreadCalls {
         if id == next {
             let frame =
                 if method & LABEL != 0 { method & !LABEL } else { super::method_frame(method).unwrap_or(0) };
-            self.nodes.push(Node { parent, method, frame, count: 0, self_ns: 0, stack: 0 });
+            self.nodes.push(Node {
+                parent,
+                method,
+                frame,
+                count: 0,
+                self_ns: 0,
+                total_ns: 0,
+                max_ns: 0,
+                stack: 0,
+            });
         }
         id
     }
@@ -98,7 +197,11 @@ impl ThreadCalls {
             },
         };
         let node = self.child(parent, method);
-        self.stack.push(Frame { node, method, start: Instant::now(), child_ns: 0 });
+        let start = Instant::now();
+        if trace_take(start) {
+            self.trace.push((start, self.nodes[node as usize].frame, false));
+        }
+        self.stack.push(Frame { node, method, start, child_ns: 0 });
     }
 
     fn exit(&mut self, method: u32) {
@@ -110,12 +213,21 @@ impl ThreadCalls {
             let n = &mut self.nodes[f.node as usize];
             n.count += 1;
             n.self_ns += dur.saturating_sub(f.child_ns);
+            n.total_ns += dur;
+            n.max_ns = n.max_ns.max(dur);
+            let frame = n.frame;
             if let Some(p) = self.stack.last_mut() {
                 p.child_ns += dur;
             }
+            if trace_take(now) {
+                self.trace.push((now, frame, true));
+            }
         }
         let since = now.duration_since(self.last_flush);
-        if since >= FLUSH_EVERY || (self.stack.is_empty() && since >= FLUSH_EVERY / 10) {
+        if since >= FLUSH_EVERY
+            || (self.stack.is_empty() && since >= FLUSH_EVERY / 10)
+            || self.trace.len() >= TRACE_FLUSH
+        {
             self.flush();
         }
     }
@@ -143,6 +255,14 @@ impl ThreadCalls {
         let mut stats = vec![];
         {
             let mut c = a.collector.lock();
+            if !self.trace.is_empty() {
+                c.add_trace_events(self.trace.drain(..).map(|(t, frame, exit)| TraceEvent {
+                    time: epoch(t),
+                    thread,
+                    frame,
+                    exit,
+                }));
+            }
             for i in 1..self.nodes.len() {
                 let n = self.nodes[i];
                 if n.count == 0 {
@@ -158,10 +278,20 @@ impl ThreadCalls {
                     n.self_ns,
                     n.count,
                 );
+                c.add_call_site(CallSiteStat {
+                    time: now,
+                    thread,
+                    stack,
+                    count: n.count,
+                    total: n.total_ns as i64,
+                    max: n.max_ns as i64,
+                });
                 stats.push((n.method, n.count as u64, n.self_ns));
                 let n = &mut self.nodes[i];
                 n.count = 0;
                 n.self_ns = 0;
+                n.total_ns = 0;
+                n.max_ns = 0;
             }
         }
         let mut s = STATS.lock();
@@ -255,8 +385,12 @@ pub fn take_tuning_candidates() -> Vec<u32> {
 mod tests {
     use super::*;
 
+    /// The tracer's state is global; tests that enter and exit methods must not overlap.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn self_times_and_unwinding() {
+        let _serial = SERIAL.lock();
         let mut t = ThreadCalls::new(None);
         t.enter(1);
         t.enter(2);
@@ -276,5 +410,25 @@ mod tests {
         // An exit without a matching entry is ignored.
         t.exit(9);
         assert!(t.stack.is_empty());
+        let site = path(&t, &[1, 2]).unwrap();
+        assert!(site.total_ns >= site.max_ns && site.max_ns > 0);
+    }
+
+    #[test]
+    fn tracer_records_in_order_until_its_cap() {
+        let _serial = SERIAL.lock();
+        let mut t = ThreadCalls::new(None);
+        start_trace(Duration::from_secs(60), 5);
+        t.enter(1);
+        t.enter(2);
+        t.exit(2);
+        t.exit(1);
+        t.enter(3);
+        t.exit(3);
+        let kinds: Vec<bool> = t.trace.iter().map(|e| e.2).collect();
+        assert_eq!(kinds, vec![false, false, true, true, false]);
+        assert!(t.trace.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert_eq!(trace_status(), (false, 5));
+        stop_trace();
     }
 }

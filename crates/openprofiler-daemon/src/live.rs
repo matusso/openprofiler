@@ -319,6 +319,13 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
         "recording" => {
             let kind = req["kind"].as_str().ok_or_else(|| anyhow!("missing kind"))?;
             let enabled = req["enabled"].as_bool().unwrap_or(true);
+            if kind == "trace" {
+                // The call tracer: `duration_ms` and `max_events` bound it (0 = agent defaults).
+                let n = |k: &str| req[k].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
+                c.call_trace(enabled, n("duration_ms"), n("max_events")).await?;
+                s.bump(vec!["calls".into()]);
+                return Ok(json!({}));
+            }
             let interval_us = req["interval_ms"].as_f64().map(|ms| (ms * 1000.0) as u32).unwrap_or(0);
             c.set_recording(kind, enabled, interval_us).await?;
             Ok(json!({}))
@@ -376,17 +383,32 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
             Ok(r)
         }
         "instrumentation" => {
-            // An empty body reads the settings; `include`/`exclude`/`probes` replace them.
+            // An empty body reads the settings; `include`/`exclude`/`probes`/`complexity` replace
+            // them.
             let list = |k: &str| -> Vec<String> {
                 req[k]
                     .as_array()
                     .map_or(vec![], |a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             };
-            let i = if req.get("include").is_some()
-                || req.get("exclude").is_some()
-                || req.get("probes").is_some()
-            {
-                c.set_instrumentation(list("include"), list("exclude"), list("probes")).await?
+            let keys = ["include", "exclude", "probes", "complexity"];
+            let i = if keys.iter().any(|k| req.get(k).is_some()) {
+                // Fields left out keep their current value.
+                let cur = c.instrumentation().await?;
+                let probes = if cur.available_probes.iter().all(|p| cur.enabled_probes.contains(&p.id)) {
+                    vec![]
+                } else if cur.enabled_probes.is_empty() {
+                    vec!["none".to_owned()]
+                } else {
+                    cur.enabled_probes
+                };
+                let pick = |k: &str, cur: Vec<String>| if req.get(k).is_some() { list(k) } else { cur };
+                c.set_instrumentation(
+                    pick("include", cur.include),
+                    pick("exclude", cur.exclude),
+                    pick("probes", probes),
+                    pick("complexity", cur.complexity),
+                )
+                .await?
             } else {
                 c.instrumentation().await?
             };
@@ -400,6 +422,9 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
                 "instrumented_classes": i.instrumented_classes,
                 "instrumented_methods": i.instrumented_methods,
                 "disabled_methods": i.disabled_methods,
+                "complexity": i.complexity,
+                "trace_active": i.trace_active,
+                "trace_events": i.trace_events,
             }))
         }
         other => bail!("unknown live action: {other}"),

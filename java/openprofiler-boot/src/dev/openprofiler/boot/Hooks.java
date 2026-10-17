@@ -55,6 +55,9 @@ public final class Hooks {
     /** Sets (null: clears) the current thread's request label. */
     static native void setContext0(String label);
 
+    /** A call of a complexity-analysis site took {@code nanos} for an argument of size {@code size}. */
+    static native void complexity0(int site, long size, long nanos);
+
     // ---- injected calls ------------------------------------------------------------------------
 
     /** Probe method entry; {@code args} are the boxed arguments if the interception asked for them. */

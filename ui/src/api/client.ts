@@ -45,6 +45,7 @@ import type {
   FsListing,
   InstrumentationInfo,
   ProbesRequest,
+  CallsRequest,
   DiscoverKind,
   RemoteContainer,
   RemotePod,
@@ -267,8 +268,16 @@ export class OpenProfilerClient {
   // Probes (any session) and instrumentation (live)
   probes = <T>(id: string, req: ProbesRequest) => this.post<T>(`/sessions/${id}/probes`, req);
   instrumentation = (id: string) => this.get<InstrumentationInfo>(`/sessions/${id}/instrumentation`);
-  setInstrumentation = (id: string, req: { include: string[]; exclude: string[]; probes: string[] }) =>
-    this.post<InstrumentationInfo>(`/sessions/${id}/instrumentation`, req);
+  /** Fields left out keep their current value. */
+  setInstrumentation = (
+    id: string,
+    req: { include?: string[]; exclude?: string[]; probes?: string[]; complexity?: string[] },
+  ) => this.post<InstrumentationInfo>(`/sessions/${id}/instrumentation`, req);
+
+  // Instrumented method analysis (any session); the call tracer (live)
+  calls = <T>(id: string, req: CallsRequest) => this.post<T>(`/sessions/${id}/calls`, req);
+  callTrace = (id: string, enabled: boolean, duration_ms?: number, max_events?: number) =>
+    this.post(`/sessions/${id}/recording`, { kind: "trace", enabled, duration_ms, max_events });
 
   // MBeans (live); `server` is an MBeanServerInfo id, "" for the platform server
   mbeanServers = (id: string) => this.post<{ servers: MBeanServerInfo[] }>(`/sessions/${id}/mbean-servers`);

@@ -148,6 +148,9 @@ impl Session {
             {
                 caps.push("probes".into());
             }
+            if !p.calls.is_empty() {
+                caps.push("call_analysis".into());
+            }
         }
         if self.heap().is_some() {
             caps.push("heap".into());
@@ -163,6 +166,9 @@ impl Session {
             }
             if agent.iter().any(|c| c == "instrument") {
                 caps.push("instrument".into());
+                if !caps.iter().any(|c| c == "call_analysis") {
+                    caps.push("call_analysis".into());
+                }
             }
         }
         if self.decompiler().is_some() {

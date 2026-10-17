@@ -107,6 +107,9 @@ final class Probes {
         if (interception == -1) {
             return CustomProbe.forSite(probe, site);
         }
+        if (interception == ComplexityProbe.INTERCEPTION) {
+            return ComplexityProbe.INSTANCE;
+        }
         Probe[] ps = byIndex;
         return probe < ps.length ? ps[probe] : null;
     }

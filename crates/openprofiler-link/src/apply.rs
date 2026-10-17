@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result, bail};
 use openprofiler_model::{
-    Bookmark, ControlEvent, ControlEventKind, FrameKind, GcEvent, JvmInfo, Method, MonitorEvent,
-    MonitorEventKind, ProbeCall, ProbeEvent, ProbeInfo, Profile, SampleKind, ThreadInfo, ThreadState, Unit,
+    Bookmark, CallSiteStat, ComplexityPoint, ControlEvent, ControlEventKind, FrameKind, GcEvent, JvmInfo,
+    Method, MonitorEvent, MonitorEventKind, ProbeCall, ProbeEvent, ProbeInfo, Profile, SampleKind,
+    ThreadInfo, ThreadState, TraceEvent, Unit,
 };
 use openprofiler_proto::v1;
 
@@ -127,6 +128,42 @@ fn apply_probes(p: &mut Profile, b: &v1::DataBatch) {
             thread: c.thread,
             stack: c.stack,
         });
+    }
+}
+
+fn apply_calls(p: &mut Profile, b: &v1::DataBatch) {
+    if let Some(t) = &b.call_trace {
+        for i in 0..t.time.len() {
+            p.calls.trace.push(TraceEvent {
+                time: t.time[i],
+                thread: t.thread.get(i).copied().unwrap_or(0),
+                frame: t.frame.get(i).copied().unwrap_or(0),
+                exit: t.exit.get(i).copied().unwrap_or(false),
+            });
+        }
+    }
+    if let Some(c) = &b.call_sites {
+        for i in 0..c.time.len() {
+            p.calls.sites.push(CallSiteStat {
+                time: c.time[i],
+                thread: c.thread.get(i).copied().unwrap_or(0),
+                stack: c.stack.get(i).copied().unwrap_or(0),
+                count: c.count.get(i).copied().unwrap_or(0),
+                total: c.total.get(i).copied().unwrap_or(0),
+                max: c.max.get(i).copied().unwrap_or(0),
+            });
+        }
+    }
+    if let Some(c) = &b.complexity {
+        for i in 0..c.time.len() {
+            p.calls.complexity.push(ComplexityPoint {
+                time: c.time[i],
+                thread: c.thread.get(i).copied().unwrap_or(0),
+                frame: c.frame.get(i).copied().unwrap_or(0),
+                size: c.size.get(i).copied().unwrap_or(0),
+                duration: c.duration.get(i).copied().unwrap_or(0),
+            });
+        }
     }
 }
 
@@ -305,6 +342,7 @@ pub fn apply_batch(p: &mut Profile, b: &v1::DataBatch) -> Result<()> {
         p.thread_dumps.push(thread_dump(d));
     }
     apply_probes(p, b);
+    apply_calls(p, b);
     if b.time != 0 {
         p.extend_range(b.time);
     }

@@ -1,14 +1,16 @@
 //! In-agent aggregation and delta shipping.
 //!
 //! The collector owns append-only tables (symbols, stack trie, threads, sample rows, telemetry,
-//! thread-state spans, monitor/GC events, bookmarks, thread dumps). Samples are first aggregated per
+//! thread-state spans, monitor/GC events, bookmarks, thread dumps, probe and call-analysis
+//! rows). Samples are first aggregated per
 //! `(second, kind, thread, state, stack, class)` and turned into rows when a batch is cut. A
 //! [`Watermark`] is a vector of absolute table positions; a [`DataBatch`] carries everything
 //! between two watermarks. In live mode, rows the daemon acknowledged may be discarded.
 
 use crate::resolve::Resolver;
 use openprofiler_model::{
-    Bookmark, FrameKind, GcEvent, MonitorEventKind, Nanos, SampleKind, StackTrie, Symbols, ThreadState,
+    Bookmark, CallSiteStat, ComplexityPoint, FrameKind, GcEvent, MonitorEventKind, Nanos, SampleKind,
+    StackTrie, Symbols, ThreadState, TraceEvent,
 };
 use openprofiler_proto::v1;
 use std::collections::HashMap;
@@ -142,6 +144,11 @@ pub struct Collector {
     probe_calls: Table<ProbeCallRow>,
     probe_events: Table<v1::ProbeEvent>,
     probe_controls: Table<v1::ControlEvent>,
+    call_trace: Table<TraceEvent>,
+    call_sites: Table<CallSiteStat>,
+    complexity: Table<ComplexityPoint>,
+    /// Complexity points recorded in the current second per frame: `(second, count)`.
+    complexity_budget: HashMap<u32, (i64, u32)>,
     seq: u64,
     /// Whether acknowledged rows may be dropped.
     pub live: bool,
@@ -179,6 +186,10 @@ impl Collector {
             probe_calls: Table::default(),
             probe_events: Table::default(),
             probe_controls: Table::default(),
+            call_trace: Table::default(),
+            call_sites: Table::default(),
+            complexity: Table::default(),
+            complexity_budget: HashMap::new(),
             seq: 0,
             live,
             last_span_cut: 0,
@@ -364,6 +375,29 @@ impl Collector {
         self.probe_controls.rows.push(ev);
     }
 
+    pub fn add_trace_events(&mut self, events: impl IntoIterator<Item = TraceEvent>) {
+        self.call_trace.rows.extend(events);
+    }
+
+    pub fn add_call_site(&mut self, stat: CallSiteStat) {
+        self.call_sites.rows.push(stat);
+    }
+
+    /// Records a complexity point unless the method already has `per_second` this second.
+    pub fn add_complexity(&mut self, point: ComplexityPoint, per_second: u32) -> bool {
+        let second = point.time.div_euclid(NANOS_PER_SEC);
+        let b = self.complexity_budget.entry(point.frame).or_insert((second, 0));
+        if b.0 != second {
+            *b = (second, 0);
+        }
+        if b.1 >= per_second {
+            return false;
+        }
+        b.1 += 1;
+        self.complexity.rows.push(point);
+        true
+    }
+
     /// Interns a synthetic frame such as `[GC active]`.
     pub fn synthetic_frame(&mut self, label: &str) -> u32 {
         let m = self.symbols.intern_method("", label, "");
@@ -465,6 +499,9 @@ impl Collector {
             probe_calls: self.probe_calls.end(),
             probe_events: self.probe_events.end(),
             probe_controls: self.probe_controls.end(),
+            call_trace: self.call_trace.end(),
+            call_sites: self.call_sites.end(),
+            complexity: self.complexity.end(),
         }
     }
 
@@ -481,6 +518,9 @@ impl Collector {
             probe_calls: self.probe_calls.base,
             probe_events: self.probe_events.base,
             probe_controls: self.probe_controls.base,
+            call_trace: self.call_trace.base,
+            call_sites: self.call_sites.base,
+            complexity: self.complexity.base,
             ..Default::default()
         }
     }
@@ -507,6 +547,9 @@ impl Collector {
             probe_calls: w.probe_calls.clamp(r.probe_calls, e.probe_calls),
             probe_events: w.probe_events.clamp(r.probe_events, e.probe_events),
             probe_controls: w.probe_controls.clamp(r.probe_controls, e.probe_controls),
+            call_trace: w.call_trace.clamp(r.call_trace, e.call_trace),
+            call_sites: w.call_sites.clamp(r.call_sites, e.call_sites),
+            complexity: w.complexity.clamp(r.complexity, e.complexity),
         }
     }
 
@@ -684,6 +727,30 @@ impl Collector {
             probe_calls.max.push(r.agg.max);
             probe_calls.errors.push(r.agg.errors);
         }
+        let mut call_trace = v1::CallTraceBatch::default();
+        for e in self.call_trace.since(from.call_trace) {
+            call_trace.time.push(e.time);
+            call_trace.thread.push(e.thread);
+            call_trace.frame.push(e.frame);
+            call_trace.exit.push(e.exit);
+        }
+        let mut call_sites = v1::CallSiteBatch::default();
+        for c in self.call_sites.since(from.call_sites) {
+            call_sites.time.push(c.time);
+            call_sites.thread.push(c.thread);
+            call_sites.stack.push(c.stack);
+            call_sites.count.push(c.count);
+            call_sites.total.push(c.total);
+            call_sites.max.push(c.max);
+        }
+        let mut complexity = v1::ComplexityBatch::default();
+        for c in self.complexity.since(from.complexity) {
+            complexity.time.push(c.time);
+            complexity.thread.push(c.thread);
+            complexity.frame.push(c.frame);
+            complexity.size.push(c.size);
+            complexity.duration.push(c.duration);
+        }
         Some(v1::DataBatch {
             from: Some(from),
             to: Some(to),
@@ -702,6 +769,9 @@ impl Collector {
             probe_calls: Some(probe_calls),
             probe_events: self.probe_events.since(from.probe_events).to_vec(),
             probe_controls: self.probe_controls.since(from.probe_controls).to_vec(),
+            call_trace: Some(call_trace),
+            call_sites: Some(call_sites),
+            complexity: Some(complexity),
         })
     }
 
@@ -730,6 +800,15 @@ impl Collector {
         }
         if self.probe_controls.rows.len() > RETAIN_ROWS / 4 {
             self.probe_controls.drop_until(w.probe_controls);
+        }
+        if self.call_trace.rows.len() > RETAIN_ROWS {
+            self.call_trace.drop_until(w.call_trace);
+        }
+        if self.call_sites.rows.len() > RETAIN_ROWS {
+            self.call_sites.drop_until(w.call_sites);
+        }
+        if self.complexity.rows.len() > RETAIN_ROWS / 4 {
+            self.complexity.drop_until(w.complexity);
         }
         // Dumps are large; once the daemon has them they are not kept.
         self.thread_dumps.drop_until(w.thread_dumps);

@@ -60,6 +60,12 @@ export const IconProbe = base(
     <path d="M8.5 2h7M7 14h10" />
   </>,
 );
+export const IconMethods = base(
+  <>
+    <path d="M4 5h6M7 5v14M4 19h6" />
+    <path d="M13 9l3 3-3 3M17 15h3" />
+  </>,
+);
 export const IconEvents = base(
   <>
     <path d="M4 6h16M4 12h16M4 18h10" />

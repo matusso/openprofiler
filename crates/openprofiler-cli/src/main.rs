@@ -59,7 +59,8 @@ enum Cmd {
     /// Export a view to CSV/JSON/HTML/SVG/collapsed stacks.
     Export {
         file: PathBuf,
-        /// calltree, backtraces, hotspots, flame, telemetry, threads, insights, classes, biggest
+        /// calltree, backtraces, hotspots, flame, telemetry, threads, insights, outliers, complexity,
+        /// trace, classes, biggest
         #[arg(long, default_value = "hotspots")]
         view: String,
         /// csv, json, html, svg, collapsed

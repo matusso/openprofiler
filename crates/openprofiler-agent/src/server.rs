@@ -388,6 +388,9 @@ fn handle_request<S: Write>(
             }
             None => fail(&mut resp, "heap dumps unavailable (no boot classes)"),
         },
+        Some(Kind::SetRecording(r)) if r.kind == "trace" => {
+            crate::events::set_trace(a, r.enabled, r.duration_ms, r.max_events)
+        }
         Some(Kind::SetRecording(r)) => crate::events::set_recording(a, &r.kind, r.enabled, r.interval_us),
         Some(Kind::UpdateConfig(u)) => {
             if let Some(c) = u.config {
@@ -422,7 +425,7 @@ fn handle_request<S: Write>(
                 [n] if n == "none" => Some(vec![]),
                 _ => Some(r.probes),
             };
-            crate::instrument::configure(r.include, r.exclude, probes);
+            crate::instrument::configure(r.include, r.exclude, probes, r.complexity);
             resp.result = Some(v1::response::Result::Instrumentation(instrumentation_info(a)));
         }
         Some(Kind::Instrumentation(_)) if crate::events::has_cap(a, "instrument") => {
@@ -445,6 +448,7 @@ fn handle_request<S: Write>(
 
 fn instrumentation_info(a: &Agent) -> v1::InstrumentationInfo {
     let i = crate::instrument::info();
+    let trace = crate::instrument::calls::trace_status();
     let probes = a.collector.lock().probe_infos().to_vec();
     v1::InstrumentationInfo {
         include: i.include,
@@ -454,6 +458,9 @@ fn instrumentation_info(a: &Agent) -> v1::InstrumentationInfo {
         instrumented_classes: i.classes as u32,
         instrumented_methods: i.methods as u32,
         disabled_methods: i.disabled,
+        complexity: i.complexity,
+        trace_active: trace.0,
+        trace_events: trace.1,
     }
 }
 

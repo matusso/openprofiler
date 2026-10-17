@@ -13,7 +13,7 @@ All integers are little-endian.
 Header
   magic        8 bytes   "OPRFSNAP"
   major        u16       1 (readers reject other majors)
-  minor        u16       1 (0: no Arrow sections)
+  minor        u16       1 (0: no Arrow sections, no Calls section)
   flags        u32       0, reserved
   created      i64       epoch nanoseconds
   jvm_len      u32
@@ -57,6 +57,7 @@ payloads to 64 bytes).
 | 13 | Config | Reserved: recording configuration |
 | 14 | Extension | Reserved: vendor or plugin data, identified by the index entry `name` |
 | 15 | Probes | 1.1: `Probes` with the registered probes only (section name `probes`), plus Arrow tables `probe_calls`, `probe_events` and `probe_controls` as further kind-15 sections named after the table. 1.0: one `Probes` with the probes, aggregated calls (columnar, time delta-encoded, payloads are string ids), probe events and control-object events |
+| 16 | Calls | `Calls` (since 1.1): call tracer entries/exits, per-call-site statistics (count, total, max) and complexity points (frame, size, duration), each columnar with delta-encoded times |
 
 Unknown section kinds must be ignored. A reader picks the protobuf section of a kind by its codec
 (0 or 1) and the Arrow sections by codec 3 and name.

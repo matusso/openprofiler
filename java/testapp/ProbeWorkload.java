@@ -105,6 +105,20 @@ public class ProbeWorkload {
         return (i * 31L) % 7;
     }
 
+    /** Insertion sort, for complexity analysis (time grows with the square of the length). */
+    static int[] sortItems(int[] items) {
+        for (int i = 1; i < items.length; i++) {
+            int v = items[i];
+            int j = i - 1;
+            while (j >= 0 && items[j] > v) {
+                items[j + 1] = items[j];
+                j--;
+            }
+            items[j + 1] = v;
+        }
+        return items;
+    }
+
     static void touchFile(File f) throws Exception {
         try (FileOutputStream out = new FileOutputStream(f, false)) {
             out.write("hello probes".getBytes(StandardCharsets.UTF_8), 0, 12);
@@ -155,6 +169,11 @@ public class ProbeWorkload {
             }
             touchFile(tmp);
             OpenProfiler.probeEvent("manual", "tick", 1_000_000);
+            int[] items = new int[100 + (i % 20) * 100];
+            for (int k = 0; k < items.length; k++) {
+                items[k] = items.length - k;
+            }
+            sink += sortItems(items)[0];
             Thread.sleep(20);
         }
         server.stop(0);

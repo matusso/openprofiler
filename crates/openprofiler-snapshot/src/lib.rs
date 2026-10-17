@@ -49,6 +49,8 @@ pub enum SectionKind {
     Config = 13,
     Extension = 14,
     Probes = 15,
+    /// Since 1.1.
+    Calls = 16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +533,47 @@ impl SnapshotReader {
         if let Some(b) = self.arrow(SectionKind::Probes, "probe_controls")? {
             p.probes.controls = arrow::read_probe_controls(b, &p.probes.probes)?;
         }
+        if let Some(c) = self.one::<pb::Calls>(SectionKind::Calls)? {
+            if let Some(t) = c.trace {
+                let mut time = 0i64;
+                for i in 0..t.thread.len() {
+                    time += t.time_delta.get(i).copied().unwrap_or(0);
+                    p.calls.trace.push(TraceEvent {
+                        time,
+                        thread: t.thread[i],
+                        frame: t.frame.get(i).copied().unwrap_or(0),
+                        exit: t.exit.get(i).copied().unwrap_or(false),
+                    });
+                }
+            }
+            if let Some(c) = c.sites {
+                let mut time = 0i64;
+                for i in 0..c.thread.len() {
+                    time += c.time_delta.get(i).copied().unwrap_or(0);
+                    p.calls.sites.push(CallSiteStat {
+                        time,
+                        thread: c.thread[i],
+                        stack: c.stack.get(i).copied().unwrap_or(0),
+                        count: c.count.get(i).copied().unwrap_or(0),
+                        total: c.total.get(i).copied().unwrap_or(0),
+                        max: c.max.get(i).copied().unwrap_or(0),
+                    });
+                }
+            }
+            if let Some(c) = c.complexity {
+                let mut time = 0i64;
+                for i in 0..c.thread.len() {
+                    time += c.time_delta.get(i).copied().unwrap_or(0);
+                    p.calls.complexity.push(ComplexityPoint {
+                        time,
+                        thread: c.thread[i],
+                        frame: c.frame.get(i).copied().unwrap_or(0),
+                        size: c.size.get(i).copied().unwrap_or(0),
+                        duration: c.duration.get(i).copied().unwrap_or(0),
+                    });
+                }
+            }
+        }
         if let Some(b) = self.one::<pb::Bookmarks>(SectionKind::Bookmarks)? {
             p.bookmarks = b
                 .bookmarks
@@ -799,6 +842,36 @@ fn write_sections(w: &mut SnapshotWriter, p: &Profile, use_arrow: bool) -> Resul
         } else {
             write_protobuf_probes(w, p, probes)?;
         }
+    }
+    if use_arrow && !p.calls.is_empty() {
+        let c = &p.calls;
+        w.message(
+            SectionKind::Calls,
+            "calls",
+            &pb::Calls {
+                trace: Some(pb::CallTrace {
+                    time_delta: deltas(c.trace.iter().map(|e| e.time)),
+                    thread: c.trace.iter().map(|e| e.thread).collect(),
+                    frame: c.trace.iter().map(|e| e.frame).collect(),
+                    exit: c.trace.iter().map(|e| e.exit).collect(),
+                }),
+                sites: Some(pb::CallSites {
+                    time_delta: deltas(c.sites.iter().map(|e| e.time)),
+                    thread: c.sites.iter().map(|e| e.thread).collect(),
+                    stack: c.sites.iter().map(|e| e.stack).collect(),
+                    count: c.sites.iter().map(|e| e.count).collect(),
+                    total: c.sites.iter().map(|e| e.total).collect(),
+                    max: c.sites.iter().map(|e| e.max).collect(),
+                }),
+                complexity: Some(pb::Complexity {
+                    time_delta: deltas(c.complexity.iter().map(|e| e.time)),
+                    thread: c.complexity.iter().map(|e| e.thread).collect(),
+                    frame: c.complexity.iter().map(|e| e.frame).collect(),
+                    size: c.complexity.iter().map(|e| e.size).collect(),
+                    duration: c.complexity.iter().map(|e| e.duration).collect(),
+                }),
+            },
+        )?;
     }
     w.message(
         SectionKind::Bookmarks,
@@ -1100,6 +1173,10 @@ mod tests {
             label: "d".into(),
             threads: vec![DumpedThread::default()],
         });
+        p.calls.trace.push(TraceEvent { time: 10, thread: t, frame: 1, exit: false });
+        p.calls.trace.push(TraceEvent { time: 12, thread: t, frame: 1, exit: true });
+        p.calls.sites.push(CallSiteStat { time: 20, thread: t, stack: st, count: 4, total: 400, max: 250 });
+        p.calls.complexity.push(ComplexityPoint { time: 30, thread: t, frame: 1, size: 1000, duration: 77 });
         p
     }
 
@@ -1134,6 +1211,10 @@ mod tests {
         assert_eq!(q.probes.events, p.probes.events);
         assert_eq!(q.probes.controls, p.probes.controls);
         assert_eq!(q.samples[&SampleKind::Probe].weight, vec![300]);
+        assert_eq!(q.calls.trace, p.calls.trace);
+        assert_eq!(q.calls.sites, p.calls.sites);
+        assert_eq!(q.calls.complexity, p.calls.complexity);
+        assert_eq!(info.minor, MINOR);
         let out = dir.path().join("out.hprof");
         assert!(SnapshotReader::open(&path).unwrap().extract_heap(&out).unwrap());
         assert_eq!(std::fs::read(&out).unwrap(), heap_bytes);

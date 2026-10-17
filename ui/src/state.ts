@@ -20,6 +20,7 @@ export type ViewId =
   | "threads"
   | "locks"
   | "probes"
+  | "methods"
   | "events"
   | "mbeans"
   | "code"

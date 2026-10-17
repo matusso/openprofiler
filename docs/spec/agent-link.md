@@ -5,6 +5,10 @@ The agent-link protocol connects the in-JVM agent (`libopenprofiler_agent`, the 
 [`crates/openprofiler-proto/proto/agent_link.proto`](../../crates/openprofiler-proto/proto/agent_link.proto);
 the daemon-side implementation is `crates/openprofiler-link`.
 
+`Hello.protocol_semver` is `1.1.0`. Minor versions only add fields and messages (1.1: call tracer,
+call-site and complexity batches, `SetRecording` trace limits, complexity settings, native and
+recorded-only heap dumps); clients ignore what they do not know.
+
 ## Transport
 
 - TCP, one daemon connection at a time. The agent binds `bind` (default `127.0.0.1`) on `port`
@@ -191,13 +195,13 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 |---|---|---|
 | `ThreadDump` | `ThreadMXBean.dumpAllThreads` (+ virtual threads via `HotSpotDiagnosticMXBean.dumpThreads` on JDK 21+) | `ThreadDump` |
 | `HeapDump{format, live_only, local_path, dumper, recorded_only}` | `HotSpotDiagnosticMXBean.dumpHeap`; with `dumper: "native"` or `recorded_only` a JVMTI heap walk in the agent (capability `native_heap_dump`; reachable objects only; `recorded_only` keeps the objects sampled by allocation recording and their paths from the GC roots) | `HeapDumpResult`; without `local_path` the HPROF follows as `BlobChunk`s (1 MiB, `last` on the final one) |
-| `SetRecording{kind, enabled, interval_us}` | toggles `cpu`, `alloc`, `monitor`, `calls`, `probes` | `ok` |
+| `SetRecording{kind, enabled, interval_us, duration_ms, max_events}` | toggles `cpu`, `alloc`, `monitor`, `calls`, `probes`; `trace` starts (or stops) the call tracer for `duration_ms` (0 = 10 s) or `max_events` (0 = `trace_events`) | `ok` |
 | `UpdateConfig{config}` | applies a whole `SessionConfig` | `ok` |
 | `SaveSnapshot{path}` | writes an `.oplink` recording on the agent's filesystem | `SnapshotResult` |
 | `RunGc` | JVMTI `ForceGarbageCollection` | `ok` |
 | `AddBookmark{label, color}` | adds a bookmark | `ok` |
 | `SetTriggers{triggers}` | replaces the agent's triggers (see below) | `ok`, or an error for an invalid trigger |
-| `SetInstrumentation{include, exclude, probes}` | replaces the call-counting patterns and enabled probes; retransforms affected classes | `InstrumentationInfo` |
+| `SetInstrumentation{include, exclude, probes, complexity}` | replaces the call-counting patterns, enabled probes and complexity methods; retransforms affected classes | `InstrumentationInfo` (also the complexity specs and the call tracer's state) |
 | `Instrumentation{}` | current instrumentation settings and statistics | `InstrumentationInfo` |
 | `MBeanServers{}` | the MBean servers (platform, others in the JVM, connected remote JMX) | `MBeanServerList` |
 | `MBeanConnect{url, username, password, enabled}` | connects the JVM to a remote JMX server, or disconnects it | `MBeanServerList` |
@@ -328,6 +332,8 @@ group `instrument`; `noinstrument` turns it off). What a class gets:
   the result.
 - **Custom probes**: methods annotated with `@dev.openprofiler.api.Probe`.
 - **Method triggers**: `Hooks.trigger(site)` at entry.
+- **Complexity analysis** for methods matching `complexity=` specs: probe-style sites with boxed
+  arguments, dispatched to the internal `ComplexityProbe` (see below).
 
 The handler that runs exit hooks for exceptions covers the whole method, except in constructors,
 where it starts after the `super(...)`/`this(...)` call. Branch offsets, switch padding, the
@@ -346,6 +352,32 @@ completions) get no exit hooks. Instrumented classes in named modules get a read
 unnamed module (where `Hooks` lives) before their code runs. Classes loaded before the hook was
 active (bootstrap classes, everything after a dynamic attach) are found by a scan of the loaded
 classes and retransformed. Lambdas and other hidden classes cannot be instrumented.
+
+## Call tracer, outliers and complexity
+
+Three analyses of instrumented methods, sent as columnar batches (`DataBatch.call_trace`,
+`call_sites`, `complexity`) with their own watermark positions:
+
+- **Call tracer.** `SetRecording{kind: "trace"}` (or the `trace=<duration>` option, or a trigger's
+  `start_recording: "trace"`) makes every `callEnter`/`callExit` of call-counted methods also
+  append `(time, frame, exit)` to a per-thread buffer, until the deadline or the event cap
+  (`trace_events`, default 1,000,000, shared by all threads). Buffers are flushed with the call
+  counts (about once a second, at 4,096 events, at thread end), so a thread's events arrive in
+  order. Frames popped by an exit that closes several (an exception past uninstrumented handlers)
+  each get an exit. When the tracer is off the hooks check one flag. Readers rebuild calls per
+  thread: an exit closes the innermost open call of its method and everything above it; exits
+  without an entry belong to calls that began before the trace.
+- **Call-site statistics** (outlier detection). Each node of a thread's call trie, i.e. each path
+  of instrumented frames, also keeps its inclusive time and slowest call; every flush sends a
+  `CallSiteBatch` row `(time, thread, stack, count, total, max)` next to the `calls` samples.
+  Readers aggregate per stack and compare `max` with `total / count`.
+- **Complexity analysis.** Methods named by `complexity=` (`SetInstrumentation.complexity`):
+  `class.method[(descriptor)][#arg]`, the class with `*` wildcards. `arg` is a parameter index or
+  `this`; by default the first argument that has a size. The `ComplexityProbe` takes the size at
+  entry (a `Collection`'s or `Map`'s `size()`, an array's or `CharSequence`'s length, a
+  non-negative `Number`'s value) and at a normal exit calls `Hooks.complexity0(site, size, nanos)`.
+  The agent keeps at most `complexity_rate` points (default 100) per method and second. A method
+  already intercepted by a probe is not analysed.
 
 ## Probes
 
@@ -455,6 +487,10 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `probe_events` | `100` | individual probe events per probe and second (slower calls are always kept) |
 | `probe_threshold` | `0` | probe calls faster than this are aggregated but not sent as events |
 | `probe_stack_interval` | `10ms` | minimum time between full stacks for probe calls of one (probe, request, payload); `0`: every call |
+| `complexity` | — | `:`-separated complexity specs (`com.acme.Sorter.sort#0:com.acme.Index.find`) |
+| `complexity_rate` | `100` | complexity points kept per method and second |
+| `trace` | — | run the call tracer for this long once the agent is live (`5s`) |
+| `trace_events` | `1000000` | event cap of traces started without one |
 | `instrumentation` / `noinstrument` | on | bytecode instrumentation (probes, call counts, method triggers) |
 | `debug` | off | log to stderr |
 

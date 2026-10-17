@@ -350,7 +350,14 @@ impl LinkClient {
     }
 
     pub async fn set_recording(&self, kind: &str, enabled: bool, interval_us: u32) -> Result<()> {
-        let k = v1::SetRecording { kind: kind.into(), enabled, interval_us };
+        let k = v1::SetRecording { kind: kind.into(), enabled, interval_us, ..Default::default() };
+        self.request(v1::request::Kind::SetRecording(k), None).await.map(|_| ())
+    }
+
+    /// Starts the call tracer for `duration_ms` (0 = 10 s) or `max_events` (0 = the agent's
+    /// default), or stops it.
+    pub async fn call_trace(&self, enabled: bool, duration_ms: u32, max_events: u32) -> Result<()> {
+        let k = v1::SetRecording { kind: "trace".into(), enabled, interval_us: 0, duration_ms, max_events };
         self.request(v1::request::Kind::SetRecording(k), None).await.map(|_| ())
     }
 
@@ -368,15 +375,22 @@ impl LinkClient {
         self.request(v1::request::Kind::SetTriggers(v1::SetTriggers { triggers }), None).await.map(|_| ())
     }
 
-    /// Replaces the instrumentation settings (call-count patterns, enabled probes); the agent
-    /// retransforms the affected classes. Empty `probes` enables all, `["none"]` disables all.
+    /// Replaces the instrumentation settings (call-count patterns, enabled probes, complexity
+    /// methods); the agent retransforms the affected classes. Empty `probes` enables all,
+    /// `["none"]` disables all.
     pub async fn set_instrumentation(
         &self,
         include: Vec<String>,
         exclude: Vec<String>,
         probes: Vec<String>,
+        complexity: Vec<String>,
     ) -> Result<v1::InstrumentationInfo> {
-        let kind = v1::request::Kind::SetInstrumentation(v1::SetInstrumentation { include, exclude, probes });
+        let kind = v1::request::Kind::SetInstrumentation(v1::SetInstrumentation {
+            include,
+            exclude,
+            probes,
+            complexity,
+        });
         match self.request(kind, None).await?.response.result {
             Some(v1::response::Result::Instrumentation(i)) => Ok(i),
             _ => bail!("unexpected instrumentation response"),

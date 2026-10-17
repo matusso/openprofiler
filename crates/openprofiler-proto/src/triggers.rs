@@ -158,8 +158,10 @@ fn action(v: &Value) -> Result<v1::TriggerAction, String> {
     };
     let recording = |what: &str| -> Result<String, String> {
         match arg.as_str() {
-            Some(k @ ("cpu" | "alloc" | "monitor" | "calls" | "probes")) => Ok(k.into()),
-            _ => Err(format!("`{what}` takes \"cpu\", \"alloc\", \"monitor\", \"calls\" or \"probes\"")),
+            Some(k @ ("cpu" | "alloc" | "monitor" | "calls" | "probes" | "trace")) => Ok(k.into()),
+            _ => Err(format!(
+                "`{what}` takes \"cpu\", \"alloc\", \"monitor\", \"calls\", \"probes\" or \"trace\""
+            )),
         }
     };
     let kind = match name {

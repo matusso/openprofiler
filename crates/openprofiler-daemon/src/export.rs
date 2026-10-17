@@ -209,6 +209,67 @@ pub fn export(session: &Session, req: &ExportRequest) -> Result<Exported> {
             }
         }
         "insights" => serde_json::to_vec_pretty(&crate::insights::session_insights(session)?)?,
+        "outliers" | "complexity" | "trace" => {
+            let mut cr: crate::calls::CallsRequest =
+                serde_json::from_value(req.request.clone()).unwrap_or_default();
+            cr.view = Some(req.view.clone());
+            cr.limit = cr.limit.or(Some(usize::MAX));
+            let r = crate::calls::calls(session, &cr)?;
+            let s = match (f, req.view.as_str()) {
+                (Format::Json, _) => {
+                    return Ok(Exported {
+                        content_type: f.content_type(),
+                        body: serde_json::to_vec_pretty(&r)?,
+                    });
+                }
+                (Format::Csv | Format::Html, "outliers") => {
+                    let mut s = String::from("method,caller,calls,total_ns,mean_ns,max_ns,max_over_mean\n");
+                    for o in r["sites"].as_array().into_iter().flatten() {
+                        let _ = writeln!(
+                            s,
+                            "{},{},{},{},{},{},{:.2}",
+                            csv_escape(o["method"].as_str().unwrap_or("")),
+                            csv_escape(o["caller"].as_str().unwrap_or("")),
+                            o["calls"],
+                            o["total"],
+                            o["mean"],
+                            o["max"],
+                            o["ratio"].as_f64().unwrap_or(0.0)
+                        );
+                    }
+                    s
+                }
+                (Format::Csv | Format::Html, "complexity") => {
+                    let mut s = String::from("method,size,duration_ns\n");
+                    let m = &r["method"];
+                    let name = m["summary"]["method"].as_str().unwrap_or("");
+                    for pt in m["points"].as_array().into_iter().flatten() {
+                        let _ = writeln!(s, "{},{},{}", csv_escape(name), pt[0], pt[1]);
+                    }
+                    s
+                }
+                (Format::Csv | Format::Html, _) => {
+                    let mut s = String::from("thread,depth,method,start_ns,duration_ns\n");
+                    for c in r["calls"].as_array().into_iter().flatten() {
+                        let dur = match (c["start"].as_i64(), c["end"].as_i64()) {
+                            (Some(a), Some(b)) => (b - a).to_string(),
+                            _ => String::new(),
+                        };
+                        let _ = writeln!(
+                            s,
+                            "{},{},{},{},{dur}",
+                            c["thread"],
+                            c["depth"],
+                            csv_escape(c["method"].as_str().unwrap_or("")),
+                            c["start"]
+                        );
+                    }
+                    s
+                }
+                _ => bail!("{} cannot be exported as {f:?}", req.view),
+            };
+            if f == Format::Html { csv_to_html(&s, &session.name).into_bytes() } else { s.into_bytes() }
+        }
         v if v.starts_with("heap.") || v == "classes" || v == "biggest" => {
             crate::heap::export(session, v.trim_start_matches("heap."), f, &req.request)?
         }

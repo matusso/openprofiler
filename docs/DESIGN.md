@@ -181,6 +181,15 @@ alone. What gets injected:
   overhead (at least 50,000 calls in 5 s, mean self time under 400 ns).
 - *Probe interceptions* (`Hooks.enter/exit/exitThrow` with `this`, boxed arguments and the return
   value), *custom probes* (`@Probe` methods) and *method triggers* (`Hooks.trigger`).
+- *Complexity sites* for `complexity=` methods (`class.method[#arg]`): probe-style sites whose
+  calls report an argument-derived size (collection/map size, array/string length, a number) and
+  their duration, at most `complexity_rate` points per method and second.
+
+The call trie also keeps, per call site (path of instrumented frames), the inclusive time and the
+slowest call, flushed with the counts for **outlier detection** (max against mean per call site).
+The **call tracer** (`SetRecording trace`, `trace=` option or a trigger) records every entry and
+exit of instrumented methods per thread, in order, for a bounded time and event count; off, the
+hooks check one flag.
 
 Interceptions match one class or every subtype of a class or interface (the type included). The
 hook sees supertypes only by name, and a class loads before its supertypes, so subtype masks are
@@ -339,7 +348,7 @@ in `crates/openprofiler-phd/tests/data` (`regenerate.sh` rebuilds them in Docker
 
 ### 3.10 UI
 
-- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Probes, Events, MBeans, Code, Compare), a top
+- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Probes, Methods, Events, MBeans, Code, Compare), a top
   session bar with recording controls and a timeline scrubber, and an inspector panel.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
@@ -352,6 +361,10 @@ in `crates/openprofiler-phd/tests/data` (`regenerate.sh` rebuilds them in Docker
   per probe, control objects with leak flags, and probe telemetry (calls per second, mean time).
   Live sessions edit the instrumentation (call-count patterns, enabled probes) there. Exact call
   counts appear as the `Calls` kind of the CPU views.
+- The Methods view (method analysis of instrumented code): call-site outliers sorted by max/mean,
+  the call tracer (per-thread timeline of nested calls and an ordered call list; live sessions
+  start a trace of 1–60 s), and complexity analysis (time against size scatter with the best of
+  constant, logarithmic, linear, n log n and quadratic fits; live sessions edit the methods).
 - The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
   in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
   (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
@@ -371,7 +384,7 @@ in `crates/openprofiler-phd/tests/data` (`regenerate.sh` rebuilds them in Docker
   `compare`, `thread_dump` and the MBean tools (`list_mbean_servers`, `connect_jmx`,
   `list_mbeans`, `get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`,
   `mbean_notifications`), `probes` (list, hot spots, events, control objects, timeline, telemetry)
-  and `instrumentation`; `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
+  `instrumentation`, `call_trace` and `call_analysis` (outliers, trace, complexity); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge
