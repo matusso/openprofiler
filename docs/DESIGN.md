@@ -126,7 +126,9 @@ degrades gracefully when the JVM refuses one group.
 and object tags with ObjectFree for live versus collected counts.
 
 **Monitors:** JVMTI contended-enter and wait events with thresholds; `java.util.concurrent` locks
-through `LockSupport.park` hooks, with lock owners.
+through `LockSupport.park` hooks, with lock owners. Events above the threshold are recorded
+(within a per-second budget), shorter contention is sampled by blocked time, and stacks are
+resolved off the application thread, so heavy contention is not made worse.
 
 **Heap dumps:** `HotSpotDiagnosticMXBean.dumpHeap` (HPROF), streamed back to the daemon. A native
 dumper that writes directly into a snapshot is planned.
@@ -150,9 +152,11 @@ alone. What gets injected:
 - *Probe interceptions* (`Hooks.enter/exit/exitThrow` with `this`, boxed arguments and the return
   value), *custom probes* (`@Probe` methods) and *method triggers* (`Hooks.trigger`).
 
-Interceptions match one class or every subtype of a class or interface. The hook sees supertypes
-only by name, and a class loads before its supertypes, so subtype masks are completed at
-`ClassPrepare` and late matches are retransformed. Instrumented classes in named (JDK) modules get
+Interceptions match one class or every subtype of a class or interface (the type included). The
+hook sees supertypes only by name, and a class loads before its supertypes, so subtype masks are
+completed at `ClassPrepare` and late matches are retransformed there, before the class's code
+runs. Superclasses that implement an intercepted method for their subtypes without being subtypes
+themselves are instrumented with sites that check the receiver's type. Instrumented classes in named (JDK) modules get
 a reads edge to the boot loader's unnamed module before their code runs. Classes loaded earlier
 (bootstrap classes; everything on dynamic attach) are found by scanning the loaded classes
 (subtypes through `IsAssignableFrom`) and retransformed. `SetInstrumentation` changes the patterns
@@ -170,7 +174,8 @@ that serves live sessions.
   annotation that turns a method into a custom probe (payload templates `{0}`, `{this}`). The API
   looks for the agent again while it is absent, so it also works after a dynamic attach.
 - **Probe SPI** (`Probe`, `Interception`, `Call`): a probe lists its interceptions (a method of a
-  class or of all its subtypes, optionally with boxed arguments or exit-only for constructors) and
+  class or of all its subtypes, optionally with boxed arguments, exit-only for constructors or
+  entry-only for calls that need no exit) and
   fills a `Call` in `onEnter`/`onExit` (payload, detail, error, control object). Emitters open and
   close control objects (tracked in weak identity maps, so objects collected without close are
   reported) and set the thread's request label. The runtime (`Probes`) guards against re-entrancy,
@@ -179,16 +184,24 @@ that serves live sessions.
   supertypes (`Reflect`), cached per class with `ClassValue`, so no helper classes have to be
   defined into application class loaders.
 - Probes: JDBC (SQL, bind parameters, physical and pooled connections), JPA (javax and Jakarta),
-  HTTP server (Servlet, JDK `HttpServer`, Netty handlers) and client (JDK `HttpClient`,
-  `HttpURLConnection`, OkHttp, Apache HttpClient 4/5), Kafka, gRPC, exceptions, files, sockets.
-  The native side aggregates every call per second, payload and stack, and keeps individual events
-  within a per-probe budget (slow calls always).
+  HTTP server (Servlet, also asynchronous; JDK `HttpServer`; Netty handlers; Reactor Netty, so
+  WebFlux; Vert.x, so Quarkus) and client (JDK `HttpClient`, `HttpURLConnection`, OkHttp, Apache
+  HttpClient 4/5), Kafka, gRPC, exceptions, files, sockets. Threads aggregate their calls per
+  second, payload and stack, and the native side keeps individual events within a per-probe budget
+  (slow calls always). Stacks of probe calls are sampled per (probe, request, payload) at most every
+  10 ms (events always get their own), since walking deep stacks on every call would dominate the
+  cost of the probes.
 - **Request labels and async context.** HTTP and gRPC server probes set the thread's request label
   (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
   stacks (call trees split by request) and the context of its probe events. An internal probe
   carries the label across `FutureTask`, `ForkJoinTask` (`CompletableFuture`, parallel streams),
-  `ThreadPoolExecutor.execute`, `Thread.start` (also virtual threads) and Kotlin coroutine
-  dispatch.
+  `ThreadPoolExecutor.execute`, `Thread.start` (also virtual threads), Kotlin coroutine dispatch
+  and JBoss Threads' `EnhancedQueueExecutor`. Asynchronous servers are labelled while they
+  dispatch a request and record it when its response completes.
+- **Version matrix** (`java/matrix/`): every probe runs against real libraries and versions
+  (PostgreSQL, MySQL and Kafka in containers) and the recordings are checked for payloads, events,
+  control objects, request context and call-tree links. The demo benchmark (`java/bench/`) measures
+  the overhead on Spring Petclinic and the Quarkus Hibernate ORM quickstart.
 
 ### 3.4 Agent-link protocol
 
@@ -411,7 +424,7 @@ same calls.
 | 0 Foundations | Workspace, CI, JVMTI bindings, protobuf specs, `.opsnap` spec | Done |
 | 1 Offline analyzer | HPROF/heap engine, JFR import, Query API, UI, CLI, MCP | Done |
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
-| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes | Done; version-matrix tests against real libraries open (#38) |
+| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU overhead open (#38) |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, web mode, CI gate | Mostly done |
 | 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
 
@@ -423,7 +436,20 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 - Phase 2: at most 2% overhead at 100 Hz async sampling on Renaissance/DaCapo; a 24 h soak without
   leaks or crashes.
 - Phase 3: Spring Boot Petclinic and Quarkus demos show SQL and URL hot spots linked to call trees,
-  at under 5% overhead.
+  at under 5% overhead. *(hot spots met; overhead met for throughput and latency, CPU per request
+  met on Petclinic, not yet on Quarkus.)* `java/bench/linux.sh`, 8 closed-loop clients, 60 s,
+  median of 3 rounds, Linux arm64 container on 18 cores, JDK 21, agent defaults ("probes") and
+  with `instrument=` on the application packages:
+
+  | app | config | req/s | p99 | CPU per request |
+  |---|---|---|---|---|
+  | Petclinic (Spring Boot 4.1, Hibernate 7, H2) | probes | −1.3% | +0.7% | −0.2% |
+  | | + `instrument=` | −1.0% | +0.6% | +2.9% |
+  | Quarkus 3.40 Hibernate ORM Panache quickstart (PostgreSQL) | probes | −3.4% | +4.9% | +24% |
+  | | + `instrument=` | −2.4% | +3.2% | +25% |
+
+  A Quarkus request costs about 0.1 ms of CPU, so the probes' fixed cost per request (HTTP,
+  connection checkout, JPA, SQL, worker hand-off) shows: about 23 µs.
 - Phase 4: attach to a JVM in a distroless pod on a remote cluster in three clicks or fewer, without
   exposing ports.
 
@@ -434,7 +460,7 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 | `AsyncGetCallTrace` instability or removal | The sampler is abstracted; sync and JFR back ends exist or are planned. Track the JDK CPU-time JFR sampler (JDK 25+). |
 | VMStructs fragility across JDK builds | Used only as an optional guard; feature-detected and disabled gracefully. JDK matrix in CI. |
 | Bytecode instrumentation correctness | Injected code keeps the types at existing frames, so frames are remapped, not recomputed; a corpus test rewrites javac output with every hook and runs it under the verifier; methods with `jsr`/`ret`, overflowing branches or over 64 KB are skipped. |
-| Probe breadth across library versions | Probe SPI, a version-matrix harness with Testcontainers, prioritise by usage. |
+| Probe breadth across library versions | Probe SPI, a version-matrix harness (`java/matrix/`, servers in containers), prioritise by usage. |
 | Memory on huge heap dumps | Out-of-core design, disk-backed CSR, benchmark gates. |
 | Signal handler conflicts | Chain prior handlers, make the signal configurable, detect other profilers and warn. |
 | Restrictive containers (no ptrace, read-only /tmp, non-root) | Ephemeral debug containers, configurable writable dir, JFR-only mode. |

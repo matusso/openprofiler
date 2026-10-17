@@ -1,0 +1,10 @@
+# One call per request, timed until its response was written.
+count   | http_server | GET /owners/{id} | 30
+event   | http_server | GET /owners/{id} | detail~status 200
+count   | http_server | GET /later | 10
+event   | http_server | GET /later | ms~20
+count   | http_server | GET /fail | 4
+every   | http_server | GET /fail | detail~status 500 | error~HTTP 500
+# Blocking work on the worker pool belongs to the request.
+every   | custom.work | load owner | context~GET /owners/{id}
+sample  | calls | [GET /owners/{id}]

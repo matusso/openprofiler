@@ -1,0 +1,50 @@
+# case                 scenario  services  properties (-D for Maven and the workload; ${name} in expect.txt)
+jdbc-h2-2.3            jdbc      -         driver.group=com.h2database driver.artifact=h2 driver.version=2.3.232 hikari.artifact=HikariCP hikari.version=6.2.1 url=jdbc:h2:mem:matrix;DB_CLOSE_DELAY=-1 dbname=h2:mem
+jdbc-h2-1.4            jdbc      -         driver.group=com.h2database driver.artifact=h2 driver.version=1.4.200 hikari.artifact=HikariCP hikari.version=4.0.3 url=jdbc:h2:mem:matrix;DB_CLOSE_DELAY=-1 dbname=h2:mem
+jdbc-postgres-42.7     jdbc      postgres  driver.group=org.postgresql driver.artifact=postgresql driver.version=42.7.4 hikari.artifact=HikariCP hikari.version=6.2.1 url=jdbc:postgresql://127.0.0.1:55432/matrix user=matrix password=matrix dbname=postgresql
+jdbc-postgres-42.2     jdbc      postgres  driver.group=org.postgresql driver.artifact=postgresql driver.version=42.2.29 hikari.artifact=HikariCP hikari.version=5.1.0 url=jdbc:postgresql://127.0.0.1:55432/matrix user=matrix password=matrix dbname=postgresql
+jdbc-mysql-9.1         jdbc      mysql     driver.group=com.mysql driver.artifact=mysql-connector-j driver.version=9.1.0 hikari.artifact=HikariCP hikari.version=6.2.1 url=jdbc:mysql://127.0.0.1:53306/matrix user=matrix password=matrix dbname=mysql
+jdbc-mysql-8.0         jdbc      mysql     driver.group=com.mysql driver.artifact=mysql-connector-j driver.version=8.0.33 hikari.artifact=HikariCP hikari.version=5.1.0 url=jdbc:mysql://127.0.0.1:53306/matrix user=matrix password=matrix dbname=mysql
+jpa-hibernate-7.0      jpa       -         jpa.group=org.hibernate.orm jpa.artifact=hibernate-core jpa.version=7.0.10.Final
+jpa-hibernate-6.6      jpa       -         jpa.group=org.hibernate.orm jpa.artifact=hibernate-core jpa.version=6.6.4.Final
+jpa-hibernate-5.6      jpa       -         jpa.group=org.hibernate jpa.artifact=hibernate-core jpa.version=5.6.15.Final ee=javax
+jpa-eclipselink-4.0    jpa       -         jpa.group=org.eclipse.persistence jpa.artifact=eclipselink jpa.version=4.0.5
+jpa-eclipselink-2.7    jpa       -         jpa.group=org.eclipse.persistence jpa.artifact=eclipselink jpa.version=2.7.15 ee=javax
+servlet-tomcat-11      tomcat    -         tomcat.version=11.0.2
+servlet-tomcat-10.1    tomcat    -         tomcat.version=10.1.34
+servlet-tomcat-9       tomcat    -         tomcat.version=9.0.98 ee=javax
+servlet-jetty-12-ee10  jetty12   -         jetty.version=12.0.16 jetty.ee=ee10
+servlet-jetty-12-ee8   jetty12   -         jetty.version=12.0.16 jetty.ee=ee8 ee=javax
+servlet-jetty-11       jetty     -         jetty.version=11.0.24
+servlet-jetty-10       jetty     -         jetty.version=10.0.24 ee=javax
+servlet-jetty-9.4      jetty     -         jetty.version=9.4.56.v20240826 ee=javax
+servlet-undertow-2.3   undertow  -         undertow.version=2.3.18.Final
+servlet-undertow-2.2   undertow  -         undertow.version=2.2.37.Final ee=javax
+client-okhttp-5        okhttp    -         okhttp.artifact=okhttp-jvm okhttp.version=5.1.0
+client-okhttp-4        okhttp    -         okhttp.artifact=okhttp okhttp.version=4.12.0
+client-okhttp-3        okhttp    -         okhttp.artifact=okhttp okhttp.version=3.14.9
+client-apache-5        apache5   -         httpclient.version=5.4.1
+client-apache-4        apache4   -         httpclient.version=4.5.14
+kafka-4.0              kafka     kafka     kafka.version=4.0.0
+kafka-3.9              kafka     kafka     kafka.version=3.9.0
+kafka-3.0              kafka     kafka     kafka.version=3.0.2
+kafka-2.8              kafka     kafka     kafka.version=2.8.2
+grpc-1.69              grpc      -         grpc.version=1.69.0
+grpc-1.58              grpc      -         grpc.version=1.58.0
+grpc-1.40              grpc      -         grpc.version=1.40.2
+netty-4.2              netty     -         netty.version=4.2.0.Final
+netty-4.1              netty     -         netty.version=4.1.116.Final
+reactor-netty-1.2      reactor-netty -     reactor.netty.version=1.2.1
+reactor-netty-1.1      reactor-netty -     reactor.netty.version=1.1.26
+reactor-netty-1.0      reactor-netty -     reactor.netty.version=1.0.48
+webflux-6.2            webflux   -         spring.version=6.2.1 reactor.netty.version=1.2.1
+webflux-6.1            webflux   -         spring.version=6.1.16 reactor.netty.version=1.1.26
+webflux-5.3            webflux   -         spring.version=5.3.39 reactor.netty.version=1.0.48
+reactor-3.7            reactor   -         reactor.version=3.7.1
+reactor-3.6            reactor   -         reactor.version=3.6.12
+reactor-3.4            reactor   -         reactor.version=3.4.41
+coroutines-1.10        coroutines -        coroutines.version=1.10.1 kotlin.version=2.1.0
+coroutines-1.8         coroutines -        coroutines.version=1.8.1 kotlin.version=2.1.0
+coroutines-1.6         coroutines -        coroutines.version=1.6.4 kotlin.version=2.1.0
+vertx-5.0              vertx     -         vertx.version=5.0.4
+vertx-4.5              vertx     -         vertx.version=4.5.21

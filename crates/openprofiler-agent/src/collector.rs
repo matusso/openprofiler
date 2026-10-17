@@ -334,6 +334,28 @@ impl Collector {
         a.errors += error as u32;
     }
 
+    /// Adds calls aggregated elsewhere (per thread) for one second.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_probe_calls(
+        &mut self,
+        second: i64,
+        probe: u32,
+        payload: u32,
+        thread: u32,
+        stack: u32,
+        count: u32,
+        duration: Nanos,
+        max: Nanos,
+        errors: u32,
+    ) {
+        let key = ProbeKey { second, probe, payload, thread, stack };
+        let a = self.probe_pending.entry(key).or_default();
+        a.count += count;
+        a.duration += duration;
+        a.max = a.max.max(max);
+        a.errors += errors;
+    }
+
     pub fn add_probe_event(&mut self, ev: v1::ProbeEvent) {
         self.probe_events.rows.push(ev);
     }

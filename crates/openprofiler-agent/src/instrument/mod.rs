@@ -14,7 +14,11 @@
 //! hook records, per class name, a bit mask of the intercepted types it is a subtype of. A class
 //! usually loads before its supertypes (they are resolved while it is defined), so a mask computed
 //! in the hook can be incomplete; such classes are re-checked at `ClassPrepare`, when all
-//! supertypes have been seen, and retransformed if they turn out to be subtypes after all.
+//! supertypes have been seen, and retransformed there if they turn out to be subtypes after all
+//! (before any of their code runs, so no call is missed). A subtype can inherit the intercepted
+//! method from a superclass that is not itself a subtype (Hibernate's `AbstractSelectionQuery`
+//! implements `getResultList` for its `jakarta.persistence.Query` subclasses); such superclasses
+//! are instrumented too, with sites that check the receiver's type at run time.
 //!
 //! Instrumented classes in named modules (the JDK's) get a reads edge to the boot loader's unnamed
 //! module, where `Hooks` lives, before their code can run. Classes loaded before the hook was
@@ -49,6 +53,10 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static UNPREPARED: AtomicUsize = AtomicUsize::new(0);
 /// Classes whose subtype mask must be completed at ClassPrepare.
 static INCOMPLETE: AtomicUsize = AtomicUsize::new(0);
+/// Classes with superclasses to retransform at their ClassPrepare.
+static PENDING: AtomicUsize = AtomicUsize::new(0);
+/// Superclasses of these packages never get inherited interceptions.
+const NO_INHERITED: &[&str] = &["java/", "jdk/", "sun/", "dev/openprofiler/"];
 
 #[derive(Debug, Clone)]
 pub struct Interception {
@@ -64,6 +72,8 @@ pub struct Interception {
     pub desc: Option<String>,
     pub args: bool,
     pub entry: bool,
+    /// Exit hooks are needed (not an entry-only interception).
+    pub exit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +87,8 @@ pub struct Site {
     pub kind: SiteKind,
     pub class: String,
     pub method: String,
+    /// Binary name of the type the receiver must have (sites of inherited implementations).
+    pub check: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +119,12 @@ struct State {
     bits: HashMap<String, u32>,
     by_bit: Vec<Vec<usize>>,
     masks: HashMap<Box<str>, u64>,
+    /// Superclass of every class seen by the hook.
+    supers: HashMap<Box<str>, Box<str>>,
+    /// Superclasses implementing intercepted methods for subtypes: class → bits.
+    inherited: HashMap<Box<str>, u64>,
+    /// Class → superclasses that got inherited bits, retransformed at the class's ClassPrepare.
+    pending: HashMap<Box<str>, Vec<Box<str>>>,
     /// Classes whose supertypes were not all known at load: name → direct supertypes.
     incomplete: HashMap<Box<str>, Box<[Box<str>]>>,
     sites: Vec<Site>,
@@ -186,12 +204,48 @@ impl State {
                 mask |= 1 << b;
             }
             match self.masks.get(p) {
-                Some(&m) => mask |= m,
+                // A parent's mask is final once the parent is prepared.
+                Some(&m) => {
+                    mask |= m;
+                    if self.incomplete.contains_key(p) {
+                        complete = false;
+                    }
+                }
                 None if p.starts_with("java/lang/Object") => {}
                 None => complete = false,
             }
         }
         (mask, complete)
+    }
+
+    /// Bit of `class` itself if it is a subtype-intercepted type (its own methods are intercepted).
+    fn own_bit(&self, class: &str) -> u64 {
+        self.bits.get(class).map_or(0, |&b| 1 << b)
+    }
+
+    /// Marks the superclasses of `class` that lack bits of its `mask` as inherited
+    /// implementations; returns the ones that changed.
+    fn inherit(&mut self, class: &str, mask: u64) -> Vec<Box<str>> {
+        let mut changed = vec![];
+        if mask == 0 {
+            return changed;
+        }
+        let mut cur = self.supers.get(class).cloned();
+        while let Some(s) = cur {
+            if NO_INHERITED.iter().any(|p| s.starts_with(p)) {
+                break;
+            }
+            let missing = mask & !(self.masks.get(&s).copied().unwrap_or(0) | self.own_bit(&s));
+            if missing != 0 {
+                let e = self.inherited.entry(s.clone()).or_insert(0);
+                if missing & !*e != 0 {
+                    *e |= missing;
+                    changed.push(s.clone());
+                }
+            }
+            cur = self.supers.get(&s).cloned();
+        }
+        changed
     }
 
     fn method_id(&mut self, class: &str, name: &str, desc: &str) -> u32 {
@@ -211,13 +265,21 @@ impl State {
         id
     }
 
-    fn site_id(&mut self, class: &str, method: &str, desc: &str, key: i64, kind: SiteKind) -> u32 {
+    fn site_id(
+        &mut self,
+        class: &str,
+        method: &str,
+        desc: &str,
+        key: i64,
+        kind: SiteKind,
+        check: Option<String>,
+    ) -> u32 {
         let k = (class.to_string(), method.to_string(), desc.to_string(), key);
         if let Some(&id) = self.site_keys.get(&k) {
             return id;
         }
         let id = self.sites.len() as u32;
-        self.sites.push(Site { kind, class: class.replace('/', "."), method: method.into() });
+        self.sites.push(Site { kind, class: class.replace('/', "."), method: method.into(), check });
         self.site_keys.insert(k, id);
         id
     }
@@ -235,7 +297,7 @@ impl State {
                 control_label: String::new(),
             })
         });
-        self.probes.push(ProbeEntry { id, collector });
+        push_probe(self, id, collector);
         (self.probes.len() - 1) as u32
     }
 
@@ -247,6 +309,16 @@ impl State {
         }
         let (mask, complete) = self.mask_of(&parents);
         let name: Box<str> = cf.name.as_str().into();
+        if let Some(s) = &cf.super_name {
+            self.supers.insert(name.clone(), s.as_str().into());
+        }
+        if complete && self.ready && !self.pending.contains_key(&name) {
+            let supers = self.inherit(&name, mask);
+            if !supers.is_empty() {
+                self.pending.insert(name.clone(), supers);
+                PENDING.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         if complete {
             if self.incomplete.remove(&name).is_some() {
                 INCOMPLETE.fetch_sub(1, Ordering::Relaxed);
@@ -260,14 +332,20 @@ impl State {
         }
 
         let class = cf.name.as_str();
+        let mask = mask | self.own_bit(class);
         let count_calls = self.counts_calls(class) && !cf.is_interface();
-        let mut candidates: Vec<usize> = self.exact.get(class).cloned().unwrap_or_default();
+        // (interception, inherited implementation)
+        let mut candidates: Vec<(usize, bool)> =
+            self.exact.get(class).map(|l| l.iter().map(|&i| (i, false)).collect()).unwrap_or_default();
+        let inherited = self.inherited.get(class).copied().unwrap_or(0) & !mask;
         for (bit, list) in self.by_bit.iter().enumerate() {
             if mask & (1 << bit) != 0 {
-                candidates.extend(list);
+                candidates.extend(list.iter().map(|&i| (i, false)));
+            } else if inherited & (1 << bit) != 0 {
+                candidates.extend(list.iter().map(|&i| (i, true)));
             }
         }
-        candidates.retain(|&i| self.probe_enabled(self.interceptions[i].probe));
+        candidates.retain(|&(i, _)| self.probe_enabled(self.interceptions[i].probe));
         let triggers: Vec<(String, String)> = self
             .triggers
             .iter()
@@ -290,20 +368,26 @@ impl State {
             {
                 plan.call_id = Some(self.method_id(class, &m.name, &m.desc));
             }
-            for &ii in &candidates {
+            for &(ii, inherited) in &candidates {
                 let it = &self.interceptions[ii];
                 if it.method != m.name || it.desc.as_ref().is_some_and(|d| *d != m.desc) {
                     continue;
                 }
-                let (probe, index, args, entry) = (it.probe, it.index, it.args, it.entry);
+                // Inherited implementations: instance methods a subclass can inherit.
+                if inherited && (m.access & 0x000a != 0 || m.name == "<init>") {
+                    continue;
+                }
+                let check = inherited.then(|| it.type_name.replace('/', "."));
+                let (probe, index, args, entry, exit) = (it.probe, it.index, it.args, it.entry, it.exit);
                 let site = self.site_id(
                     class,
                     &m.name,
                     &m.desc,
                     ii as i64,
                     SiteKind::Probe { probe, interception: index },
+                    check,
                 );
-                plan.probe = Some(ProbeSite { site, args, entry });
+                plan.probe = Some(ProbeSite { site, args, entry, exit });
                 break;
             }
             if plan.probe.is_none() && customs {
@@ -323,8 +407,10 @@ impl State {
                         &m.desc,
                         -1,
                         SiteKind::Custom { probe, payload: payload.clone() },
+                        None,
                     );
-                    plan.probe = Some(ProbeSite { site, args: payload.contains('{'), entry: true });
+                    plan.probe =
+                        Some(ProbeSite { site, args: payload.contains('{'), entry: true, exit: true });
                 }
             }
             for (tid, spec) in &triggers {
@@ -429,34 +515,85 @@ pub unsafe extern "C" fn class_file_load_hook(
 }
 
 /// `ClassPrepare` work: module reads for transformed classes and completion of subtype masks.
+///
+/// Late subtype matches and the superclasses they inherit intercepted methods from are
+/// retransformed right here, before any code of the class runs; if that fails they are queued for
+/// the background thread.
 pub fn on_class_prepare(a: &Agent, jni: *mut JNIEnv, klass: jclass) {
-    if UNPREPARED.load(Ordering::Relaxed) == 0 && INCOMPLETE.load(Ordering::Relaxed) == 0 {
+    if UNPREPARED.load(Ordering::Relaxed) == 0
+        && INCOMPLETE.load(Ordering::Relaxed) == 0
+        && PENDING.load(Ordering::Relaxed) == 0
+    {
         return;
     }
     let Ok(sig) = a.jvmti.class_signature(klass) else { return };
     let Some(name) = sig.strip_prefix('L').and_then(|s| s.strip_suffix(';')) else { return };
-    let (needs_reads, retransform) = with_state(|st| {
+    let (needs_reads, retransform, supers) = with_state(|st| {
         let needs_reads = st.unprepared.remove(name);
         if needs_reads {
             UNPREPARED.fetch_sub(1, Ordering::Relaxed);
         }
         let mut retransform = false;
+        let mut supers = st.pending.remove(name).inspect(|_| {
+            PENDING.fetch_sub(1, Ordering::Relaxed);
+        });
         if let Some(parents) = st.incomplete.remove(name) {
             INCOMPLETE.fetch_sub(1, Ordering::Relaxed);
             let (mask, _) = st.mask_of(&parents);
             let old = st.masks.insert(name.into(), mask).unwrap_or(0);
             if mask & !old != 0 && st.ready {
                 retransform = true;
+                supers.get_or_insert_with(Vec::new).extend(st.inherit(name, mask));
             }
         }
-        (needs_reads, retransform)
+        (needs_reads, retransform, supers.unwrap_or_default())
     });
     if needs_reads {
         add_reads(a, jni, klass);
     }
-    if retransform {
-        with_state(|st| st.retransform.insert(name.to_string()));
+    let mut failed: Vec<String> = vec![];
+    if retransform && !retransform_now(a, jni, klass) {
+        failed.push(name.to_string());
     }
+    if !supers.is_empty() {
+        retransform_supers(a, jni, klass, &supers, &mut failed);
+    }
+    if !failed.is_empty() {
+        with_state(|st| st.retransform.extend(failed));
+    }
+}
+
+/// Retransforms the superclasses of `klass` named in `supers`; collects the ones that failed.
+fn retransform_supers(
+    a: &Agent,
+    jni: *mut JNIEnv,
+    klass: jclass,
+    supers: &[Box<str>],
+    failed: &mut Vec<String>,
+) {
+    let mut k = jni!(jni, GetSuperclass, klass);
+    while !k.is_null() {
+        if let Ok(sig) = a.jvmti.class_signature(k)
+            && let Some(n) = sig.strip_prefix('L').and_then(|s| s.strip_suffix(';'))
+            && supers.iter().any(|s| &**s == n)
+            && !retransform_now(a, jni, k)
+        {
+            failed.push(n.to_string());
+        }
+        let next = jni!(jni, GetSuperclass, k);
+        jni!(jni, DeleteLocalRef, k);
+        k = next;
+    }
+}
+
+/// Retransforms one class from an event callback; false if the VM refused.
+fn retransform_now(a: &Agent, jni: *mut JNIEnv, klass: jclass) -> bool {
+    let mut modifiable: jboolean = 0;
+    if jvmti!(a.jvmti, IsModifiableClass, klass, &mut modifiable) != JVMTI_ERROR_NONE || modifiable == 0 {
+        return true;
+    }
+    add_reads(a, jni, klass);
+    jvmti!(a.jvmti, RetransformClasses, 1, &klass) == JVMTI_ERROR_NONE
 }
 
 /// Lets the module of `klass` read the boot loader's unnamed module (where `Hooks` lives).
@@ -544,7 +681,7 @@ pub fn register_probe(id: &str, name: &str, payload_label: &str, control_label: 
             }),
             _ => u32::MAX,
         };
-        st.probes.push(ProbeEntry { id: id.into(), collector });
+        push_probe(st, id.into(), collector);
         (st.probes.len() - 1) as u32
     })
 }
@@ -570,6 +707,11 @@ pub fn register_interception(it: Interception) {
     });
 }
 
+/// Type the receiver of a site must have, if the site is an inherited implementation.
+pub fn site_check(site: u32) -> Option<String> {
+    with_state(|st| st.sites.get(site as usize)?.check.clone())
+}
+
 /// `(collector probe index, interception)` of a probe site, or the custom payload template.
 pub fn site(site: u32) -> Option<(u32, Option<u32>, Option<String>)> {
     with_state(|st| {
@@ -581,9 +723,24 @@ pub fn site(site: u32) -> Option<(u32, Option<u32>, Option<String>)> {
     })
 }
 
+/// Collector index by registration index, for the probe natives (which must not take the
+/// instrumentation lock that class loading holds).
+static COLLECTOR_PROBES: [std::sync::atomic::AtomicU32; 512] =
+    [const { std::sync::atomic::AtomicU32::new(u32::MAX) }; 512];
+
+fn push_probe(st: &mut State, id: String, collector: u32) {
+    if let Some(slot) = COLLECTOR_PROBES.get(st.probes.len()) {
+        slot.store(collector, Ordering::Relaxed);
+    }
+    st.probes.push(ProbeEntry { id, collector });
+}
+
 /// Collector index of probe `probe` (registration index).
 pub fn collector_probe(probe: u32) -> u32 {
-    with_state(|st| st.probes.get(probe as usize).map_or(u32::MAX, |p| p.collector))
+    match COLLECTOR_PROBES.get(probe as usize) {
+        Some(c) => c.load(Ordering::Relaxed),
+        None => with_state(|st| st.probes.get(probe as usize).map_or(u32::MAX, |p| p.collector)),
+    }
 }
 
 pub fn method_frame(id: u32) -> Option<u32> {
@@ -712,16 +869,44 @@ fn scan(a: &Agent, jni: *mut JNIEnv) {
     for (name, k) in &loaded {
         let mut m = 0u64;
         for &(b, t) in &targets {
-            if *k != t && jni!(jni, IsAssignableFrom, *k, t) != 0 {
+            // A type's own methods are intercepted too.
+            if jni!(jni, IsAssignableFrom, *k, t) != 0 {
                 m |= 1 << b;
             }
         }
         masks.push((name.clone(), m));
     }
+    // Superclasses of subtypes, for inherited implementations.
+    let mut supers = vec![];
+    for ((name, k), (_, m)) in loaded.iter().zip(&masks) {
+        if *m == 0 {
+            continue;
+        }
+        let mut child = name.clone();
+        let mut s = jni!(jni, GetSuperclass, *k);
+        while !s.is_null() {
+            let Ok(sig) = a.jvmti.class_signature(s) else { break };
+            let Some(n) = sig.strip_prefix('L').and_then(|x| x.strip_suffix(';')) else { break };
+            supers.push((child, n.to_string()));
+            child = n.to_string();
+            let next = jni!(jni, GetSuperclass, s);
+            jni!(jni, DeleteLocalRef, s);
+            s = next;
+        }
+        if !s.is_null() {
+            jni!(jni, DeleteLocalRef, s);
+        }
+    }
     let wanted: HashSet<String> = with_state(|st| {
         for (n, m) in &masks {
             let e = st.masks.entry(n.as_str().into()).or_insert(0);
             *e |= m;
+        }
+        for (n, s) in supers {
+            st.supers.insert(n.into(), s.into());
+        }
+        for (n, m) in &masks {
+            st.inherit(n, *m);
         }
         masks
             .iter()
@@ -736,6 +921,7 @@ fn scan(a: &Agent, jni: *mut JNIEnv) {
                     || st.by_bit.iter().enumerate().any(|(b, l)| {
                         m & (1 << b) != 0 && l.iter().any(|&i| st.probe_enabled(st.interceptions[i].probe))
                     })
+                    || st.inherited.contains_key(n)
                     || st.triggers.iter().any(|(_, c, _)| glob(c, n))
             })
             .map(|(n, _)| n.clone())
@@ -828,6 +1014,7 @@ mod tests {
             desc: None,
             args: true,
             entry: true,
+            exit: true,
         };
         st.bits.insert(it.type_name.clone(), 0);
         st.by_bit.push(vec![0]);
@@ -845,6 +1032,60 @@ mod tests {
         let bytes = test_class("other/X", "other/Unseen", &["run"]);
         st.plan(&ClassFile::parse(&bytes).unwrap());
         assert!(st.incomplete.contains_key("other/X"));
+    }
+
+    fn subtype_state(type_name: &str, method: &str) -> State {
+        let mut st = State { ready: true, ..Default::default() };
+        st.probes.push(ProbeEntry { id: "jpa".into(), collector: 0 });
+        st.bits.insert(type_name.into(), 0);
+        st.by_bit.push(vec![0]);
+        st.interceptions.push(Interception {
+            probe: 0,
+            index: 0,
+            type_name: type_name.into(),
+            subtypes: true,
+            method: method.into(),
+            desc: None,
+            args: false,
+            entry: true,
+            exit: true,
+        });
+        st
+    }
+
+    #[test]
+    fn intercepts_the_type_itself() {
+        let mut st = subtype_state("io/netty/Handler", "channelRead");
+        st.masks.insert("io/netty/Base".into(), 0);
+        let cf = test_class("io/netty/Handler", "io/netty/Base", &["channelRead"]);
+        assert_eq!(st.plan(&ClassFile::parse(&cf).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn provisional_parent_masks_are_incomplete() {
+        let mut st = subtype_state("jpa/Query", "getResultList");
+        // `app/Query` was seen but its own supertypes not yet: its mask is provisional.
+        st.masks.insert("app/Query".into(), 0);
+        st.incomplete.insert("app/Query".into(), vec!["jpa/TypedQuery".into()].into_boxed_slice());
+        let cf = test_class("app/QueryImpl", "app/Query", &["getResultList"]);
+        st.plan(&ClassFile::parse(&cf).unwrap());
+        assert!(st.incomplete.contains_key("app/QueryImpl"));
+    }
+
+    #[test]
+    fn inherited_implementations_check_the_receiver() {
+        let mut st = subtype_state("jpa/Query", "getResultList");
+        // app/AbstractQuery implements getResultList but is not a jpa/Query; app/QueryImpl is.
+        let base = test_class("app/AbstractQuery", "java/lang/Object", &["getResultList"]);
+        assert!(st.plan(&ClassFile::parse(&base).unwrap()).is_empty());
+        st.masks.insert("app/QueryImpl".into(), 1);
+        st.supers.insert("app/QueryImpl".into(), "app/AbstractQuery".into());
+        assert_eq!(st.inherit("app/QueryImpl", 1), vec![Box::from("app/AbstractQuery")]);
+        assert!(st.inherit("app/QueryImpl", 1).is_empty(), "marked once");
+        let plans = st.plan(&ClassFile::parse(&base).unwrap());
+        assert_eq!(plans.len(), 1);
+        let site = plans[0].probe.as_ref().unwrap().site;
+        assert_eq!(st.sites[site as usize].check.as_deref(), Some("jpa.Query"));
     }
 
     /// Builds a class with `void name() { return; }` methods.

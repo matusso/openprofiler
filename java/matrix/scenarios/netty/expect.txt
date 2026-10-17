@@ -1,0 +1,6 @@
+count   | http_server | GET /owners/{id} | 30
+count   | http_server | GET /fail | 3
+every   | custom.work | load owner | context~GET /
+event   | custom.work | load owner | context~GET /owners/{id}
+sample  | calls | [GET /owners/{id}]
+sample  | calls | Main.render

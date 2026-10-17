@@ -4,19 +4,19 @@
 //! `Unsafe.park(boolean, long)` (virtual threads excepted, see `vthreads`). The agent replaces
 //! that native with a wrapper: it reads the thread's `parkBlocker` and, for locks, the blocker's
 //! `AbstractOwnableSynchronizer.exclusiveOwnerThread` before parking, and records a park event
-//! when the call took at least `monitor_threshold`. Parks without a blocker object (bare
-//! `LockSupport.park()`, mostly JDK-internal idle waits) carry nothing to report and are skipped.
+//! when the call took at least `monitor_threshold` (see `events::record_park`). Parks without a
+//! blocker object (bare `LockSupport.park()`, mostly JDK-internal idle waits) carry nothing to
+//! report and are skipped.
 //!
 //! The original function is read from the `Method` (the native entry sits right after it; its
 //! size comes from VMStructs) and the wrapper is installed with JNI `RegisterNatives`, which also
 //! invalidates compiled callers. This works both at start-up and after a dynamic attach.
 
-use crate::collector::{MonitorRow, now_nanos};
-use crate::events::{capture_stack, identity_hash, object_class_name, thread_index};
+use crate::collector::now_nanos;
+use crate::events::thread_index;
 use crate::jvm::{jni, jvmti};
 use crate::{Agent, agent, debug};
 use jvmti_sys::*;
-use openprofiler_model::{MonitorEventKind, SampleKind, ThreadState};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,43 +89,6 @@ pub fn blocker(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Blocker {
     b
 }
 
-/// Records a finished park of thread `idx` that started at `start` (stack of the current thread).
-pub fn record(
-    a: &Agent,
-    jni: *mut JNIEnv,
-    idx: u32,
-    start: i64,
-    class: Option<String>,
-    owner: Option<u32>,
-    id: u64,
-) {
-    let dur = (now_nanos() - start).max(0);
-    if (dur as u128) < a.opts.monitor_threshold.as_nanos() {
-        return;
-    }
-    let Some(stack) = capture_stack(a, jni, std::ptr::null_mut()) else { return };
-    // Waiting for a lock someone holds is blocking; anything else (conditions, latches, queues,
-    // idle pools) is waiting.
-    let (kind, state) = if owner.is_some() {
-        (SampleKind::Monitor, ThreadState::Blocked)
-    } else {
-        (SampleKind::Wait, ThreadState::Waiting)
-    };
-    let mut c = a.collector.lock();
-    let class_id = class.as_deref().map(|s| c.symbols.intern_str(s));
-    c.add_sample(start, kind, idx, state, stack, dur as u64, class_id);
-    c.add_monitor_event(MonitorRow {
-        start,
-        duration: dur,
-        kind: MonitorEventKind::Park,
-        thread: idx,
-        owner,
-        monitor_class: class.unwrap_or_default(),
-        monitor_id: id,
-        stack,
-    });
-}
-
 /// The `Unsafe.park` replacement.
 unsafe extern "system" fn park_hook(env: *mut JNIEnv, unsafe_: jobject, absolute: jboolean, time: jlong) {
     // SAFETY: `ORIGINAL` holds the VM's implementation, set before the hook was registered.
@@ -146,12 +109,11 @@ unsafe extern "system" fn park_hook(env: *mut JNIEnv, unsafe_: jobject, absolute
     let start = now_nanos();
     // SAFETY: as above.
     unsafe { original(env, unsafe_, absolute, time) };
-    if (now_nanos() - start) as u128 >= a.opts.monitor_threshold.as_nanos()
+    let dur = now_nanos() - start;
+    if dur as u128 >= a.opts.monitor_threshold.as_nanos()
         && let Some(idx) = thread_index(a, env, thread)
     {
-        let class = object_class_name(a, env, b.object);
-        let id = identity_hash(a, b.object);
-        record(a, env, idx, start, Some(class), b.owner, id);
+        crate::events::record_park(a, env, idx, start, dur, b.object, b.owner);
     }
     // Local references die with this native frame.
 }

@@ -9,6 +9,7 @@ public final class Interception {
     static final int SUBTYPES = 1;
     static final int ARGS = 2;
     static final int EXIT_ONLY = 4;
+    static final int ENTRY_ONLY = 8;
 
     final String type;
     final String method;
@@ -41,6 +42,15 @@ public final class Interception {
     /** Only the exit is reported (needed for constructors, where {@code this} is unusable at entry). */
     public Interception exitOnly() {
         flags |= EXIT_ONLY;
+        return this;
+    }
+
+    /**
+     * Only the entry is reported: no exit hooks are injected, which makes the interception
+     * cheaper. The call is not recorded and must not set a request label.
+     */
+    public Interception entryOnly() {
+        flags |= ENTRY_ONLY;
         return this;
     }
 }

@@ -471,6 +471,8 @@ pub struct ProbeSite {
     pub args: bool,
     /// Call the entry hook (otherwise only exits are reported).
     pub entry: bool,
+    /// Call the exit hooks (otherwise only the entry is reported).
+    pub exit: bool,
 }
 
 /// What to inject into one method.
@@ -486,7 +488,7 @@ pub struct MethodPlan {
 
 impl MethodPlan {
     fn has_exit(&self) -> bool {
-        self.call_id.is_some() || self.probe.is_some()
+        self.call_id.is_some() || self.probe.is_some_and(|p| p.exit)
     }
 }
 
@@ -698,7 +700,7 @@ fn entry_code(e: &mut Emit<'_>, m: &Method, plan: &MethodPlan) -> Result<()> {
 
 /// Exit hooks before a return instruction `op`. Probe exits get the return value.
 fn exit_code(e: &mut Emit<'_>, m: &Method, plan: &MethodPlan, op: u8) -> Result<()> {
-    if let Some(p) = plan.probe {
+    if let Some(p) = plan.probe.filter(|p| p.exit) {
         match op {
             0xb1 if m.is_constructor() => e.op(0x2a),
             0xb1 => e.op(0x01),
@@ -725,7 +727,7 @@ fn exit_code(e: &mut Emit<'_>, m: &Method, plan: &MethodPlan, op: u8) -> Result<
 
 /// Catch-all handler body: exception on the stack, exit hooks, rethrow.
 fn handler_code(e: &mut Emit<'_>, plan: &MethodPlan) -> Result<()> {
-    if let Some(p) = plan.probe {
+    if let Some(p) = plan.probe.filter(|p| p.exit) {
         e.op(0x59);
         e.int(p.site as i32)?;
         e.hook("exitThrow", "(Ljava/lang/Throwable;I)V")?;

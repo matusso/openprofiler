@@ -6,18 +6,32 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
-/** A synchronized map with weak, identity-compared keys. Values of collected keys can be drained. */
+/**
+ * A thread-safe map with weak, identity-compared keys. Values of collected keys can be drained.
+ * Probes use it on every intercepted call from every thread, so it is split into lock stripes
+ * by identity hash.
+ */
 final class WeakIdentityMap<K, V> {
-    private final Map<Object, V> map = new HashMap<>();
+    private static final int STRIPES = 16;
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private final Map<Object, V>[] maps = new Map[STRIPES];
     private final ReferenceQueue<Object> queue = new ReferenceQueue<>();
+
+    WeakIdentityMap() {
+        for (int i = 0; i < STRIPES; i++) {
+            maps[i] = new HashMap<>();
+        }
+    }
 
     private static final class WeakKey extends WeakReference<Object> {
         final int hash;
 
-        WeakKey(Object o, ReferenceQueue<Object> q) {
+        WeakKey(Object o, int hash, ReferenceQueue<Object> q) {
             super(o, q);
-            hash = System.identityHashCode(o);
+            this.hash = hash;
         }
 
         @Override
@@ -43,14 +57,16 @@ final class WeakIdentityMap<K, V> {
 
     private static final class Lookup {
         final Object o;
+        final int hash;
 
-        Lookup(Object o) {
+        Lookup(Object o, int hash) {
             this.o = o;
+            this.hash = hash;
         }
 
         @Override
         public int hashCode() {
-            return System.identityHashCode(o);
+            return hash;
         }
 
         @Override
@@ -59,23 +75,57 @@ final class WeakIdentityMap<K, V> {
         }
     }
 
-    synchronized V get(K key) {
-        return map.get(new Lookup(key));
+    private Map<Object, V> stripe(int hash) {
+        return maps[(hash ^ (hash >>> 16)) & (STRIPES - 1)];
     }
 
-    synchronized void put(K key, V value) {
-        map.put(new WeakKey(key, queue), value);
+    V get(K key) {
+        int h = System.identityHashCode(key);
+        Map<Object, V> m = stripe(h);
+        synchronized (m) {
+            return m.get(new Lookup(key, h));
+        }
     }
 
-    synchronized V remove(K key) {
-        return map.remove(new Lookup(key));
+    void put(K key, V value) {
+        int h = System.identityHashCode(key);
+        Map<Object, V> m = stripe(h);
+        synchronized (m) {
+            m.put(new WeakKey(key, h, queue), value);
+        }
+    }
+
+    /** The value of {@code key}, created with {@code create} if there is none. */
+    V computeIfAbsent(K key, Function<K, V> create) {
+        int h = System.identityHashCode(key);
+        Map<Object, V> m = stripe(h);
+        synchronized (m) {
+            V v = m.get(new Lookup(key, h));
+            if (v == null) {
+                v = create.apply(key);
+                m.put(new WeakKey(key, h, queue), v);
+            }
+            return v;
+        }
+    }
+
+    V remove(K key) {
+        int h = System.identityHashCode(key);
+        Map<Object, V> m = stripe(h);
+        synchronized (m) {
+            return m.remove(new Lookup(key, h));
+        }
     }
 
     /** Removes entries whose keys were collected and returns their values. */
-    synchronized List<V> expunge() {
+    List<V> expunge() {
         List<V> out = null;
         for (Object r; (r = queue.poll()) != null; ) {
-            V v = map.remove(r);
+            Map<Object, V> m = stripe(((WeakKey) r).hash);
+            V v;
+            synchronized (m) {
+                v = m.remove(r);
+            }
             if (v != null) {
                 if (out == null) {
                     out = new ArrayList<>();
@@ -86,7 +136,13 @@ final class WeakIdentityMap<K, V> {
         return out == null ? List.of() : out;
     }
 
-    synchronized int size() {
-        return map.size();
+    int size() {
+        int n = 0;
+        for (Map<Object, V> m : maps) {
+            synchronized (m) {
+                n += m.size();
+            }
+        }
+        return n;
     }
 }

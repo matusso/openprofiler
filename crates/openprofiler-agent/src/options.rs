@@ -43,6 +43,11 @@ pub struct Options {
     pub alloc_interval: u32,
     pub monitors: bool,
     pub monitor_threshold: Duration,
+    /// Minimum time between full stack captures for probe calls of one (thread, probe, request,
+    /// payload); calls in between reuse the last stack. Zero: every call.
+    pub probe_stack_interval: Duration,
+    /// Blocked or waiting time of shorter monitor events per thread that yields one sample.
+    pub monitor_interval: Duration,
     /// Owner lookups for contended monitors per second (each is a safepoint); 0 disables them.
     pub owner_rate: u32,
     /// Virtual-thread mount/unmount tracking (JDK 21+).
@@ -88,6 +93,8 @@ impl Default for Options {
             alloc_interval: 512 * 1024,
             monitors: true,
             monitor_threshold: Duration::from_micros(100),
+            monitor_interval: Duration::from_millis(1),
+            probe_stack_interval: Duration::from_millis(10),
             owner_rate: 50,
             vthreads: true,
             triggers: None,
@@ -237,6 +244,8 @@ impl Options {
                         true
                     }
                     "monitor_threshold" => parse_duration(v).map(|d| o.monitor_threshold = d).is_some(),
+                    "monitor_interval" => parse_duration(v).map(|d| o.monitor_interval = d).is_some(),
+                    "probe_stack_interval" => parse_duration(v).map(|d| o.probe_stack_interval = d).is_some(),
                     "owner_rate" => v.parse().map(|n| o.owner_rate = n).is_ok(),
                     "vthreads" => {
                         o.vthreads = flag(v);

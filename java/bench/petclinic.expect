@@ -1,0 +1,16 @@
+# Spring Petclinic: URL hot spots of the requests the benchmark sends.
+call   | http_server | GET /owners/{id}
+event  | http_server | GET /owners/{id} | detail~status 200
+call   | http_server | GET /vets.html
+call   | http_server | GET /owners
+# SQL hot spots (Hibernate's SQL through HikariCP) and the JPA operations above them, done for
+# the requests and linked to the controller code that ran them.
+call   | jdbc | from owners o1_0
+event  | jdbc | from owners o1_0 | context~GET /owners/{id} | detail~params:
+stack  | jdbc | from owners o1_0 | OwnerController.showOwner
+stack  | jdbc | from owners o1_0 | [GET /owners/{id}]
+call   | jpa  | find Owner
+stack  | jpa  | find Owner | OwnerController
+control | jdbc | (pooled) | close
+# The request label is the root of the CPU call tree.
+sample | cpu | [GET /owners/{id}]

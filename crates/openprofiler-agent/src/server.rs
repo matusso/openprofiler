@@ -319,6 +319,8 @@ fn session<S: Read + Write>(a: &'static Agent, jni: *mut jvmti_sys::JNIEnv, s: &
         let final_req = FINAL_REQUESTED.load(Ordering::SeqCst);
         if final_req || last_flush.elapsed() >= FLUSH_EVERY {
             last_flush = Instant::now();
+            crate::events::drain_monitors(a);
+            crate::probes::drain(a);
             let batch = a.collector.lock().cut_batch(&sent, final_req, true);
             if let Some(b) = batch {
                 let to = b.to.unwrap_or_default();

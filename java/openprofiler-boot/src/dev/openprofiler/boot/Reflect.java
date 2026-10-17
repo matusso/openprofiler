@@ -14,13 +14,22 @@ import java.util.concurrent.ConcurrentHashMap;
 final class Reflect {
     private static final Object MISSING = new Object();
 
-    private static final ClassValue<ConcurrentHashMap<String, Object>> CACHE =
-        new ClassValue<ConcurrentHashMap<String, Object>>() {
+    /**
+     * No-argument methods, one-argument methods and fields by name; plain names as keys, so a
+     * lookup allocates nothing.
+     */
+    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS0 = cache();
+    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS1 = cache();
+    private static final ClassValue<ConcurrentHashMap<String, Object>> FIELDS = cache();
+
+    private static ClassValue<ConcurrentHashMap<String, Object>> cache() {
+        return new ClassValue<ConcurrentHashMap<String, Object>>() {
             @Override
             protected ConcurrentHashMap<String, Object> computeValue(Class<?> type) {
                 return new ConcurrentHashMap<>();
             }
         };
+    }
 
     private Reflect() {}
 
@@ -34,6 +43,28 @@ final class Reflect {
         return call(target, name, 1, new Object[] {arg});
     }
 
+    /** {@code target.name(arg)} for a one-parameter method; whether it ran without throwing. */
+    static boolean tryCall1(Object target, String name, Object arg) {
+        if (target == null) {
+            return false;
+        }
+        ConcurrentHashMap<String, Object> cache = METHODS1.get(target.getClass());
+        Object m = cache.get(name);
+        if (m == null) {
+            m = find(target.getClass(), name, 1);
+            cache.put(name, m == null ? MISSING : m);
+        }
+        if (m == MISSING) {
+            return false;
+        }
+        try {
+            ((Method) m).invoke(target, arg);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     static String str(Object target, String name) {
         Object v = call(target, name);
         return v == null ? null : String.valueOf(v);
@@ -43,12 +74,11 @@ final class Reflect {
         if (target == null) {
             return null;
         }
-        String key = name + "/" + argc;
-        ConcurrentHashMap<String, Object> cache = CACHE.get(target.getClass());
-        Object m = cache.get(key);
+        ConcurrentHashMap<String, Object> cache = (argc == 0 ? METHODS0 : METHODS1).get(target.getClass());
+        Object m = cache.get(name);
         if (m == null) {
             m = find(target.getClass(), name, argc);
-            cache.put(key, m == null ? MISSING : m);
+            cache.put(name, m == null ? MISSING : m);
         }
         if (m == MISSING) {
             return null;
@@ -65,9 +95,8 @@ final class Reflect {
         if (target == null) {
             return null;
         }
-        ConcurrentHashMap<String, Object> cache = CACHE.get(target.getClass());
-        String key = "#" + name;
-        Object f = cache.get(key);
+        ConcurrentHashMap<String, Object> cache = FIELDS.get(target.getClass());
+        Object f = cache.get(name);
         if (f == null) {
             f = MISSING;
             for (Class<?> c = target.getClass(); c != null && f == MISSING; c = c.getSuperclass()) {
@@ -79,7 +108,7 @@ final class Reflect {
                     // keep looking
                 }
             }
-            cache.put(key, f);
+            cache.put(name, f);
         }
         try {
             return f == MISSING ? null : ((Field) f).get(target);
@@ -152,13 +181,25 @@ final class Reflect {
         if (o == null) {
             return false;
         }
-        for (Class<?> c = o.getClass(); c != null; c = c.getSuperclass()) {
-            if (c.getName().equals(name) || implementsNamed(c, name)) {
-                return true;
+        ConcurrentHashMap<String, Boolean> known = IS_A.get(o.getClass());
+        Boolean r = known.get(name);
+        if (r == null) {
+            r = false;
+            for (Class<?> c = o.getClass(); c != null && !r; c = c.getSuperclass()) {
+                r = c.getName().equals(name) || implementsNamed(c, name);
             }
+            known.put(name, r);
         }
-        return false;
+        return r;
     }
+
+    private static final ClassValue<ConcurrentHashMap<String, Boolean>> IS_A =
+        new ClassValue<ConcurrentHashMap<String, Boolean>>() {
+            @Override
+            protected ConcurrentHashMap<String, Boolean> computeValue(Class<?> type) {
+                return new ConcurrentHashMap<>();
+            }
+        };
 
     private static boolean implementsNamed(Class<?> c, String name) {
         for (Class<?> i : c.getInterfaces()) {

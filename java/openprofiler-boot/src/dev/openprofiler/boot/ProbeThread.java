@@ -15,6 +15,8 @@ final class ProbeThread {
     int depth;
     /** The request this thread works for (propagated across hand-offs). */
     String context;
+    /** {@link #context} was set by {@code ThreadPoolExecutor.beforeExecute}, to clear after it. */
+    boolean pooledContext;
 
     static ProbeThread current() {
         try {
@@ -22,6 +24,14 @@ final class ProbeThread {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private final Call scratch = new Call();
+
+    /** A call for entry-only interceptions, which are never on the stack. */
+    Call scratch() {
+        scratch.reset();
+        return scratch;
     }
 
     Call push() {

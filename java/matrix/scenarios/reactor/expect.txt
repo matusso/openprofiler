@@ -1,0 +1,7 @@
+# Work on Reactor schedulers belongs to the request that started the pipeline.
+every   | custom.work | bounded elastic | context~GET /owners/{id}
+every   | custom.work | single | context~GET /owners/{id}
+every   | custom.work | after delay | context~GET /owners/{id}
+every   | custom.work | parallel | context~GET /owners/{id}
+stack   | custom.work | parallel | [GET /owners/{id}]
+count   | http_server | GET /owners/{id} | 20

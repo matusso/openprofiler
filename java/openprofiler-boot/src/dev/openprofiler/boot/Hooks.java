@@ -37,11 +37,18 @@ public final class Hooks {
     /** {@code probe << 32 | interception} of an instrumented site ({@code 0xFFFFFFFF} for custom probes). */
     static native long siteInfo0(int site);
 
+    /** Type the receiver of a site must have (inherited implementations), or null. */
+    static native String siteType0(int site);
+
     /** Payload template of a custom probe site. */
     static native String siteTemplate0(int site);
 
     static native void probeCall0(int probe, String payload, long startEpochNanos, long durationNanos,
                                   String error, long control, String detail);
+
+    /** {@link #probeCall0} for a call of request {@code label} recorded on another thread. */
+    static native void probeCallLabelled0(int probe, String payload, long startEpochNanos, long durationNanos,
+                                          String error, long control, String detail, String label);
 
     static native void control0(int probe, long id, boolean open, String description);
 

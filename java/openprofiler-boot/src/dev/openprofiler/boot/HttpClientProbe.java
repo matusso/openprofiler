@@ -63,10 +63,15 @@ final class HttpClientProbe extends Probe {
                 break;
             }
             case APACHE5: {
+                Object host = args != null && args.length > 0 ? args[0] : null;
                 Object req = args != null && args.length > 1 ? args[1] : null;
                 method = Reflect.str(req, "getMethod");
                 Object uri = Reflect.call(req, "getUri");
                 url = uri != null ? uri.toString() : Reflect.str(req, "getRequestUri");
+                // A relative request URI with the target host passed separately.
+                if (url != null && url.startsWith("/") && host != null) {
+                    url = Reflect.str(host, "toURI") + url;
+                }
                 break;
             }
             default:

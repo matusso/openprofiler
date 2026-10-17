@@ -1,0 +1,42 @@
+name: Probe matrix
+
+# The probes against real libraries and versions (java/matrix/run.sh): JDBC drivers and pools,
+# JPA providers, servlet containers, Netty, Reactor Netty, WebFlux, Vert.x, HTTP clients, Kafka,
+# gRPC, Reactor and Kotlin coroutines. PostgreSQL, MySQL and Kafka run in containers.
+
+on:
+  pull_request:
+    paths:
+      - crates/openprofiler-agent/**
+      - java/openprofiler-boot/**
+      - java/matrix/**
+      - crates/openprofiler-link/examples/oplink_check.rs
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  matrix:
+    name: Probes on JDK ${{ matrix.jdk }}
+    strategy:
+      fail-fast: false
+      matrix:
+        jdk: ["17", "21"]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.jdk }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: probe-matrix-m2-${{ hashFiles('java/matrix/**/pom.xml', 'java/matrix/matrix.txt') }}
+          restore-keys: probe-matrix-m2-
+      - run: java/matrix/run.sh

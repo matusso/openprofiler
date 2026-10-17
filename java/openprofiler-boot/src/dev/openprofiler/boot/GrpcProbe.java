@@ -32,9 +32,25 @@ final class GrpcProbe extends Probe {
                 return Reflect.str(a, "getFullMethodName");
             }
             if (Reflect.isA(a, "io.grpc.ClientCall")) {
-                // asyncUnaryCall(ClientCall, req, observer): the descriptor is not reachable publicly.
-                return null;
+                return callMethodName(a);
             }
+        }
+        return null;
+    }
+
+    /**
+     * Full method name of a {@code ClientCall} (futureUnaryCall, asyncUnaryCall): no public API has
+     * it, but the channel's call implementations keep the descriptor in a {@code method} field, and
+     * interceptors' forwarding calls in a {@code delegate} field.
+     */
+    private static String callMethodName(Object call) {
+        Object c = call;
+        for (int i = 0; i < 6 && c != null; i++) {
+            Object m = Reflect.field(c, "method");
+            if (Reflect.isA(m, "io.grpc.MethodDescriptor")) {
+                return Reflect.str(m, "getFullMethodName");
+            }
+            c = Reflect.field(c, "delegate");
         }
         return null;
     }

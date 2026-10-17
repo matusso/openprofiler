@@ -19,7 +19,7 @@ public abstract class Probe {
     int[] flags = new int[0];
 
     private final WeakIdentityMap<Object, Control> controls = new WeakIdentityMap<>();
-    private static long nextControl;
+    private static final java.util.concurrent.atomic.AtomicLong NEXT_CONTROL = new java.util.concurrent.atomic.AtomicLong();
 
     protected Probe(String id, String name, String payloadLabel, String controlLabel) {
         this.id = id;
@@ -58,9 +58,7 @@ public abstract class Probe {
         if (c != null) {
             return c.id;
         }
-        synchronized (Probe.class) {
-            c = new Control(++nextControl, description);
-        }
+        c = new Control(NEXT_CONTROL.incrementAndGet(), description);
         controls.put(object, c);
         Hooks.control0(index, c.id, true, description);
         return c.id;
@@ -90,6 +88,17 @@ public abstract class Probe {
     private void expireControls() {
         for (Control c : controls.expunge()) {
             Hooks.control0(index, c.id, false, "garbage collected without close");
+        }
+    }
+
+    /**
+     * Records a call of request {@code label} that completed on another thread than it started
+     * (asynchronous servers): the label is its context and the root of its stack.
+     */
+    protected final void recordFor(String label, String payload, long startEpochNanos, long durationNanos,
+                                   String error, String detail) {
+        if (index >= 0 && payload != null) {
+            Hooks.probeCallLabelled0(index, payload, startEpochNanos, durationNanos, error, 0, detail, label);
         }
     }
 

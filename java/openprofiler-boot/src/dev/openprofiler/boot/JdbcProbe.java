@@ -13,7 +13,7 @@ import java.util.List;
 final class JdbcProbe extends Probe {
     private static final int PREPARE = 0, PREPARE_CALL = 1, EXECUTE = 2, EXECUTE_QUERY = 3, EXECUTE_UPDATE = 4,
         EXECUTE_LARGE_UPDATE = 5, EXECUTE_BATCH = 6, EXECUTE_LARGE_BATCH = 7, ADD_BATCH = 8, CONNECT = 9,
-        GET_CONNECTION = 10, CLOSE = 11, CLEAR_PARAMETERS = 12, FIRST_SETTER = 13;
+        GET_CONNECTION = 10, CLOSE = 11, CLEAR_PARAMETERS = 12, STATEMENT_CLOSE = 13, FIRST_SETTER = 14;
     private static final String[] SETTERS = {
         "setString", "setInt", "setLong", "setObject", "setBoolean", "setDouble", "setFloat", "setShort",
         "setBigDecimal", "setTimestamp", "setDate", "setTime", "setNull",
@@ -23,6 +23,8 @@ final class JdbcProbe extends Probe {
     private final WeakIdentityMap<Object, String> sql = new WeakIdentityMap<>();
     private final WeakIdentityMap<Object, Object[]> params = new WeakIdentityMap<>();
     private final WeakIdentityMap<Object, Long> connectionOf = new WeakIdentityMap<>();
+    /** Data source → the URL its connections report (looked up once). */
+    private final WeakIdentityMap<Object, String> dataSourceUrl = new WeakIdentityMap<>();
 
     JdbcProbe() {
         super("jdbc", "JDBC", "SQL statement", "Connection");
@@ -38,13 +40,15 @@ final class JdbcProbe extends Probe {
         }
         l.add(Interception.subtypes("java.sql.Statement", "executeBatch", "()[I"));
         l.add(Interception.subtypes("java.sql.Statement", "executeLargeBatch", "()[J"));
-        l.add(Interception.subtypes("java.sql.Statement", "addBatch", "(Ljava/lang/String;)V").withArgs());
+        l.add(Interception.subtypes("java.sql.Statement", "addBatch", "(Ljava/lang/String;)V").withArgs().entryOnly());
         l.add(Interception.subtypes("java.sql.Driver", "connect", null).withArgs());
         l.add(Interception.subtypes("javax.sql.DataSource", "getConnection", null));
-        l.add(Interception.subtypes("java.sql.Connection", "close", "()V"));
-        l.add(Interception.subtypes("java.sql.PreparedStatement", "clearParameters", "()V"));
+        l.add(Interception.subtypes("java.sql.Connection", "close", "()V").entryOnly());
+        l.add(Interception.subtypes("java.sql.PreparedStatement", "clearParameters", "()V").entryOnly());
+        // Dropping a closed statement's entries spares the GC clearing their weak references.
+        l.add(Interception.subtypes("java.sql.Statement", "close", "()V").entryOnly());
         for (String s : SETTERS) {
-            l.add(Interception.subtypes("java.sql.PreparedStatement", s, null).withArgs());
+            l.add(Interception.subtypes("java.sql.PreparedStatement", s, null).withArgs().entryOnly());
         }
         return l.toArray(new Interception[0]);
     }
@@ -98,6 +102,11 @@ final class JdbcProbe extends Probe {
             case CLEAR_PARAMETERS:
                 params.remove(self);
                 break;
+            case STATEMENT_CLOSE:
+                sql.remove(self);
+                params.remove(self);
+                connectionOf.remove(self);
+                break;
             default:
                 break;
         }
@@ -123,12 +132,14 @@ final class JdbcProbe extends Probe {
                 break;
             case GET_CONNECTION:
                 if (result != null) {
-                    String url = null;
-                    Object meta = Reflect.call(result, "getMetaData");
-                    if (meta != null) {
-                        url = Reflect.str(meta, "getURL");
+                    String url = dataSourceUrl.get(self);
+                    if (url == null) {
+                        Object meta = Reflect.call(result, "getMetaData");
+                        url = meta == null ? null : Reflect.str(meta, "getURL");
+                        url = url != null ? url : self.getClass().getName();
+                        dataSourceUrl.put(self, url);
                     }
-                    call.control = openControl(result, (url != null ? url : self.getClass().getName()) + " (pooled)");
+                    call.control = openControl(result, url + " (pooled)");
                 }
                 break;
             default:

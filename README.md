@@ -16,7 +16,7 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Memory** | Allocation call tree and hot spots, live versus collected objects, GC and heap telemetry. |
 | **Heap dumps** | Out-of-core HPROF analysis: dominator tree, retained sizes (identical to Eclipse MAT), biggest objects, references, paths to GC roots, and leak and waste inspections. A 10 GB dump opens in about 25 s cold and under 5 ms warm. |
 | **Threads and locks** | Thread history, states, thread dumps, monitor and `java.util.concurrent` contention with lock owners, virtual threads. |
-| **Probes** | SQL statements with bind parameters, HTTP requests in and out, JPA, Kafka, gRPC, exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools and `CompletableFuture`s. Custom probes with one annotation. |
+| **Probes** | SQL statements with bind parameters, HTTP requests in and out (Servlet containers, Netty, Reactor Netty and WebFlux, Vert.x and Quarkus), JPA, Kafka, gRPC, exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools, `CompletableFuture`s, Reactor schedulers and coroutines. Custom probes with one annotation. Tested against the real libraries in a version matrix. |
 | **Exact call counts** | Bytecode instrumentation of the packages you choose: invocation counts and times in the call tree, with auto-tuning of hot, trivial methods. |
 | **Telemetry** | Heap, GC, CPU, threads and classes over time, with a global time range that filters every view. |
 | **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG or collapsed stacks. |
@@ -116,7 +116,9 @@ void place(String orderId) { ... }
 
 or call `OpenProfiler.probeEvent("orders", "place order " + id, nanos)`. HTTP and gRPC server
 requests become root frames of the call tree (`[GET /owners/{id}]`), including work they hand to
-executors, fork/join pools, `CompletableFuture`s, new threads and Kotlin coroutines.
+executors, fork/join pools, `CompletableFuture`s, Reactor schedulers, new threads, Kotlin
+coroutines and Quarkus' worker pool. Asynchronous requests (WebFlux, Quarkus, asynchronous
+servlets) are timed until their response completes.
 
 ### Decompile Android apps and jars
 
@@ -235,6 +237,8 @@ scripts/build-bundle.sh               # Linux relay + agents for remote attach â
 ```sh
 cargo test --workspace                                                   # incl. live agent end-to-end tests (need java)
 MAT_HOME=/path/to/mat cargo test -p openprofiler-heap --test mat_parity  # retained sizes vs Eclipse MAT (Docker)
+java/matrix/run.sh                    # probes against real libraries and versions (Docker, JDK 17+)
+java/bench/run.sh                     # agent overhead on Spring Petclinic and Quarkus (java/bench/linux.sh: on Linux)
 (cd ui && npm run lint && npm run typecheck && npm test)
 ```
 
@@ -261,7 +265,7 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 | `crates/openprofiler-daemon` | Query API server, insights, exporters, MCP, IDE bridge |
 | `crates/openprofiler-cli` | The `openprofiler` binary |
 | `crates/openprofiler-dex` | DEX/APK and class-file/JAR readers, smali and bytecode views, the Java decompiler, Android resource decoding |
-| `java/` | Boot classes, public `openprofiler-api`, test workload |
+| `java/` | Boot classes, public `openprofiler-api`, test workloads, the probe version matrix (`java/matrix`) and the overhead benchmark (`java/bench`) |
 | `ui/` | React + TypeScript UI, Tauri desktop shell |
 | `ide/intellij` | IntelliJ IDEA plugin (Kotlin) |
 | `ide/vscode` | VS Code / VSCodium extension |
@@ -269,15 +273,18 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 ## Project status
 
 OpenProfiler is in early development. The offline analyzer, the live agent, probes and bytecode
-instrumentation, and most of remote attach work today. The probes for JPA, Kafka, gRPC, Netty,
-OkHttp and Apache HttpClient are not yet tested against those libraries.
+instrumentation, and most of remote attach work today. The probes are tested against 49 library
+and version combinations (`java/matrix`). On Spring Petclinic the agent with probes costs about
+1% throughput and no measurable CPU per request; on the Quarkus quickstart about 3% throughput and
+24% CPU per request (its requests take 0.1 ms; see the
+[benchmark](docs/DESIGN.md#4-roadmap)).
 
 | Phase | State |
 |---|---|
 | Foundations | Done |
 | Offline analyzer (HPROF, JFR, UI, CLI, MCP) | Done |
 | Live agent (sampling, allocations, locks, telemetry, dumps, triggers) | Done |
-| Probes and instrumentation | Done (library version matrix open) |
+| Probes and instrumentation | Done (Quarkus CPU overhead open) |
 | Remote and cloud | Mostly done |
 | Polish and ecosystem | Partial |
 

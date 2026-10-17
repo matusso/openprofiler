@@ -3,7 +3,11 @@ package dev.openprofiler.boot;
 import java.util.ArrayList;
 import java.util.List;
 
-/** JPA (javax and Jakarta, so Hibernate, EclipseLink, ...): entity operations and query executions. */
+/**
+ * JPA (javax and Jakarta, so Hibernate, EclipseLink, ...): entity operations and query executions.
+ * The payload of a query is its JPQL (Hibernate's {@code getQueryString}, EclipseLink's
+ * {@code getDatabaseQuery().getJPQLString()}).
+ */
 final class JpaProbe extends Probe {
     private static final String[] OPS = {"persist", "merge", "remove", "find", "refresh", "flush"};
     private static final String[] QUERIES = {"getResultList", "getSingleResult", "executeUpdate", "getResultStream"};
@@ -36,6 +40,10 @@ final class JpaProbe extends Probe {
             call.payload = entity.isEmpty() ? op : op + " " + entity;
         } else {
             String q = Reflect.str(self, "getQueryString");
+            if (q == null) {
+                // EclipseLink
+                q = Reflect.str(Reflect.call(self, "getDatabaseQuery"), "getJPQLString");
+            }
             call.payload = q != null ? Reflect.cut(q, 4000) : QUERIES[i - OPS.length] + " " + self.getClass().getSimpleName();
         }
     }

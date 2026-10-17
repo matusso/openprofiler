@@ -14,6 +14,11 @@ final class Probes {
     private static volatile Probe[] byIndex = new Probe[0];
     /** Site → {@code (probe << 32 | interception) + 1}; 0 = not looked up yet. */
     private static volatile long[] sites = new long[256];
+    /**
+     * Site → type the receiver must have (sites in superclasses that implement an intercepted
+     * method for subtypes); written before {@link #sites}.
+     */
+    private static volatile String[] siteTypes = new String[256];
     private static final ConcurrentHashMap<String, CustomProbe> CUSTOM = new ConcurrentHashMap<>();
     private static volatile long failures;
     /** {@code -Dopenprofiler.probes.debug=true} prints the first probe failures. */
@@ -71,17 +76,29 @@ final class Probes {
         if (info < 0) {
             return -1;
         }
+        String type = Hooks.siteType0(site);
         synchronized (Probes.class) {
+            String[] t = siteTypes;
+            if (site >= t.length) {
+                t = java.util.Arrays.copyOf(t, Math.max(site + 1, t.length * 2));
+            }
+            t[site] = type;
+            siteTypes = t;
             s = sites;
             if (site >= s.length) {
-                long[] n = new long[Math.max(site + 1, s.length * 2)];
-                System.arraycopy(s, 0, n, 0, s.length);
-                s = n;
+                s = java.util.Arrays.copyOf(s, Math.max(site + 1, s.length * 2));
             }
             s[site] = info + 1;
             sites = s;
         }
         return info;
+    }
+
+    /** Whether {@code self} has the type the site requires (always true for most sites). */
+    private static boolean receiverMatches(int site, Object self) {
+        String[] t = siteTypes;
+        String type = site < t.length ? t[site] : null;
+        return type == null || Reflect.isA(self, type);
     }
 
     private static Probe probeFor(int site, long info) {
@@ -103,7 +120,20 @@ final class Probes {
         try {
             long info = siteInfo(site);
             Probe p = info < 0 ? null : probeFor(site, info);
-            if (p == null) {
+            if (p == null || !receiverMatches(site, self)) {
+                return;
+            }
+            int interception = (int) info;
+            if (interception >= 0 && interception < p.flags.length && (p.flags[interception] & Interception.ENTRY_ONLY) != 0) {
+                // No exit follows: a scratch call that is not pushed.
+                Call c = t.scratch();
+                c.site = site;
+                c.probe = p;
+                c.interception = interception;
+                c.self = self;
+                p.onEnter(c, self, args);
+                c.self = null;
+                c.state = null;
                 return;
             }
             Call c = t.push();

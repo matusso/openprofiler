@@ -13,7 +13,7 @@ final class SocketProbe extends Probe {
         return new Interception[] {
             Interception.method("java.net.Socket", "connect", "(Ljava/net/SocketAddress;I)V").withArgs(),
             Interception.method("java.net.ServerSocket", "accept", "()Ljava/net/Socket;"),
-            Interception.method("java.net.Socket", "close", "()V"),
+            Interception.method("java.net.Socket", "close", "()V").entryOnly(),
         };
     }
 

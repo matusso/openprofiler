@@ -1,0 +1,11 @@
+# Method and URL with ids replaced and without the query, the status as detail.
+count   | http_client | GET http://127.0.0.1: | 31
+count   | http_client | /api/items/{id} | 30
+event   | http_client | /api/items/{id} | detail~status 200
+count   | http_client | POST http://127.0.0.1: | 10
+count   | http_client | /api/items | 40
+event   | http_client | /api/missing | detail~status 404
+nocall  | http_client | ?q=
+stack   | http_client | /api/items/{id} | Main.fetch
+# The backend's side.
+count   | http_server | GET /api/items/{id} | 30

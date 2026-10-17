@@ -118,7 +118,28 @@ Weights:
 ### Monitor events
 
 `MonitorEvent.kind` is `0` enter (contended `synchronized`), `1` wait (`Object.wait`) or `2` park
-(`java.util.concurrent`). Only events of at least `monitor_threshold` are sent individually.
+(`java.util.concurrent`). Only events of at least `monitor_threshold` are sent individually, at
+most 1000 per second each for monitors and for parks.
+
+Contention can be very frequent (a hot `synchronized` cache in a web application contends tens of
+thousands of times a second), so recording it must not make it worse:
+
+- Stacks are only taken at the start of a contended enter or wait, before the thread blocks:
+  when a sample is due (see below) and otherwise up to 5000 times a second in case the event turns
+  out long. `MonitorContendedEntered` runs after the thread acquired the monitor, so nothing there
+  walks the stack or takes a lock that other threads hold for long; raw frames are queued and
+  resolved by the sampler thread.
+- Events of at least `monitor_threshold` that have a stack are recorded with their duration. The
+  time of the other events is sampled: once a thread's summed time of them reaches
+  `monitor_interval`, its next event with a stack is recorded as a sample of that weight. Totals
+  per stack are estimates for these, like allocation samples.
+- Parks shorter than `monitor_threshold` are not recorded; longer ones beyond the budget are
+  sampled the same way. Stacks for samples are taken at most 5000 times a second; time beyond
+  carries over to the next sample.
+- Even with nothing to do, JVMTI's delivery of contended-enter events costs a few percent of
+  throughput at tens of thousands of contended enters a second. Above 20,000 a second the agent
+  switches them on for one second in five, and contended-enter samples recorded meanwhile weigh
+  five times their duration. Monitor waits and parks are not affected.
 
 - `owner` (thread index + 1) is the thread holding the lock. For contended monitors it comes from
   JVMTI `GetObjectMonitorUsage`, which runs as a safepoint operation, so at most `owner_rate`
@@ -313,10 +334,15 @@ where it starts after the `super(...)`/`this(...)` call. Branch offsets, switch 
 exception table, line and local-variable tables and `StackMapTable` frames are remapped; methods
 with `jsr`/`ret`, branches that would overflow or code over 64 KB are left alone.
 
-An interception names a method of one class or of every subtype of a class or interface. The hook
-knows supertypes only by name, so it records per class a mask of intercepted supertypes; a class
-loads before its supertypes, so masks are completed at `ClassPrepare` and late matches are
-retransformed. Instrumented classes in named modules get a reads edge to the boot loader's
+An interception names a method of one class or of every subtype of a class or interface (the type
+included). The hook knows supertypes only by name, so it records per class a mask of intercepted
+supertypes; a class loads before its supertypes, so masks are completed at `ClassPrepare` (a
+parent's mask counts only once the parent is prepared) and late matches are retransformed right
+there, before any code of the class runs. A subtype may inherit the method from a superclass that
+is not a subtype (Hibernate's `AbstractSelectionQuery.getResultList`); such superclasses are
+instrumented too, and their sites check the receiver's type at run time. Interceptions that only
+act at entry (`Interception.entryOnly()`: JDBC setters and `close`, executor hand-offs, response
+completions) get no exit hooks. Instrumented classes in named modules get a reads edge to the boot loader's
 unnamed module (where `Hooks` lives) before their code runs. Classes loaded before the hook was
 active (bootstrap classes, everything after a dynamic attach) are found by a scan of the loaded
 classes and retransformed. Lambdas and other hidden classes cannot be instrumented.
@@ -334,18 +360,24 @@ callbacks but records only the outermost one, and catches every failure
 Each recorded call is aggregated into `probe_calls`; calls within the per-probe budget
 (`probe_events` per second, default 100, only calls of at least `probe_threshold`) and calls of
 100 ms or more are also sent as `ProbeEvent`s. Stacks end at the intercepted method (the boot
-classes' frames are removed).
+classes' frames are removed). Walking the stack is most of the cost of a probe call (tens of
+nanoseconds per frame), so events always get their own stack, but a full stack for a (probe,
+request label, payload) is taken at most once per `probe_stack_interval` (default 10 ms, any
+thread) and the calls in between are attributed to it: probe call trees are exact in their totals
+and sampled in their split across call paths. `probe_stack_interval=0` takes a stack for every
+call. Threads aggregate their calls themselves; the sampler thread moves them into the batches.
 A control object (`ControlEvent`) is opened and closed by the probe; one garbage collected without
-being closed is reported as closed with the description `garbage collected without close`.
+being closed is reported as closed with the description `garbage collected without close`. Opens
+carry a stack, closes do not.
 
 | probe id | intercepts | payload | control objects |
 |---|---|---|---|
-| `jdbc` | `Statement.execute*`, `executeBatch`, `Connection.prepare*`, `PreparedStatement.set*`, `Driver.connect`, `DataSource.getConnection`, `Connection.close` (all subtypes) | SQL (prepared statements remember theirs); detail: bind parameters | connections (`physical` from drivers, `pooled` from data sources) |
-| `jpa` | `EntityManager` `persist/merge/remove/find/refresh/flush`, `Query` `getResultList/getSingleResult/executeUpdate/getResultStream` (javax and Jakarta) | operation and entity, or the query string | — |
-| `http_server` | Servlet `FilterChain.doFilter` and `HttpServlet.service` (javax and Jakarta), JDK `Filter$Chain.doFilter`, Netty `SimpleChannelInboundHandler.channelRead` with an `HttpRequest` | method and path with ids replaced (`GET /owners/{id}`); detail: status; also the request label | — |
-| `http_client` | JDK `HttpClient` (`send`, `sendAsync`), `HttpURLConnection`, OkHttp 3/4 `RealCall.execute`, Apache HttpClient 4/5 classic `doExecute` | method and URL (ids replaced, no query); detail: status | — |
+| `jdbc` | `Statement.execute*`, `executeBatch`, `Connection.prepare*`, `PreparedStatement.set*`, `Driver.connect`, `DataSource.getConnection`, `Connection.close`, `Statement.close` (all subtypes) | SQL (prepared statements remember theirs); detail: bind parameters | connections (`physical` from drivers, `pooled` from data sources) |
+| `jpa` | `EntityManager` `persist/merge/remove/find/refresh/flush`, `Query` `getResultList/getSingleResult/executeUpdate/getResultStream` (javax and Jakarta, also where a provider implements them in a superclass) | operation and entity, or the JPQL (Hibernate's query string, EclipseLink's `getJPQLString`) | — |
+| `http_server` | Servlet `FilterChain.doFilter` and `HttpServlet.service` (javax and Jakarta; asynchronous requests until their `AsyncListener` reports completion), JDK `Filter$Chain.doFilter`, Netty `SimpleChannelInboundHandler.channelRead` with an `HttpRequest`, Reactor Netty (`HttpServerHandle.onStateChange` to `HttpServerOperations.onOutboundComplete`/`onOutboundError`, so Spring WebFlux), Vert.x HTTP/1.x (`Http1xServerConnection.handleMessage` to `responseComplete`) and HTTP/2 (`Http2ServerStream.onHeaders` to the response's last write, also after an `h2c` upgrade), so Quarkus | method and path with ids replaced (`GET /owners/{id}`); detail: status; also the request label | — |
+| `http_client` | JDK `HttpClient` (`send`, `sendAsync`), `HttpURLConnection`, OkHttp 3/4/5 `RealCall.execute`, Apache HttpClient 4/5 classic `doExecute` (relative request URIs get the target host) | method and URL (ids replaced, no query); detail: status | — |
 | `kafka` | `KafkaProducer.send`, `KafkaConsumer.poll` (empty polls ignored), `commitSync` | `send <topic>`, `poll <subscription>` | — |
-| `grpc` | `ClientCalls` unary calls, unary server calls | full method name; server calls set the request label | — |
+| `grpc` | `ClientCalls` unary calls (blocking, future, async; the method of a `ClientCall` is read from the call), unary server calls | full method name; server calls set the request label | — |
 | `exceptions` | `Throwable` constructors | exception class; detail: message | — |
 | `files` | `FileInputStream`/`FileOutputStream`/`RandomAccessFile` (open, bulk read/write, close) | `read <path>`, `write <path>`; detail: bytes | open files |
 | `sockets` | `Socket.connect`, `ServerSocket.accept`, `Socket.close` | `connect <address>`, `accept <address>` | open sockets |
@@ -355,9 +387,26 @@ being closed is reported as closed with the description `garbage collected witho
 label for the duration of the call. The label is the root frame of the thread's CPU, wall,
 allocation, monitor, `calls` and probe stacks (`[GET /owners/{id}]`), so call trees split by
 request, and the `context` of its probe events. An internal `async` probe carries the label across
-hand-offs: `FutureTask` (executor `submit`, scheduled executors), `ForkJoinTask` (fork/join,
-parallel streams, `CompletableFuture` stages), `ThreadPoolExecutor.execute` of plain runnables,
-`Thread.start` (platform and virtual threads) and Kotlin coroutine dispatch.
+hand-offs: `FutureTask` (executor `submit`, scheduled executors, Reactor schedulers),
+`ForkJoinTask` (fork/join, parallel streams, `CompletableFuture` stages),
+`ThreadPoolExecutor.execute` of plain runnables, `Thread.start` (platform and virtual threads),
+Kotlin coroutine dispatch and JBoss Threads' `EnhancedQueueExecutor` (Quarkus' and WildFly's
+worker pools).
+
+Asynchronous servers (Reactor Netty, Vert.x, asynchronous servlets) label the thread while the
+request's handler is dispatched and subscribed, so work it schedules inherits the label, and
+record the request when its response completes, with the time from receipt to completion, the
+request as context and its label as the stack's root. Pipeline stages that resume on an event loop
+from I/O callbacks (not from a scheduler or executor the request handed work to) are not labelled.
+
+**Version matrix.** `java/matrix/run.sh` runs the probes against real libraries (see
+`java/matrix/matrix.txt`): JDBC drivers (H2, PostgreSQL, MySQL) behind HikariCP; Hibernate 5–7
+and EclipseLink 2.7/4; Tomcat 9–11, Jetty 9.4–12 and Undertow 2.2/2.3 (javax and Jakarta); Netty
+4.1/4.2; Reactor Netty 1.0–1.2 and Spring WebFlux 5.3–6.2; Vert.x 4.5/5; OkHttp 3–5 and Apache
+HttpClient 4/5; Kafka clients 2.8–4.0; grpc-java 1.40–1.69; Reactor core 3.4–3.7 and Kotlin
+coroutines 1.6–1.10. Each case records with the agent in offline mode and checks payloads,
+events, control objects, request context and call-tree links
+(`crates/openprofiler-link/examples/oplink_check.rs`).
 
 ## Offline recordings (`.oplink`)
 
@@ -390,7 +439,8 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `sampler` | `auto` | `auto`, `async` (Linux), `sync` |
 | `cpu`, `alloc`, `monitors` | on | initial recording state |
 | `alloc_interval` | `512k` | mean bytes between allocation samples |
-| `monitor_threshold` | `100us` | shorter monitor events are only aggregated; shorter parks are not recorded |
+| `monitor_threshold` | `100us` | longer monitor events and parks are sent individually; shorter monitor events are sampled, shorter parks not recorded |
+| `monitor_interval` | `1ms` | blocked or waiting time per thread that yields one sample of short monitor events (see [Monitor events](#monitor-events)) |
 | `owner_rate` | `50` | owner lookups for contended monitors per second (each is a safepoint); `0` disables them |
 | `vthreads` | on | virtual-thread mount tracking (JDK 21+) |
 | `triggers` | — | JSON trigger file loaded at start-up |
@@ -404,6 +454,7 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `autotune` | on | remove hot, trivial methods from call counting |
 | `probe_events` | `100` | individual probe events per probe and second (slower calls are always kept) |
 | `probe_threshold` | `0` | probe calls faster than this are aggregated but not sent as events |
+| `probe_stack_interval` | `10ms` | minimum time between full stacks for probe calls of one (probe, request, payload); `0`: every call |
 | `instrumentation` / `noinstrument` | on | bytecode instrumentation (probes, call counts, method triggers) |
 | `debug` | off | log to stderr |
 

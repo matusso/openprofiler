@@ -1,0 +1,17 @@
+# Prepared statements, bind parameters, the connection they ran on.
+call    | jdbc | INSERT INTO owners (id, name, city) VALUES (?, ?, ?)
+event   | jdbc | INSERT INTO owners (id, name, city) | detail~params: 7, 'owner7', 'Sun Prairie'
+call    | jdbc | [batch] INSERT INTO visits (id, owner_id, note) VALUES (?, ?, ?)
+call    | jdbc | CREATE TABLE owners
+call    | jdbc | UPDATE owners SET city = 'Monona' WHERE id > 15
+call    | jdbc | SELECT COUNT(*) FROM visits
+call    | jdbc | [get connection]
+# Queries of a request handler carry the request and are linked to the code that ran them.
+event   | jdbc | SELECT name FROM owners WHERE id = ? | detail~params: 3 | context~GET /owners/{id}
+stack   | jdbc | SELECT name FROM owners WHERE id = ? | Main.findOwner
+call    | http_server | GET /owners/{id}
+# Connections: pooled ones (closed, and one leaked and garbage collected), physical ones.
+control | jdbc | ${dbname} | open
+control | jdbc | (pooled) | close
+control | jdbc | (pooled) | gc
+control | jdbc | (physical) | open

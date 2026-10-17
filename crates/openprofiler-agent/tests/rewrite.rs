@@ -42,11 +42,19 @@ public final class Hooks {
     public static void trigger(int id) {}
     public static void enter(int site, Object self, Object[] args) {
         PROBES.incrementAndGet();
-        stack().push(-1 - site);
+        // Sites divisible by 3 are entry-only: no exit follows.
+        if (site % 3 != 0) stack().push(-1 - site);
         if (args == null) ERRORS.incrementAndGet();
     }
-    public static void exit(Object result, int site) { pop(-1 - site); }
-    public static void exitThrow(Throwable t, int site) { THROWS.incrementAndGet(); pop(-1 - site); }
+    public static void exit(Object result, int site) {
+        if (site % 3 == 0) ERRORS.incrementAndGet();
+        pop(-1 - site);
+    }
+    public static void exitThrow(Throwable t, int site) {
+        if (site % 3 == 0) ERRORS.incrementAndGet();
+        THROWS.incrementAndGet();
+        pop(-1 - site);
+    }
 }
 "#;
 
@@ -96,10 +104,12 @@ fn rewritten_corpus_verifies_and_behaves_identically() {
                 .filter(|(_, m)| m.has_code())
                 .map(|(i, _)| {
                     next += 1;
+                    // Every third method gets an entry-only probe and nothing that needs exits.
+                    let entry_only = next % 3 == 0;
                     MethodPlan {
                         method: i,
-                        call_id: Some(next),
-                        probe: Some(ProbeSite { site: next, args: true, entry: true }),
+                        call_id: (!entry_only).then_some(next),
+                        probe: Some(ProbeSite { site: next, args: true, entry: true, exit: !entry_only }),
                         trigger: Some(next),
                     }
                 })

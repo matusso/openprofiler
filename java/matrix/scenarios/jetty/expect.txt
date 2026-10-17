@@ -1,0 +1,18 @@
+# One call per request (filters and servlet dispatch are nested), status as detail.
+count   | http_server | GET /owners/{id} | 40
+event   | http_server | GET /owners/{id} | detail~status 200
+count   | http_server | GET /fail | 5
+event   | http_server | GET /fail | detail~status 500 | error~HTTP 500
+count   | http_server | GET /ping | 1+
+# Work handed to an executor and a CompletableFuture belongs to the request.
+every   | custom.work | load owner | context~GET /
+event   | custom.work | load owner | context~GET /owners/{id}
+every   | custom.work | price | context~GET /
+stack   | custom.work | load owner | [GET /owners/{id}]
+# The request label is the root of the call tree of the servlet code.
+sample  | calls | [GET /owners/{id}]
+sample  | calls | OwnerServlet.render
+# Asynchronous requests (startAsync) are recorded when they complete.
+count   | http_server | GET /async | 10
+event   | http_server | GET /async | detail~status 200 | ms~20
+every   | custom.work | async part | context~GET /async

@@ -17,20 +17,77 @@ static REGISTER: Mutex<()> = Mutex::new(());
 /// Fallback thread registry when object tagging is unavailable: Java thread id → index.
 static BY_JAVA_ID: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
-/// An in-flight monitor enter or wait.
+/// An in-flight monitor enter or wait. JVMTI posts both ends on the waiting thread, so it is kept
+/// in a thread-local. Contention can be very frequent, so stacks are only taken for events that
+/// are recorded (see [`monitor_end`]).
 struct PendingMonitor {
     start: i64,
     kind: MonitorEventKind,
-    class: String,
-    stack: u32,
     owner: Option<u32>,
-    id: u64,
+    /// Frames and monitor class, taken at the start when this event completes a sample.
+    sample: Option<(Vec<jvmtiFrameInfo>, String)>,
+    /// [`CONTENTION_EPOCH`] at the start; an event that started before contended-enter events
+    /// were last switched on has no matching start.
+    epoch: u32,
 }
 
-/// In-flight monitor waits per thread index.
-static MONITOR_PENDING: Mutex<Option<HashMap<u32, PendingMonitor>>> = Mutex::new(None);
+thread_local! {
+    static MONITOR_PENDING: std::cell::Cell<Option<PendingMonitor>> = const { std::cell::Cell::new(None) };
+    /// Blocked (0) and waiting (1) time of short monitor events not yet sampled.
+    static MONITOR_UNSAMPLED: std::cell::Cell<[i64; 2]> = const { std::cell::Cell::new([0, 0]) };
+}
+
+/// Long monitor events (and long parks) recorded individually per second.
+const LONG_MONITOR_EVENTS: u64 = 1000;
+static LONG_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Stacks taken per second at the start of contended enters and waits that may turn out long.
+const SPECULATIVE_STACKS: u64 = 5000;
+/// Stacks taken per second for samples of sampled time (threads mostly parked or waiting would
+/// otherwise take one per `monitor_interval` each); time beyond carries over to the next sample.
+const SAMPLE_STACKS: u64 = 5000;
+static SAMPLE_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPECULATIVE_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Takes one unit of a per-second budget kept as `second << 32 | used`; a lost race takes none.
+fn take_budget(budget: &std::sync::atomic::AtomicU64, per_second: u64) -> bool {
+    let second = (now_nanos() / 1_000_000_000) as u64 & 0xffff_ffff;
+    let cur = budget.load(Ordering::Relaxed);
+    let next = if cur >> 32 != second {
+        second << 32 | 1
+    } else if cur & 0xffff_ffff >= per_second {
+        return false;
+    } else {
+        cur + 1
+    };
+    budget.compare_exchange(cur, next, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+}
+
+fn slot(kind: MonitorEventKind) -> usize {
+    usize::from(kind != MonitorEventKind::Enter)
+}
+
+/// The current thread's frames and the class of `object`.
+fn monitor_site(a: &Agent, jni: *mut JNIEnv, object: jobject) -> Option<(Vec<jvmtiFrameInfo>, String)> {
+    let max = a.opts.max_frames.min(512) as usize;
+    let mut frames = vec![jvmtiFrameInfo { method: ptr::null_mut(), location: 0 }; max];
+    let mut count = 0;
+    if jvmti!(a.jvmti, GetStackTrace, ptr::null_mut(), 0, max as jint, frames.as_mut_ptr(), &mut count)
+        != JVMTI_ERROR_NONE
+    {
+        return None;
+    }
+    frames.truncate(count.max(0) as usize);
+    let cls = jni!(jni, GetObjectClass, object);
+    let class =
+        a.jvmti.class_signature(cls).map(|s| crate::resolve::signature_to_class(&s)).unwrap_or_default();
+    jni!(jni, DeleteLocalRef, cls);
+    Some((frames, class))
+}
+
 /// Owner lookups used in the current second: `(second, count)`.
-static OWNER_BUDGET: Mutex<(i64, u32)> = Mutex::new((0, 0));
+static OWNER_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Owner lookups are possible and enabled (`monitor_usage` capability, `owner_rate` > 0).
+static OWNER_LOOKUPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn install(a: &Agent) -> JResult<()> {
     let cb = jvmtiEventCallbacks {
@@ -68,6 +125,7 @@ pub fn install(a: &Agent) -> JResult<()> {
         let _ = j.enable_event(JVMTI_EVENT_SAMPLED_OBJECT_ALLOC, a.alloc_on.load(Ordering::SeqCst));
     }
     if has_cap(a, "monitor") {
+        OWNER_LOOKUPS.store(has_cap(a, "monitor_usage") && a.opts.owner_rate > 0, Ordering::Relaxed);
         set_monitor_events(a, a.monitor_on.load(Ordering::SeqCst));
     }
     if has_cap(a, "oom") {
@@ -82,11 +140,29 @@ pub fn install(a: &Agent) -> JResult<()> {
     Ok(())
 }
 
+/// Whether threads are tagged with their index (`tagging` capability); cached, as it is asked
+/// for on every event.
+fn tagging(a: &Agent) -> bool {
+    static TAGGING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    match TAGGING.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let t = has_cap(a, "tagging");
+            TAGGING.store(if t { 1 } else { 2 }, Ordering::Relaxed);
+            t
+        }
+    }
+}
+
 pub fn has_cap(a: &Agent, name: &str) -> bool {
     a.caps.lock().iter().any(|c| c == name)
 }
 
 fn set_monitor_events(a: &Agent, on: bool) {
+    *CYCLE.lock() = Cycle::default();
+    CONTENTION_SCALE.store(1, Ordering::Relaxed);
+    CONTENTION_EPOCH.fetch_add(1, Ordering::Relaxed);
     for ev in [
         JVMTI_EVENT_MONITOR_CONTENDED_ENTER,
         JVMTI_EVENT_MONITOR_CONTENDED_ENTERED,
@@ -94,6 +170,79 @@ fn set_monitor_events(a: &Agent, on: bool) {
         JVMTI_EVENT_MONITOR_WAITED,
     ] {
         let _ = a.jvmti.enable_event(ev, on);
+    }
+}
+
+/// Contended enters per second above which contended-enter events are duty-cycled.
+const HOT_CONTENTION: u64 = 20_000;
+/// Duty cycle under hot contention: events on for `CYCLE_ON`, off for `CYCLE_OFF`.
+const CYCLE_ON: i64 = 1_000_000_000;
+const CYCLE_OFF: i64 = 4_000_000_000;
+
+/// Contended enters seen (monitor events on).
+static CONTENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Weight factor of contended-enter samples while duty-cycling (1 otherwise).
+static CONTENTION_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static CONTENTION_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[derive(Default)]
+struct Cycle {
+    /// Start of the current measurement window or phase, and the count at its start.
+    since: i64,
+    count: u64,
+    cycling: bool,
+    off: bool,
+}
+
+static CYCLE: Mutex<Cycle> = Mutex::new(Cycle { since: 0, count: 0, cycling: false, off: false });
+
+/// Called by the sampler thread every wall tick. Even when the agent does nothing in its
+/// callbacks, JVMTI's delivery of contended-enter events costs a few percent of throughput when a
+/// monitor is contended tens of thousands of times a second. Above [`HOT_CONTENTION`] the events
+/// are therefore switched on for one second in five, and the contended-enter samples recorded
+/// meanwhile weigh five times their duration. Monitor waits are not affected.
+pub fn regulate_contention(a: &Agent) {
+    if !a.monitor_on.load(Ordering::Relaxed) || !has_cap(a, "monitor") {
+        return;
+    }
+    let now = now_nanos();
+    let count = CONTENDED.load(Ordering::Relaxed);
+    let mut c = CYCLE.lock();
+    if c.since == 0 {
+        (c.since, c.count) = (now, count);
+        return;
+    }
+    let elapsed = now - c.since;
+    let enters = |on: bool| {
+        for ev in [JVMTI_EVENT_MONITOR_CONTENDED_ENTER, JVMTI_EVENT_MONITOR_CONTENDED_ENTERED] {
+            let _ = a.jvmti.enable_event(ev, on);
+        }
+    };
+    if c.off {
+        if elapsed >= CYCLE_OFF {
+            CONTENTION_EPOCH.fetch_add(1, Ordering::Relaxed);
+            enters(true);
+            (c.off, c.since, c.count) = (false, now, count);
+        }
+        return;
+    }
+    let window = if c.cycling { CYCLE_ON } else { 1_000_000_000 };
+    if elapsed < window {
+        return;
+    }
+    let rate = (count - c.count) * 1_000_000_000 / elapsed.max(1) as u64;
+    (c.since, c.count) = (now, count);
+    if rate > HOT_CONTENTION {
+        if !c.cycling {
+            debug(&format!("{rate} contended enters/s: sampling contention one second in five"));
+        }
+        c.cycling = true;
+        c.off = true;
+        CONTENTION_SCALE.store(((CYCLE_ON + CYCLE_OFF) / CYCLE_ON) as u32, Ordering::Relaxed);
+        enters(false);
+    } else if c.cycling {
+        c.cycling = false;
+        CONTENTION_SCALE.store(1, Ordering::Relaxed);
     }
 }
 
@@ -205,7 +354,7 @@ impl Agent {
 
 /// Thread index for `thread`, registering it on first sight. `None` for agent-internal threads.
 pub fn thread_index(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Option<u32> {
-    let tagging = has_cap(a, "tagging");
+    let tagging = tagging(a);
     if tagging {
         let tag = a.jvmti.get_tag(thread);
         if tag > 0 {
@@ -245,33 +394,85 @@ pub fn thread_index(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Option<u32>
     Some(idx)
 }
 
-/// Captures the current stack of `thread` (null = current thread) as a stack id.
+/// Stack of `thread` (null: the current thread), with the current thread's request label as the
+/// root frame, interned in the collector.
+///
+/// Most stacks repeat (the same code paths run over and over), and resolving one takes the
+/// collector lock that every recording thread contends on. Each thread therefore remembers the
+/// stack ids of the raw stacks it captured, by a 128-bit hash of the frames and the label, and
+/// takes the lock only for stacks it has not seen. Stack ids are never reused.
 pub fn capture_stack(a: &Agent, jni: *mut JNIEnv, thread: jthread) -> Option<u32> {
     let max = a.opts.max_frames.min(512) as usize;
-    let mut frames = vec![jvmtiFrameInfo { method: ptr::null_mut(), location: 0 }; max];
-    let mut count = 0;
-    if jvmti!(a.jvmti, GetStackTrace, thread, 0, max as jint, frames.as_mut_ptr(), &mut count)
-        != JVMTI_ERROR_NONE
-    {
-        return None;
-    }
-    frames.truncate(count.max(0) as usize);
-    jni!(jni, PushLocalFrame, 64);
-    let stack = {
-        let mut c = a.collector.lock();
-        let c = &mut *c;
-        let ids: Vec<u32> = frames
-            .iter()
-            .map(|f| c.resolver.frame(a.jvmti, &mut c.symbols, f.method, f.location, FrameKind::Unknown))
-            .collect();
-        let mut ids = ids;
-        if let Some(label) = crate::probes::current_label_frame() {
-            ids.push(label);
+    STACK_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cache = &mut *cache;
+        cache.frames.resize(max, jvmtiFrameInfo { method: ptr::null_mut(), location: 0 });
+        let mut count = 0;
+        if jvmti!(a.jvmti, GetStackTrace, thread, 0, max as jint, cache.frames.as_mut_ptr(), &mut count)
+            != JVMTI_ERROR_NONE
+        {
+            return None;
         }
-        c.stacks.intern_leaf_first(&ids)
-    };
-    jni!(jni, PopLocalFrame, ptr::null_mut());
-    Some(stack)
+        let frames = &cache.frames[..count.max(0) as usize];
+        let label = crate::probes::current_label_frame();
+        let key = stack_key(frames, label);
+        if let Some(&id) = cache.ids.get(&key) {
+            return Some(id);
+        }
+        jni!(jni, PushLocalFrame, 64);
+        let stack = {
+            let mut c = a.collector.lock();
+            let c = &mut *c;
+            let mut ids: Vec<u32> = frames
+                .iter()
+                .map(|f| c.resolver.frame(a.jvmti, &mut c.symbols, f.method, f.location, FrameKind::Unknown))
+                .collect();
+            ids.extend(label);
+            c.stacks.intern_leaf_first(&ids)
+        };
+        jni!(jni, PopLocalFrame, ptr::null_mut());
+        if cache.ids.len() >= STACK_CACHE_SIZE {
+            cache.ids.clear();
+        }
+        cache.ids.insert(key, stack);
+        Some(stack)
+    })
+}
+
+#[derive(Default)]
+struct StackCache {
+    /// Reused frame buffer.
+    frames: Vec<jvmtiFrameInfo>,
+    ids: HashMap<u128, u32>,
+}
+
+thread_local! {
+    static STACK_CACHE: std::cell::RefCell<StackCache> = std::cell::RefCell::new(StackCache::default());
+}
+
+/// Stacks a thread remembers; the cache starts over when it is full.
+const STACK_CACHE_SIZE: usize = 2048;
+
+/// Two keyed 64-bit hashes of the frames and the label.
+fn stack_key(frames: &[jvmtiFrameInfo], label: Option<u32>) -> u128 {
+    use std::hash::{BuildHasher, Hasher};
+    static KEYS: std::sync::OnceLock<(
+        std::collections::hash_map::RandomState,
+        std::collections::hash_map::RandomState,
+    )> = std::sync::OnceLock::new();
+    let (k1, k2) = KEYS.get_or_init(Default::default);
+    let mut h1 = k1.build_hasher();
+    let mut h2 = k2.build_hasher();
+    for f in frames {
+        for h in [&mut h1, &mut h2] {
+            h.write_usize(f.method as usize);
+            h.write_i64(f.location);
+        }
+    }
+    let l = label.map_or(u64::MAX, u64::from);
+    h1.write_u64(l);
+    h2.write_u64(l);
+    (u128::from(h1.finish()) << 64) | u128::from(h2.finish())
 }
 
 unsafe extern "C" fn vm_init(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, _thread: jthread) {
@@ -364,26 +565,29 @@ unsafe extern "C" fn sampled_object_alloc(
     c.add_sample(now_nanos(), SampleKind::Alloc, idx, ThreadState::Runnable, stack, w, Some(class_id));
 }
 
-fn monitor_begin(jni: *mut JNIEnv, thread: jthread, object: jobject, kind: MonitorEventKind) {
+/// Contended monitor enter or `Object.wait`: remembers the start, the owner of a contended
+/// monitor (only known now) and the stack, if the thread's unsampled time of short events reached
+/// `monitor_interval` or, within [`SPECULATIVE_STACKS`] per second, in case the event is long. The
+/// thread does not own the monitor yet, so the work does not hold up others; at the end it does,
+/// and no stack is taken there.
+fn monitor_begin(jni: *mut JNIEnv, object: jobject, kind: MonitorEventKind) {
     let Some(a) = agent() else { return };
     if !a.monitor_on.load(Ordering::Relaxed) || a.shutting_down.load(Ordering::Relaxed) {
         return;
     }
-    let Some(idx) = thread_index(a, jni, thread) else { return };
-    let Some(stack) = capture_stack(a, jni, ptr::null_mut()) else { return };
-    let class = object_class_name(a, jni, object);
+    if kind == MonitorEventKind::Enter {
+        CONTENDED.fetch_add(1, Ordering::Relaxed);
+    }
     let owner = if kind == MonitorEventKind::Enter { monitor_owner(a, jni, object) } else { None };
-    let pending =
-        PendingMonitor { start: now_nanos(), kind, class, stack, owner, id: identity_hash(a, object) };
-    MONITOR_PENDING.lock().get_or_insert_with(HashMap::new).insert(idx, pending);
-}
-
-/// Class name of `object` (Java syntax).
-pub fn object_class_name(a: &Agent, jni: *mut JNIEnv, object: jobject) -> String {
-    let cls = jni!(jni, GetObjectClass, object);
-    let class = a.collector.lock().resolver.class_name(a.jvmti, cls);
-    jni!(jni, DeleteLocalRef, cls);
-    class
+    let due = MONITOR_UNSAMPLED.get()[slot(kind)] as u128 >= a.opts.monitor_interval.as_nanos()
+        && take_budget(&SAMPLE_BUDGET, SAMPLE_STACKS);
+    let sample = if due || take_budget(&SPECULATIVE_BUDGET, SPECULATIVE_STACKS) {
+        monitor_site(a, jni, object)
+    } else {
+        None
+    };
+    let epoch = CONTENTION_EPOCH.load(Ordering::Relaxed);
+    MONITOR_PENDING.set(Some(PendingMonitor { start: now_nanos(), kind, owner, sample, epoch }));
 }
 
 /// Identity hash code of `object` as an id (0 if unavailable).
@@ -400,19 +604,11 @@ pub fn identity_hash(a: &Agent, object: jobject) -> u64 {
 /// `GetObjectMonitorUsage` runs as a safepoint operation, so lookups are limited to `owner_rate`
 /// per second; contention beyond that is recorded without an owner.
 fn monitor_owner(a: &Agent, jni: *mut JNIEnv, object: jobject) -> Option<u32> {
-    if !has_cap(a, "monitor_usage") {
+    if !OWNER_LOOKUPS.load(Ordering::Relaxed) {
         return None;
     }
-    {
-        let second = now_nanos() / 1_000_000_000;
-        let mut b = OWNER_BUDGET.lock();
-        if b.0 != second {
-            *b = (second, 0);
-        }
-        if b.1 >= a.opts.owner_rate {
-            return None;
-        }
-        b.1 += 1;
+    if !take_budget(&OWNER_BUDGET, a.opts.owner_rate as u64) {
+        return None;
     }
     // SAFETY: plain-old-data out struct; zero is a valid initial value.
     let mut u: jvmtiMonitorUsage = unsafe { std::mem::zeroed() };
@@ -429,70 +625,217 @@ fn monitor_owner(a: &Agent, jni: *mut JNIEnv, object: jobject) -> Option<u32> {
     idx
 }
 
-fn monitor_end(jni: *mut JNIEnv, thread: jthread) {
-    let Some(a) = agent() else { return };
-    let Some(idx) = thread_index(a, jni, thread) else { return };
-    let Some(m) = MONITOR_PENDING.lock().as_mut().and_then(|m| m.remove(&idx)) else {
+/// The monitor was entered or the wait ended. Events of at least `monitor_threshold` that have a
+/// stack from their start are recorded as an event and a sample of their duration, within
+/// [`LONG_MONITOR_EVENTS`] per second. The others are sampled: once a thread's summed time of them
+/// reaches `monitor_interval`, an event with a stack records a sample of that weight.
+///
+/// After a contended enter the thread owns the monitor, so this takes no agent lock that other
+/// threads hold for long: the raw frames are queued and resolved later by [`drain_monitors`].
+fn monitor_end(jni: *mut JNIEnv, thread: jthread, object: jobject, kind: MonitorEventKind) {
+    let Some(m) = MONITOR_PENDING.take() else { return };
+    if m.kind != kind || m.epoch != CONTENTION_EPOCH.load(Ordering::Relaxed) {
         return;
-    };
+    }
+    let Some(a) = agent() else { return };
     let dur = (now_nanos() - m.start).max(0);
-    let (sample_kind, state) = match m.kind {
-        MonitorEventKind::Enter => (SampleKind::Monitor, ThreadState::Blocked),
-        _ => (SampleKind::Wait, ThreadState::Waiting),
+    let long = dur as u128 >= a.opts.monitor_threshold.as_nanos()
+        && m.sample.is_some()
+        && take_budget(&LONG_BUDGET, LONG_MONITOR_EVENTS);
+    let (site, weight) = if long {
+        (m.sample, dur)
+    } else {
+        let mut unsampled = MONITOR_UNSAMPLED.get();
+        let s = slot(m.kind);
+        unsampled[s] += dur;
+        let w = unsampled[s];
+        let record = m.sample.is_some() && w as u128 >= a.opts.monitor_interval.as_nanos();
+        if record {
+            unsampled[s] = 0;
+        }
+        MONITOR_UNSAMPLED.set(unsampled);
+        (m.sample.filter(|_| record), w)
     };
+    let Some((frames, class)) = site else { return };
+    let Some(thread) = thread_index(a, jni, thread) else { return };
+    let scale = if m.kind == MonitorEventKind::Enter { CONTENTION_SCALE.load(Ordering::Relaxed) } else { 1 };
+    let d = DeferredMonitor {
+        start: m.start,
+        duration: dur,
+        weight: weight as u64 * u64::from(scale),
+        kind: m.kind,
+        blocked: m.kind == MonitorEventKind::Enter,
+        thread,
+        owner: m.owner,
+        long,
+        class,
+        id: if long { identity_hash(a, object) } else { 0 },
+        frames,
+        label: crate::probes::current_label_frame(),
+    };
+    defer(d);
+}
+
+fn defer(d: DeferredMonitor) {
+    let mut q = DEFERRED_MONITORS.lock();
+    if q.len() < MAX_DEFERRED_MONITORS {
+        q.push(d);
+    }
+}
+
+static LONG_PARKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A `j.u.c` park on `blocker` of thread `idx` that took `dur` (see `park`). Parks of at least
+/// `monitor_threshold` are recorded like long monitor events, within a budget of
+/// [`LONG_MONITOR_EVENTS`] per second; the time of the parks beyond it is sampled per thread
+/// (every `monitor_interval` yields a sample). Shorter parks are not recorded.
+pub fn record_park(
+    a: &Agent,
+    jni: *mut JNIEnv,
+    idx: u32,
+    start: i64,
+    dur: i64,
+    blocker: jobject,
+    owner: Option<u32>,
+) {
+    if (dur as u128) < a.opts.monitor_threshold.as_nanos() {
+        return;
+    }
+    let blocked = owner.is_some();
+    let long = take_budget(&LONG_PARKS, LONG_MONITOR_EVENTS);
+    let weight = if long {
+        dur
+    } else {
+        let slot = usize::from(!blocked);
+        let mut unsampled = MONITOR_UNSAMPLED.get();
+        unsampled[slot] += dur;
+        if (unsampled[slot] as u128) < a.opts.monitor_interval.as_nanos()
+            || !take_budget(&SAMPLE_BUDGET, SAMPLE_STACKS)
+        {
+            MONITOR_UNSAMPLED.set(unsampled);
+            return;
+        }
+        let w = unsampled[slot];
+        unsampled[slot] = 0;
+        MONITOR_UNSAMPLED.set(unsampled);
+        w
+    };
+    let Some((frames, class)) = monitor_site(a, jni, blocker) else { return };
+    defer(DeferredMonitor {
+        start,
+        duration: dur,
+        weight: weight as u64,
+        kind: MonitorEventKind::Park,
+        blocked,
+        thread: idx,
+        owner,
+        long,
+        class,
+        id: if long { identity_hash(a, blocker) } else { 0 },
+        frames,
+        label: crate::probes::current_label_frame(),
+    });
+}
+
+/// A recorded monitor event whose frames are not resolved yet.
+struct DeferredMonitor {
+    start: i64,
+    duration: i64,
+    weight: u64,
+    kind: MonitorEventKind,
+    /// Blocked on a lock (a monitor sample) rather than waiting (a wait sample).
+    blocked: bool,
+    thread: u32,
+    owner: Option<u32>,
+    long: bool,
+    class: String,
+    id: u64,
+    frames: Vec<jvmtiFrameInfo>,
+    label: Option<u32>,
+}
+
+// SAFETY: jmethodIDs are process-wide identifiers, valid on any thread.
+unsafe impl Send for DeferredMonitor {}
+
+static DEFERRED_MONITORS: Mutex<Vec<DeferredMonitor>> = Mutex::new(Vec::new());
+/// Events beyond this many between two drains are dropped.
+const MAX_DEFERRED_MONITORS: usize = 200_000;
+
+/// Resolves queued monitor events into samples and events. Called periodically by the sampler
+/// thread and before batches are cut.
+pub fn drain_monitors(a: &Agent) {
+    let queued = std::mem::take(&mut *DEFERRED_MONITORS.lock());
+    if queued.is_empty() {
+        return;
+    }
     let mut c = a.collector.lock();
-    let class_id = c.symbols.intern_str(&m.class);
-    c.add_sample(m.start, sample_kind, idx, state, m.stack, dur as u64, Some(class_id));
-    if dur as u128 >= a.opts.monitor_threshold.as_nanos() {
-        c.add_monitor_event(MonitorRow {
-            start: m.start,
-            duration: dur,
-            kind: m.kind,
-            thread: idx,
-            owner: m.owner,
-            monitor_class: m.class,
-            monitor_id: m.id,
-            stack: m.stack,
-        });
+    let c = &mut *c;
+    for d in queued {
+        let mut ids: Vec<u32> = d
+            .frames
+            .iter()
+            .map(|f| c.resolver.frame(a.jvmti, &mut c.symbols, f.method, f.location, FrameKind::Unknown))
+            .collect();
+        ids.extend(d.label);
+        let stack = c.stacks.intern_leaf_first(&ids);
+        let (sample_kind, state) = if d.blocked {
+            (SampleKind::Monitor, ThreadState::Blocked)
+        } else {
+            (SampleKind::Wait, ThreadState::Waiting)
+        };
+        let class_id = c.symbols.intern_str(&d.class);
+        c.add_sample(d.start, sample_kind, d.thread, state, stack, d.weight, Some(class_id));
+        if d.long {
+            c.add_monitor_event(MonitorRow {
+                start: d.start,
+                duration: d.duration,
+                kind: d.kind,
+                thread: d.thread,
+                owner: d.owner,
+                monitor_class: d.class,
+                monitor_id: d.id,
+                stack,
+            });
+        }
     }
 }
 
 unsafe extern "C" fn monitor_contended_enter(
     _j: *mut jvmtiEnv,
     jni: *mut JNIEnv,
-    thread: jthread,
+    _thread: jthread,
     object: jobject,
 ) {
-    monitor_begin(jni, thread, object, MonitorEventKind::Enter);
+    monitor_begin(jni, object, MonitorEventKind::Enter);
 }
 
 unsafe extern "C" fn monitor_contended_entered(
     _j: *mut jvmtiEnv,
     jni: *mut JNIEnv,
     thread: jthread,
-    _o: jobject,
+    object: jobject,
 ) {
-    monitor_end(jni, thread);
+    monitor_end(jni, thread, object, MonitorEventKind::Enter);
 }
 
 unsafe extern "C" fn monitor_wait(
     _j: *mut jvmtiEnv,
     jni: *mut JNIEnv,
-    thread: jthread,
+    _thread: jthread,
     object: jobject,
     _t: jlong,
 ) {
-    monitor_begin(jni, thread, object, MonitorEventKind::Wait);
+    monitor_begin(jni, object, MonitorEventKind::Wait);
 }
 
 unsafe extern "C" fn monitor_waited(
     _j: *mut jvmtiEnv,
     jni: *mut JNIEnv,
     thread: jthread,
-    _o: jobject,
+    object: jobject,
     _to: jboolean,
 ) {
-    monitor_end(jni, thread);
+    monitor_end(jni, thread, object, MonitorEventKind::Wait);
 }
 
 unsafe extern "C" fn resource_exhausted(
