@@ -15,6 +15,7 @@ openprofiler-model.workspace = true
 openprofiler-snapshot.workspace = true
 openprofiler-attach.workspace = true
 openprofiler-dex.workspace = true
+openprofiler-remote.workspace = true
 rayon.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }

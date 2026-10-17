@@ -1012,6 +1012,7 @@ dependencies = [
  "openprofiler-daemon",
  "openprofiler-dex",
  "openprofiler-model",
+ "openprofiler-remote",
  "openprofiler-snapshot",
  "rayon",
  "serde",

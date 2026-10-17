@@ -1,6 +1,7 @@
 //! `openprofiler`: open, export, compare and analyze profiles; run the daemon and the MCP server.
 
 mod gate;
+mod remote;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -127,11 +128,18 @@ enum Cmd {
     },
     /// Run the MCP server on stdio.
     Mcp,
-    /// List local JVMs.
-    List,
+    /// List JVMs on this machine or a remote target.
+    List {
+        #[command(flatten)]
+        remote: remote::RemoteArgs,
+    },
     /// Attach to a running JVM, sample for a while and print hot spots.
+    ///
+    /// Without PID, attaches to the only JVM on the target.
     Attach {
-        pid: u32,
+        pid: Option<u32>,
+        #[command(flatten)]
+        remote: remote::RemoteArgs,
         #[arg(long, default_value = "10s", value_parser = parse_duration)]
         duration: std::time::Duration,
         #[arg(long, default_value = "cpu")]
@@ -144,8 +152,11 @@ enum Cmd {
     },
     /// Attach to a running JVM, record for a duration and write an .opsnap snapshot.
     Record {
+        /// Without --pid, records the only JVM on the target.
         #[arg(long)]
-        pid: u32,
+        pid: Option<u32>,
+        #[command(flatten)]
+        remote: remote::RemoteArgs,
         #[arg(long, default_value = "60s", value_parser = parse_duration)]
         duration: std::time::Duration,
         /// CPU sampling interval, e.g. 10ms.
@@ -162,12 +173,14 @@ enum Cmd {
     },
     /// Write an HPROF heap dump of a running JVM.
     Dump {
-        pid: u32,
+        pid: Option<u32>,
         #[arg(short, long)]
         output: PathBuf,
-        /// Include unreachable objects.
+        /// Include unreachable objects (local JVMs only).
         #[arg(long)]
         all: bool,
+        #[command(flatten)]
+        remote: remote::RemoteArgs,
     },
 }
 
@@ -241,9 +254,9 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Cmd::Mcp => openprofiler_daemon::mcp::McpServer::new(Engine::new()).serve_stdio().await,
-        Cmd::Attach { pid, duration, kind: k, limit, triggers } => {
+        Cmd::Attach { pid, remote, duration, kind: k, limit, triggers } => {
             let engine = Engine::new();
-            let s = attach_live(&engine, pid, None).await?;
+            let s = attach_live(&engine, pid, remote.attach_options(None)?).await?;
             install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Attached to {}; sampling for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
@@ -269,9 +282,9 @@ async fn run(cli: Cli) -> Result<()> {
             engine.close(&s.id)?;
             Ok(())
         }
-        Cmd::Record { pid, duration, interval, heap, triggers, output } => {
+        Cmd::Record { pid, remote, duration, interval, heap, triggers, output } => {
             let engine = Engine::new();
-            let s = attach_live(&engine, pid, interval).await?;
+            let s = attach_live(&engine, pid, remote.attach_options(interval)?).await?;
             install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Recording {} for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
@@ -299,7 +312,24 @@ async fn run(cli: Cli) -> Result<()> {
             println!("Wrote {}", output.display());
             Ok(())
         }
-        Cmd::Dump { pid, output, all } => {
+        Cmd::List { remote } => {
+            let jvms = remote::list(&remote.attach_options(None)?).await?;
+            if jvms.is_empty() {
+                println!("No JVMs found.");
+            }
+            for j in jvms {
+                println!("{}", serde_json::to_string(&j)?);
+            }
+            Ok(())
+        }
+        Cmd::Dump { pid, output, all, remote } => {
+            let opts = remote.attach_options(None)?;
+            let pid = remote::pick_pid(pid, &opts).await?;
+            if let Some(target) = &opts.remote {
+                let n = remote::dump(target, &opts, pid, &output).await?;
+                println!("Wrote {} ({n} bytes)", output.display());
+                return Ok(());
+            }
             let out = std::path::absolute(&output)?;
             let arg = if all { "-all" } else { "" };
             let cmd = format!("GC.heap_dump {arg} {}", out.display());
@@ -517,17 +547,12 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::List => {
-            let jvms = openprofiler_daemon::live::list_jvms()?;
-            if jvms.is_empty() {
-                println!("No JVMs found.");
-            }
-            for j in jvms {
-                println!("{}", serde_json::to_string(&j)?);
-            }
-            Ok(())
-        }
-        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Attach { .. } | Cmd::Record { .. } | Cmd::Dump { .. } => {
+        Cmd::Daemon { .. }
+        | Cmd::Mcp
+        | Cmd::List { .. }
+        | Cmd::Attach { .. }
+        | Cmd::Record { .. }
+        | Cmd::Dump { .. } => {
             unreachable!()
         }
     }
@@ -535,10 +560,10 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
 
 async fn attach_live(
     engine: &std::sync::Arc<Engine>,
-    pid: u32,
-    interval: Option<String>,
+    pid: Option<u32>,
+    options: openprofiler_daemon::live::AttachOptions,
 ) -> Result<std::sync::Arc<openprofiler_daemon::Session>> {
-    let options = openprofiler_daemon::live::AttachOptions { interval, ..Default::default() };
+    let pid = remote::pick_pid(pid, &options).await?;
     openprofiler_daemon::live::attach(
         engine,
         openprofiler_daemon::live::AttachRequest { pid: Some(pid), options: Some(options), infofile: None },
