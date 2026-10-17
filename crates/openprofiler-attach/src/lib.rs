@@ -150,6 +150,18 @@ struct AgentInfoFile {
 }
 
 impl AgentInfoFile {
+    fn into_result(self, pid: u32, info_path: PathBuf) -> AttachResult {
+        AttachResult {
+            pid,
+            port: self.port,
+            bind: self.bind,
+            token: self.token,
+            tls: self.tls,
+            fingerprint: self.fingerprint,
+            info_path,
+        }
+    }
+
     fn default_path(pid: u32) -> PathBuf {
         std::env::temp_dir().join(format!("openprofiler-{pid}.json"))
     }
@@ -218,7 +230,11 @@ fn connect_attach_socket(t: &Target, timeout: Duration) -> Result<UnixStream> {
 #[cfg(unix)]
 pub fn attach_command(pid: u32, cmd: &str, args: &[&str]) -> Result<(i32, String)> {
     let t = target(pid);
-    let mut s = connect_attach_socket(&t, Duration::from_secs(10))?;
+    let mut s = {
+        #[cfg(target_os = "linux")]
+        let _creds = linux::AsTargetUser::switch(pid);
+        connect_attach_socket(&t, Duration::from_secs(10))?
+    };
     let mut req = Vec::new();
     req.extend_from_slice(b"1\0");
     req.extend_from_slice(cmd.as_bytes());
@@ -289,18 +305,36 @@ fn agent_path_for(t: &Target, agent: &Path) -> Result<(PathBuf, String)> {
     }
 }
 
+fn read_info(path: &Path) -> Option<AgentInfoFile> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// The agent already running in `pid`, if its info file exists and its port accepts connections
+/// (a stale file left by an earlier JVM with the same pid has no listener).
+fn running_agent(pid: u32, info_path: &Path) -> Option<AttachResult> {
+    let info = read_info(info_path)?;
+    let host = if info.bind.is_empty() || info.bind == "0.0.0.0" { "127.0.0.1" } else { info.bind.as_str() };
+    let addr: std::net::SocketAddr = format!("{host}:{}", info.port).parse().ok()?;
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
+    Some(info.into_result(pid, info_path.to_owned()))
+}
+
 /// Attaches the OpenProfiler agent at `agent_path` to `pid` with extra agent `options`
 /// (e.g. `"interval=5ms,tls"`). A random token is generated unless `options` contains one.
 pub fn attach_agent(pid: u32, agent_path: &Path, options: &str) -> Result<AttachResult> {
     let t = target(pid);
+    let info_name = format!("openprofiler-{}.json", t.ns_pid);
+    let info_host = t.tmp.join(&info_name);
+    // An agent loaded by an earlier attach keeps serving; a second one can't be loaded.
+    if let Some(r) = running_agent(pid, &info_host) {
+        return Ok(r);
+    }
     let (_, in_target) = agent_path_for(&t, agent_path)?;
     let token = options
         .split(',')
         .find_map(|kv| kv.strip_prefix("token="))
         .map(String::from)
         .unwrap_or_else(random_token);
-    let info_name = format!("openprofiler-{}.json", t.ns_pid);
-    let info_host = t.tmp.join(&info_name);
     let info_target =
         if t.root.is_some() { format!("/tmp/{info_name}") } else { info_host.display().to_string() };
     let _ = std::fs::remove_file(&info_host);
@@ -312,18 +346,8 @@ pub fn attach_agent(pid: u32, agent_path: &Path, options: &str) -> Result<Attach
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Ok(text) = std::fs::read_to_string(&info_host)
-            && let Ok(info) = serde_json::from_str::<AgentInfoFile>(&text)
-        {
-            return Ok(AttachResult {
-                pid,
-                port: info.port,
-                bind: info.bind,
-                token: info.token,
-                tls: info.tls,
-                fingerprint: info.fingerprint,
-                info_path: info_host,
-            });
+        if let Some(info) = read_info(&info_host) {
+            return Ok(info.into_result(pid, info_host));
         }
         if Instant::now() > deadline {
             bail!(
@@ -369,6 +393,55 @@ mod linux {
         }
     }
 
+    /// While alive, the effective uid/gid are the target JVM's, so the `.attach_pid` file and the
+    /// socket connection pass HotSpot's owner checks when we run as root (e.g. in a Kubernetes
+    /// debug container next to a JVM running as a non-root user). A no-op unless we are root.
+    pub struct AsTargetUser {
+        restore: Option<(libc::uid_t, libc::gid_t)>,
+    }
+
+    impl AsTargetUser {
+        pub fn switch(pid: u32) -> Self {
+            // SAFETY: plain libc credential calls; on failure the original ids stay in place.
+            unsafe {
+                let (euid, egid) = (libc::geteuid(), libc::getegid());
+                let Some((uid, gid)) = owner(pid).filter(|&(u, g)| euid == 0 && (u, g) != (euid, egid))
+                else {
+                    return Self { restore: None };
+                };
+                if libc::setegid(gid) != 0 {
+                    return Self { restore: None };
+                }
+                if libc::seteuid(uid) != 0 {
+                    libc::setegid(egid);
+                    return Self { restore: None };
+                }
+                Self { restore: Some((euid, egid)) }
+            }
+        }
+    }
+
+    impl Drop for AsTargetUser {
+        fn drop(&mut self) {
+            if let Some((uid, gid)) = self.restore {
+                // SAFETY: restores the ids saved in `switch` (uid first, to regain the right to set gid).
+                unsafe {
+                    libc::seteuid(uid);
+                    libc::setegid(gid);
+                }
+            }
+        }
+    }
+
+    /// Effective uid and gid of `pid`.
+    fn owner(pid: u32) -> Option<(libc::uid_t, libc::gid_t)> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let field = |name: &str| -> Option<u32> {
+            status.lines().find(|l| l.starts_with(name))?.split_whitespace().nth(2)?.parse().ok()
+        };
+        Some((field("Uid:")?, field("Gid:")?))
+    }
+
     /// Finds JVMs that hsperfdata in our /tmp did not reveal (containers, -XX:-UsePerfData).
     pub fn scan_proc(out: &mut Vec<LocalJvm>) {
         let Ok(dir) = std::fs::read_dir("/proc") else { return };
@@ -394,7 +467,7 @@ mod linux {
                     }
                 }
             }
-            let jvm = found.unwrap_or_else(|| {
+            let mut jvm = found.unwrap_or_else(|| {
                 let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
                 let parts: Vec<String> = cmdline
                     .split(|&b| b == 0)
@@ -412,6 +485,8 @@ mod linux {
                     user: None,
                 }
             });
+            // The agent publishes its info file in the JVM's own /tmp.
+            jvm.profiled |= t.tmp.join(format!("openprofiler-{}.json", t.ns_pid)).exists();
             out.push(jvm);
         }
     }

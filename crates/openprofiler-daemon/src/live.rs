@@ -129,7 +129,7 @@ pub fn launch_options() -> &'static str {
     "tls"
 }
 
-fn bundle_dir(opts: &AttachOptions) -> PathBuf {
+pub fn bundle_dir(opts: &AttachOptions) -> PathBuf {
     opts.bundle_dir
         .clone()
         .or_else(|| std::env::var_os("OPENPROFILER_BUNDLE_DIR").map(PathBuf::from))
@@ -173,18 +173,15 @@ pub async fn attach(engine: &Arc<Engine>, req: AttachRequest) -> Result<Arc<Sess
         }
     } else if let Some(path) = &req.infofile {
         LinkOptions::from_info(&wait_for_info(path, INFOFILE_TIMEOUT).await?)
-    } else if let Some(target) = opts.remote.clone() {
+    } else if let Some(target) = &opts.remote {
         let pid = req.pid.ok_or_else(|| anyhow!("missing pid"))?;
         remote = true;
+        let target = target.resolve().await?;
         let bundle = openprofiler_remote::ensure_bundle(&target, &bundle_dir(&opts)).await?;
-        let res = openprofiler_remote::attach(
-            &target,
-            &bundle.relay,
-            pid,
-            &bundle.agent,
-            &agent_option_string(&opts),
-        )
-        .await?;
+        let agent = bundle.agent_for(&target, pid).await?;
+        let res =
+            openprofiler_remote::attach(&target, &bundle.relay, pid, &agent, &agent_option_string(&opts))
+                .await?;
         let port = res["port"].as_u64().ok_or_else(|| anyhow!("attach result has no port: {res}"))? as u16;
         let token = res["token"].as_str().ok_or_else(|| anyhow!("attach result has no token"))?.to_owned();
         let t = Tunnel::open(target.clone(), bundle.relay.clone(), port).await?;
@@ -229,6 +226,10 @@ pub async fn attach(engine: &Arc<Engine>, req: AttachRequest) -> Result<Arc<Sess
         (Some(pid), false) => format!("{jvm_name} ({pid})"),
         (Some(pid), true) => format!("JVM {pid}"),
         (None, _) => format!("JVM {}", hello.agent_version),
+    };
+    let name = match &opts.remote {
+        Some(t) if !t.hops.is_empty() => format!("{name} @ {}", t.describe()),
+        _ => name,
     };
     let session = engine.new_session(SessionKind::Live, &name, None);
     session.set_profile(client.profile());
@@ -414,7 +415,10 @@ pub fn prepare_profiling(args: &Value) -> Value {
 
 /// Remote discovery for the UI pickers: `{target, what: "jvms"|"containers"|"pods"|"contexts"}`.
 pub async fn remote_discover(req: Value) -> Result<Value> {
-    let target: Target = serde_json::from_value(req["target"].clone()).unwrap_or_default();
+    let target: Target = match req.get("target") {
+        Some(t) if !t.is_null() => serde_json::from_value(t.clone()).context("invalid target")?,
+        _ => Target::local(),
+    };
     match req["what"].as_str().unwrap_or("jvms") {
         "containers" => Ok(serde_json::to_value(openprofiler_remote::docker_containers(&target).await?)?),
         "contexts" => Ok(serde_json::to_value(openprofiler_remote::kube_contexts(&target).await?)?),
@@ -424,6 +428,7 @@ pub async fn remote_discover(req: Value) -> Result<Value> {
         )?),
         "jvms" => {
             let opts: AttachOptions = serde_json::from_value(req["options"].clone()).unwrap_or_default();
+            let target = target.resolve().await?;
             let bundle = openprofiler_remote::ensure_bundle(&target, &bundle_dir(&opts)).await?;
             openprofiler_remote::list_jvms(&target, &bundle.relay).await
         }

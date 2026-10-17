@@ -83,7 +83,7 @@ export interface AppState {
   inspector: InspectorItem | null;
   inspectorOpen: boolean;
   paletteOpen: boolean;
-  dialog: null | "open" | "attach";
+  dialog: null | "open" | "attach" | "share";
   threads: number[] | null;
   states: ThreadStateName[] | null;
   aggregation: Aggregation;
@@ -106,13 +106,18 @@ export interface AppState {
   contextMenu: { x: number; y: number; items: MenuItem[] } | null;
 }
 
+export const client = new OpenProfilerClient(resolveConfig());
+
+/** Opened through a read-only share link: no attach, open, recording or JVM control. */
+export const readonly = !!client.config.readonly;
+
 const storedTheme = (typeof localStorage !== "undefined" &&
   localStorage.getItem("openprofiler.theme")) as Theme | null;
 const storedPalette = (typeof localStorage !== "undefined" &&
   localStorage.getItem("openprofiler.palette")) as "default" | "cb" | null;
 
 export const store = createStore<AppState>({
-  sessionId: null,
+  sessionId: client.config.session ?? null,
   view: "overview",
   range: null,
   theme:
@@ -166,8 +171,6 @@ export function openContextMenu(
 }
 
 export const useApp = store.use;
-
-export const client = new OpenProfilerClient(resolveConfig());
 
 export const queryClient = new QueryClient({
   defaultOptions: {

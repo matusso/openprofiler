@@ -48,6 +48,65 @@ export interface LocalJvm {
   user?: string;
 }
 
+/** One hop of a remote target (ssh, `docker exec`, `kubectl exec`). */
+export type RemoteHop =
+  | { type: "ssh"; host: string; user?: string; port?: number; jump?: string[] }
+  | { type: "docker"; container: string; user?: string }
+  | {
+      type: "kubectl";
+      context?: string;
+      namespace?: string;
+      pod: string;
+      container?: string;
+      /** Run through an ephemeral debug container with this image (distroless images). */
+      debug_image?: string;
+    };
+
+/** A chain of hops; empty = the daemon's machine. */
+export interface RemoteTarget {
+  hops: RemoteHop[];
+}
+
+export interface RemoteContainer {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+}
+
+export interface RemotePod {
+  namespace: string;
+  name: string;
+  phase: string;
+  containers: string[];
+  images: string[];
+  node?: string;
+}
+
+export type DiscoverKind = "jvms" | "containers" | "pods" | "contexts";
+
+export interface Share {
+  token: string;
+  session: string;
+  /** Epoch milliseconds. */
+  created: number;
+  expires?: number;
+}
+
+export interface ShareResponse {
+  share: Share;
+  /** Path (with the token) to append to the daemon's web origin. */
+  path: string;
+  web: boolean;
+}
+
+export interface VersionInfo {
+  version: string;
+  api: number;
+  web: boolean;
+  readonly: boolean;
+}
+
 export interface JvmInfo {
   name: string;
   vm_name: string;

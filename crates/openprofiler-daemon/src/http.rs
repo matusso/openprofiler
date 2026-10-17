@@ -2,6 +2,7 @@
 
 use crate::engine::{Engine, Session};
 use crate::query::*;
+use crate::share::{Access, Shares};
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
@@ -9,7 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -21,6 +22,7 @@ pub struct AppState {
     pub engine: Arc<Engine>,
     pub token: Arc<str>,
     pub ui_dir: Option<Arc<PathBuf>>,
+    pub shares: Arc<Shares>,
 }
 
 pub struct ApiError(anyhow::Error);
@@ -111,6 +113,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/mbean-connect", post(live_h))
         .route("/sessions/{id}/mbean-subscribe", post(live_h))
         .route("/sessions/{id}/mbean-notifications", post(live_h))
+        .route("/sessions/{id}/share", post(share_h))
+        .route("/shares", get(list_shares))
+        .route("/shares/{token}", axum::routing::delete(revoke_share))
         .route("/compare", post(compare_h))
         .route("/compare/flame", post(compare_flame_h))
         .route("/jvms", get(jvms))
@@ -118,7 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(events))
         .route("/ide", get(ide_ws))
         .route("/ide/navigate", post(ide_navigate))
-        .route("/version", get(|| async { Json(json!({ "version": env!("CARGO_PKG_VERSION"), "api": 1 })) }))
+        .route("/version", get(version))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .nest("/api/v1", api)
@@ -143,34 +148,88 @@ struct TokenQuery {
     token: Option<String>,
 }
 
-fn token_ok(st: &AppState, headers: &HeaderMap, query: Option<&str>) -> bool {
-    let want = st.token.as_bytes();
+/// What the request's token (header or `?token=`) grants: the API token or a share token.
+fn access(st: &AppState, headers: &HeaderMap, query: Option<&str>) -> Option<Access> {
     let from_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t.as_bytes().to_vec());
-    let from_query = query.and_then(serde_urlencoded_token).map(|t| t.into_bytes());
-    [from_header, from_query].into_iter().flatten().any(|t| constant_time_eq(&t, want))
+        .map(str::to_owned);
+    let from_query = query.and_then(serde_urlencoded_token);
+    let tokens: Vec<String> = [from_header, from_query].into_iter().flatten().collect();
+    if tokens.iter().any(|t| constant_time_eq(t.as_bytes(), st.token.as_bytes())) {
+        return Some(Access::Full);
+    }
+    tokens.iter().find_map(|t| st.shares.session_for(t)).map(Access::Session)
+}
+
+fn token_ok(st: &AppState, headers: &HeaderMap, query: Option<&str>) -> bool {
+    access(st, headers, query) == Some(Access::Full)
 }
 
 fn serde_urlencoded_token(q: &str) -> Option<String> {
     q.split('&').find_map(|kv| kv.strip_prefix("token=")).map(|t| t.replace("%2D", "-"))
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    if req.method() == Method::OPTIONS || token_ok(&st, req.headers(), req.uri().query()) {
+async fn auth(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    if req.method() == Method::OPTIONS {
         return next.run(req).await;
     }
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "missing or invalid token" }))).into_response()
+    let path = req.uri().path();
+    let path = path.strip_prefix("/api/v1").unwrap_or(path);
+    let a = match access(&st, req.headers(), req.uri().query()) {
+        Some(Access::Session(s)) if !crate::share::allowed(&s, req.method(), path) => {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": "read-only share link" }))).into_response();
+        }
+        Some(a) => a,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "missing or invalid token" })))
+                .into_response();
+        }
+    };
+    req.extensions_mut().insert(a);
+    next.run(req).await
 }
 
-async fn list_sessions(State(st): State<AppState>) -> ApiResult {
-    to_json(st.engine.sessions().iter().map(|s| s.info()).collect::<Vec<_>>())
+async fn version(State(st): State<AppState>, Extension(a): Extension<Access>) -> ApiResult {
+    Ok(Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "api": 1,
+        "web": st.ui_dir.is_some(),
+        "readonly": a != Access::Full,
+    })))
+}
+
+async fn list_sessions(State(st): State<AppState>, Extension(a): Extension<Access>) -> ApiResult {
+    to_json(st.engine.sessions().iter().filter(|s| a.sees(&s.id)).map(|s| s.info()).collect::<Vec<_>>())
+}
+
+#[derive(Deserialize, Default)]
+struct ShareReq {
+    /// Lifetime of the link; unlimited (until revoked or restart) when omitted.
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+async fn share_h(State(st): State<AppState>, Path(id): Path<String>, b: axum::body::Bytes) -> ApiResult {
+    let s = session(&st, &id)?;
+    let r: ShareReq = body(&b)?;
+    let share = st.shares.create(&s.id, r.ttl_secs.map(std::time::Duration::from_secs));
+    let path = format!("/?token={}", share.token);
+    to_json(json!({ "share": share, "path": path, "web": st.ui_dir.is_some() }))
+}
+
+async fn list_shares(State(st): State<AppState>) -> ApiResult {
+    let engine = st.engine.clone();
+    to_json(st.shares.list(|id| engine.session(id).is_ok()))
+}
+
+async fn revoke_share(State(st): State<AppState>, Path(token): Path<String>) -> ApiResult {
+    Ok(Json(json!({ "revoked": st.shares.revoke(&token) })))
 }
 
 #[derive(Deserialize)]
@@ -340,19 +399,26 @@ async fn compare_flame_h(State(st): State<AppState>, b: axum::body::Bytes) -> Ap
     to_json(blocking(move || compare_flame(&a, &bb, &r)).await?)
 }
 
-async fn events(State(st): State<AppState>, ws: WebSocketUpgrade) -> Response {
+async fn events(
+    State(st): State<AppState>,
+    Extension(a): Extension<Access>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let rx = st.engine.subscribe();
-    ws.on_upgrade(move |socket| pump_events(socket, rx))
+    ws.on_upgrade(move |socket| pump_events(socket, rx, a))
 }
 
 async fn pump_events(
     mut socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<crate::engine::ServerEvent>,
+    access: Access,
 ) {
+    use crate::engine::ServerEvent;
     use tokio::sync::broadcast::error::RecvError;
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
+                Ok(ServerEvent::Session { ref id, .. } | ServerEvent::Invalidate { ref id, .. }) if !access.sees(id) => {}
                 Ok(ev) => {
                     let text = serde_json::to_string(&ev).unwrap_or_default();
                     if socket.send(Message::Text(text.into())).await.is_err() {
@@ -460,16 +526,25 @@ async fn static_ui(
         Ok(s) => s,
         Err(_) => return (StatusCode::NOT_FOUND, "index.html not found in UI dir").into_response(),
     };
-    let authed = q.token.as_deref().is_some_and(|t| constant_time_eq(t.as_bytes(), st.token.as_bytes()))
+    let full = q.token.as_deref().is_some_and(|t| constant_time_eq(t.as_bytes(), st.token.as_bytes()))
         || token_ok(&st, &headers, None);
-    let html = if authed {
-        let inject = format!(
-            "<script>window.__OPENPROFILER__={{url:location.origin,token:{}}}</script>",
-            serde_json::to_string(&*st.token).unwrap_or_default()
-        );
-        index.replacen("<head>", &format!("<head>{inject}"), 1)
+    let config = if full {
+        Some(json!({ "token": &*st.token }))
     } else {
-        index
+        // A share link: the UI opens the shared session read-only.
+        q.token.as_deref().and_then(|t| {
+            st.shares.session_for(t).map(|s| json!({ "token": t, "readonly": true, "session": s }))
+        })
+    };
+    let html = match config {
+        Some(c) => {
+            let c = serde_json::to_string(&c).unwrap_or_default().replace('<', "\\u003c");
+            let inject = format!(
+                "<script>window.__OPENPROFILER__=Object.assign({{url:location.origin}},{c})</script>"
+            );
+            index.replacen("<head>", &format!("<head>{inject}"), 1)
+        }
+        None => index,
     };
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -504,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn api_roundtrip() {
         let engine = Engine::new();
-        let app = router(AppState { engine, token: "t0k".into(), ui_dir: None });
+        let app = router(AppState { engine, token: "t0k".into(), ui_dir: None, shares: Default::default() });
         let (s, _) = call(&app, "GET", "/api/v1/sessions", None, Value::Null).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
         let (s, v) = call(&app, "POST", "/api/v1/sessions/demo", Some("t0k"), Value::Null).await;
@@ -538,5 +613,48 @@ mod tests {
         assert_eq!(s, StatusCode::OK, "{v}");
         let (s, _) = call(&app, "GET", "/api/v1/sessions/nope/summary", Some("t0k"), Value::Null).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn share_links() {
+        let engine = Engine::new();
+        let app = router(AppState { engine, token: "t0k".into(), ui_dir: None, shares: Default::default() });
+        let (_, a) = call(&app, "POST", "/api/v1/sessions/demo", Some("t0k"), Value::Null).await;
+        let (_, b) = call(&app, "POST", "/api/v1/sessions/demo", Some("t0k"), Value::Null).await;
+        let (a, b) = (a["id"].as_str().unwrap().to_owned(), b["id"].as_str().unwrap().to_owned());
+        let (s, v) = call(&app, "POST", &format!("/api/v1/sessions/{a}/share"), Some("t0k"), json!({})).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let share = v["share"]["token"].as_str().unwrap().to_owned();
+        let t = Some(share.as_str());
+        let (s, v) = call(&app, "GET", "/api/v1/sessions", t, Value::Null).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v.as_array().unwrap().len(), 1, "only the shared session is listed");
+        assert_eq!(v[0]["id"], a.as_str());
+        let (s, v) = call(&app, "GET", "/api/v1/version", t, Value::Null).await;
+        assert_eq!((s, &v["readonly"]), (StatusCode::OK, &json!(true)));
+        let (s, _) =
+            call(&app, "POST", &format!("/api/v1/sessions/{a}/hotspots"), t, json!({"kind":"cpu"})).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) =
+            call(&app, "POST", &format!("/api/v1/sessions/{b}/hotspots"), t, json!({"kind":"cpu"})).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        for (m, p) in [
+            ("POST", "/api/v1/sessions/attach".to_owned()),
+            ("POST", "/api/v1/sessions/demo".to_owned()),
+            ("POST", format!("/api/v1/sessions/{a}/heap-dump")),
+            ("POST", format!("/api/v1/sessions/{a}/recording")),
+            ("POST", format!("/api/v1/sessions/{a}/share")),
+            ("DELETE", format!("/api/v1/sessions/{a}")),
+            ("GET", "/api/v1/shares".to_owned()),
+        ] {
+            let (s, _) = call(&app, m, &p, t, json!({})).await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{m} {p}");
+        }
+        let (_, v) = call(&app, "GET", "/api/v1/shares", Some("t0k"), Value::Null).await;
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        let (s, _) = call(&app, "DELETE", &format!("/api/v1/shares/{share}"), Some("t0k"), Value::Null).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = call(&app, "GET", "/api/v1/sessions", t, Value::Null).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
     }
 }

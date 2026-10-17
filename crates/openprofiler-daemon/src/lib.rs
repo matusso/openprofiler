@@ -24,6 +24,7 @@ pub mod mcp;
 pub mod probes;
 pub mod query;
 pub mod save;
+pub mod share;
 
 pub use engine::{Engine, Session, SessionKind, SessionState};
 
@@ -82,6 +83,7 @@ pub async fn start_with_engine(cfg: DaemonConfig, engine: Arc<Engine>) -> Result
         engine: engine.clone(),
         token: token.clone().into(),
         ui_dir: if cfg.web { cfg.ui_dir.clone().map(Arc::new) } else { None },
+        shares: Default::default(),
     };
     let app = http::router(state);
     tokio::spawn(async move {

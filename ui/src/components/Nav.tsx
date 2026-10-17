@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { Capability } from "../api/types";
 import { useCurrentSession } from "../api/hooks";
-import { store, useApp, type ViewId } from "../state";
+import { readonly, store, useApp, type ViewId } from "../state";
 import {
   OpenProfilerLogo,
   IconBean,
@@ -99,8 +99,12 @@ export function Nav() {
       <OpenProfilerLogo className="nav-logo" />
       {NAV.map((n) => {
         // Decompiler sessions carry no profiling data: only the Code view applies.
+        // Share links can't reach the JVM's MBeans.
         const enabled =
-          s?.kind === "dex" ? n.id === "code" : n.needs.length === 0 || n.needs.some((c) => caps.includes(c));
+          s?.kind === "dex"
+            ? n.id === "code"
+            : (n.needs.length === 0 || n.needs.some((c) => caps.includes(c))) &&
+              !(readonly && n.id === "mbeans");
         return (
           <button
             key={n.id}

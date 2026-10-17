@@ -49,8 +49,16 @@ pub enum Hop {
         pod: String,
         #[serde(default)]
         container: Option<String>,
+        /// Run in an ephemeral debug container with this image that shares the container's
+        /// process namespace (for distroless images without a shell). [`Target::resolve`]
+        /// replaces the hop with one that execs into the debug container.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        debug_image: Option<String>,
     },
 }
+
+/// Image of the ephemeral debug container: it only needs `sh`, `uname` and `sha256sum`.
+pub const DEFAULT_DEBUG_IMAGE: &str = "busybox:1.37";
 
 /// A chain of hops. An empty chain is the local machine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,7 +113,7 @@ impl Hop {
                 v.extend(inner);
                 v
             }
-            Hop::Kubectl { context, namespace, pod, container } => {
+            Hop::Kubectl { context, namespace, pod, container, .. } => {
                 let mut v = vec!["kubectl".into()];
                 if let Some(c) = context {
                     v.extend(["--context".into(), c.clone()]);
@@ -122,6 +130,43 @@ impl Hop {
                 v
             }
         }
+    }
+}
+
+impl Hop {
+    /// `[user@]host[:port]`; earlier `jump` hosts become ProxyJump hops.
+    pub fn ssh(spec: &str, jump: Vec<String>) -> Result<Self> {
+        let (user, rest) = match spec.rsplit_once('@') {
+            Some((u, r)) => (Some(u.to_owned()), r),
+            None => (None, spec),
+        };
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) if !h.contains(':') => {
+                (h.to_owned(), Some(p.parse().with_context(|| format!("bad ssh port in {spec}"))?))
+            }
+            _ => (rest.to_owned(), None),
+        };
+        ensure!(!host.is_empty(), "empty ssh host in {spec:?}");
+        Ok(Hop::Ssh { host, user, port, jump, identity: None, extra_args: vec![] })
+    }
+
+    /// `[namespace/]pod[/container]`.
+    pub fn kubectl(spec: &str, context: Option<String>, debug_image: Option<String>) -> Result<Self> {
+        let parts: Vec<&str> = spec.split('/').collect();
+        let (namespace, pod, container) = match parts.as_slice() {
+            [pod] => (None, *pod, None),
+            [ns, pod] => (Some(*ns), *pod, None),
+            [ns, pod, c] => (Some(*ns), *pod, Some(*c)),
+            _ => bail!("expected [namespace/]pod[/container], got {spec:?}"),
+        };
+        ensure!(!pod.is_empty(), "empty pod name in {spec:?}");
+        Ok(Hop::Kubectl {
+            context,
+            namespace: namespace.filter(|n| !n.is_empty()).map(str::to_owned),
+            pod: pod.to_owned(),
+            container: container.filter(|c| !c.is_empty()).map(str::to_owned),
+            debug_image,
+        })
     }
 }
 
@@ -154,15 +199,37 @@ impl Target {
             .map(|h| match h {
                 Hop::Ssh { host, .. } => format!("ssh:{host}"),
                 Hop::Docker { container, .. } => format!("docker:{container}"),
-                Hop::Kubectl { namespace, pod, container, .. } => format!(
-                    "k8s:{}/{}{}",
+                Hop::Kubectl { namespace, pod, container, debug_image, .. } => format!(
+                    "k8s:{}/{}{}{}",
                     namespace.as_deref().unwrap_or("default"),
                     pod,
-                    container.as_ref().map(|c| format!("/{c}")).unwrap_or_default()
+                    container.as_ref().map(|c| format!("/{c}")).unwrap_or_default(),
+                    if debug_image.is_some() { " (debug)" } else { "" }
                 ),
             })
             .collect::<Vec<_>>()
             .join(" → ")
+    }
+
+    /// Replaces Kubernetes hops that ask for a debug container with hops into an ephemeral
+    /// debug container (created, or reused if one is already running for that container).
+    pub async fn resolve(&self) -> Result<Target> {
+        let mut out = Target::local();
+        for hop in &self.hops {
+            let hop = match hop {
+                Hop::Kubectl { context, namespace, pod, container, debug_image: Some(image) } => {
+                    let ns = namespace.as_deref().unwrap_or("default");
+                    let target = match container {
+                        Some(c) => c.clone(),
+                        None => kube_default_container(&out, context.as_deref(), ns, pod).await?,
+                    };
+                    kube_debug_container(&out, context.as_deref(), ns, pod, &target, image).await?
+                }
+                h => h.clone(),
+            };
+            out.hops.push(hop);
+        }
+        Ok(out)
     }
 
     fn tokio_command(&self, argv: &[String]) -> Command {
@@ -295,36 +362,77 @@ pub async fn upload(target: &Target, local: &Path, remote: &str, executable: boo
 }
 
 /// Files OpenProfiler needs on the remote side, from a local bundle directory laid out as
-/// `<bundle>/<triple>/{openprofiler-relay, libopenprofiler_agent.so, openprofiler-boot.jar}`.
+/// `<bundle>/<triple>/{openprofiler-relay, libopenprofiler_agent.so}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteBundle {
     pub relay: String,
-    pub agent: String,
     pub platform: Platform,
+    #[serde(skip)]
+    local: PathBuf,
 }
 
+fn remote_dir() -> String {
+    format!("{REMOTE_DIR}/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Uploads the relay for the target's platform.
 pub async fn ensure_bundle(target: &Target, bundle_dir: &Path) -> Result<RemoteBundle> {
     let platform = target.platform().await?;
-    let (relay_triple, agent_triple) = platform.bundle_triples()?;
-    let agent_name =
-        if platform.os == "darwin" { "libopenprofiler_agent.dylib" } else { "libopenprofiler_agent.so" };
+    let relay_triple = platform.triple()?;
     let relay_local = bundle_dir.join(&relay_triple).join("openprofiler-relay");
-    let agent_local = bundle_dir.join(&agent_triple).join(agent_name);
     ensure!(
         relay_local.exists(),
         "no openprofiler-relay for {relay_triple} in {} (run scripts/build-bundle.sh)",
         bundle_dir.display()
     );
-    let dir = format!("{REMOTE_DIR}/{}", env!("CARGO_PKG_VERSION"));
-    let relay = format!("{dir}/openprofiler-relay");
-    let agent = format!("{dir}/{agent_name}");
+    let relay = format!("{}/openprofiler-relay", remote_dir());
     upload(target, &relay_local, &relay, true).await?;
-    if agent_local.exists() {
-        upload(target, &agent_local, &agent, false).await?;
-    } else {
-        tracing::warn!("no agent for {agent_triple} in {}; attach will fail", bundle_dir.display());
+    Ok(RemoteBundle { relay, platform, local: bundle_dir.to_owned() })
+}
+
+impl RemoteBundle {
+    /// Uploads the agent build that matches the C library of JVM `pid` and returns its remote
+    /// path. The JVM's libc can differ from the shell's (an Alpine debug container next to a
+    /// Debian-based JVM), so it is read from the JVM's root, falling back to the shell's.
+    pub async fn agent_for(&self, target: &Target, pid: u32) -> Result<String> {
+        let mut platform = self.platform.clone();
+        if let Some(musl) = jvm_musl(target, pid).await {
+            platform.musl = musl;
+        }
+        let (_, agent_triple) = platform.bundle_triples()?;
+        let name =
+            if platform.os == "darwin" { "libopenprofiler_agent.dylib" } else { "libopenprofiler_agent.so" };
+        let local = self.local.join(&agent_triple).join(name);
+        ensure!(
+            local.exists(),
+            "no agent for {agent_triple} in {} (run scripts/build-bundle.sh)",
+            self.local.display()
+        );
+        // Both Linux builds may be needed on one host (Alpine and Debian containers).
+        let remote = match (platform.os.as_str(), platform.musl) {
+            ("linux", true) => format!("{}/libopenprofiler_agent-musl.so", remote_dir()),
+            _ => format!("{}/{name}", remote_dir()),
+        };
+        upload(target, &local, &remote, false).await?;
+        Ok(remote)
     }
-    Ok(RemoteBundle { relay, agent, platform })
+}
+
+/// Whether JVM `pid` links against musl, from the dynamic loader in its root filesystem.
+/// `None` when that can't be told (no `/proc`, no access).
+pub async fn jvm_musl(target: &Target, pid: u32) -> Option<bool> {
+    let script = format!(
+        "r=/proc/{pid}/root; for d in lib lib64 usr/lib; do ls \"$r/$d\" 2>/dev/null; done | grep -E '^ld-(musl|linux)' | head -1"
+    );
+    let out = target.sh(&script).await.ok()?;
+    let out = out.trim();
+    if out.starts_with("ld-musl") {
+        Some(true)
+    } else if out.starts_with("ld-linux") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Runs a relay subcommand and parses its JSON output.
@@ -469,6 +577,8 @@ pub struct Pod {
     pub name: String,
     pub phase: String,
     pub containers: Vec<String>,
+    /// Image of each container, in the order of `containers`.
+    pub images: Vec<String>,
     pub node: Option<String>,
 }
 
@@ -507,6 +617,12 @@ pub async fn kube_pods(host: &Target, context: Option<&str>, namespace: Option<&
                         .as_array()
                         .map(|c| c.iter().filter_map(|c| c["name"].as_str().map(str::to_owned)).collect())
                         .unwrap_or_default(),
+                    images: p["spec"]["containers"]
+                        .as_array()
+                        .map(|c| {
+                            c.iter().map(|c| c["image"].as_str().unwrap_or_default().to_owned()).collect()
+                        })
+                        .unwrap_or_default(),
                     node: p["spec"]["nodeName"].as_str().map(str::to_owned),
                 })
                 .collect()
@@ -514,9 +630,54 @@ pub async fn kube_pods(host: &Target, context: Option<&str>, namespace: Option<&
         .unwrap_or_default())
 }
 
+async fn kube_pod_json(
+    host: &Target,
+    context: Option<&str>,
+    namespace: &str,
+    pod: &str,
+) -> Result<serde_json::Value> {
+    let out = host.exec(&kubectl(context, &["get", "pod", "-n", namespace, pod, "-o", "json"]), None).await?;
+    Ok(serde_json::from_slice(&out)?)
+}
+
+/// The pod's first container (what `kubectl exec` picks without `-c`).
+async fn kube_default_container(
+    host: &Target,
+    context: Option<&str>,
+    namespace: &str,
+    pod: &str,
+) -> Result<String> {
+    let p = kube_pod_json(host, context, namespace, pod).await?;
+    p["spec"]["containers"][0]["name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("pod {namespace}/{pod} has no containers"))
+}
+
+/// A running OpenProfiler debug container of `pod` that targets `target_container`.
+fn running_debug_container(pod: &serde_json::Value, target_container: &str) -> Option<String> {
+    let running = |name: &str| {
+        pod["status"]["ephemeralContainerStatuses"]
+            .as_array()
+            .is_some_and(|st| st.iter().any(|s| s["name"] == name && s["state"]["running"].is_object()))
+    };
+    pod["spec"]["ephemeralContainers"]
+        .as_array()?
+        .iter()
+        .filter(|c| c["targetContainerName"] == target_container)
+        .filter_map(|c| c["name"].as_str())
+        .filter(|n| n.starts_with("openprofiler-debug"))
+        .find(|n| running(n))
+        .map(str::to_owned)
+}
+
 /// Adds an ephemeral debug container sharing the target container's process namespace (for
-/// distroless images without a shell) and returns a hop that execs into it. The JVM's files are
-/// then reachable under `/proc/<pid>/root`, which `openprofiler-relay attach` handles.
+/// distroless images without a shell) and returns a hop that execs into it. A running one left by
+/// an earlier attach is reused, since ephemeral containers can't be removed from a pod. The JVM's
+/// files are reachable under `/proc/<pid>/root`, which `openprofiler-relay attach` handles.
+///
+/// The container gets the `general` profile (`CAP_SYS_PTRACE`), which reading another user's
+/// `/proc/<pid>/root` needs.
 pub async fn kube_debug_container(
     host: &Target,
     context: Option<&str>,
@@ -525,48 +686,60 @@ pub async fn kube_debug_container(
     target_container: &str,
     image: &str,
 ) -> Result<Hop> {
-    let name = format!("openprofiler-debug-{}", std::process::id());
+    let hop = |name: String| Hop::Kubectl {
+        context: context.map(str::to_owned),
+        namespace: Some(namespace.to_owned()),
+        pod: pod.to_owned(),
+        container: Some(name),
+        debug_image: None,
+    };
+    let p = kube_pod_json(host, context, namespace, pod).await?;
+    if let Some(name) = running_debug_container(&p, target_container) {
+        return Ok(hop(name));
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let name = format!("openprofiler-debug-{secs}");
     let target_arg = format!("--target={target_container}");
     let image_arg = format!("--image={image}");
     let container_arg = format!("--container={name}");
     host.exec(
         &kubectl(
             context,
-            &["debug", "-n", namespace, pod, &image_arg, &target_arg, &container_arg, "--", "sleep", "86400"],
+            &[
+                "debug",
+                "-n",
+                namespace,
+                pod,
+                &image_arg,
+                &target_arg,
+                &container_arg,
+                "--profile=general",
+                "--",
+                "sleep",
+                "2147483647",
+            ],
         ),
         None,
     )
     .await?;
-    // Wait until the ephemeral container runs.
-    for _ in 0..60 {
-        let out = host
-            .exec(
-                &kubectl(
-                    context,
-                    &[
-                        "get",
-                        "pod",
-                        "-n",
-                        namespace,
-                        pod,
-                        "-o",
-                        &format!("jsonpath={{.status.ephemeralContainerStatuses[?(@.name==\"{name}\")].state.running}}"),
-                    ],
-                ),
-                None,
-            )
-            .await?;
-        if !out.is_empty() {
-            return Ok(Hop::Kubectl {
-                context: context.map(str::to_owned),
-                namespace: Some(namespace.to_owned()),
-                pod: pod.to_owned(),
-                container: Some(name),
-            });
+    // Wait until the ephemeral container runs (the image may need to be pulled).
+    for _ in 0..240 {
+        let p = kube_pod_json(host, context, namespace, pod).await?;
+        if running_debug_container(&p, target_container).as_deref() == Some(name.as_str()) {
+            return Ok(hop(name));
+        }
+        let waiting = p["status"]["ephemeralContainerStatuses"]
+            .as_array()
+            .and_then(|st| st.iter().find(|s| s["name"] == name.as_str()))
+            .and_then(|s| s["state"]["waiting"]["reason"].as_str().map(str::to_owned));
+        if let Some(r) =
+            waiting.filter(|r| r.contains("ErrImage") || r.contains("BackOff") || r.contains("ConfigError"))
+        {
+            bail!("debug container {name} cannot start: {r}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    bail!("ephemeral debug container {name} did not start")
+    bail!("ephemeral debug container {name} did not start within 2 minutes")
 }
 
 #[cfg(test)]
@@ -610,12 +783,56 @@ mod tests {
             namespace: Some("prod".into()),
             pod: "api-1".into(),
             container: Some("app".into()),
+            debug_image: None,
         });
         assert_eq!(
             k.command(&["ls".into()]),
             ["kubectl", "-n", "prod", "exec", "-i", "api-1", "-c", "app", "--", "ls"]
         );
         assert_eq!(k.describe(), "k8s:prod/api-1/app");
+    }
+
+    #[test]
+    fn hop_specs() {
+        assert_eq!(
+            Hop::ssh("me@box:2222", vec!["bastion".into()]).unwrap(),
+            Hop::Ssh {
+                host: "box".into(),
+                user: Some("me".into()),
+                port: Some(2222),
+                jump: vec!["bastion".into()],
+                identity: None,
+                extra_args: vec![],
+            }
+        );
+        assert!(matches!(Hop::ssh("box", vec![]).unwrap(), Hop::Ssh { user: None, port: None, .. }));
+        assert!(Hop::ssh("box:x", vec![]).is_err());
+        let k = Hop::kubectl("prod/api-1/app", None, Some(DEFAULT_DEBUG_IMAGE.into())).unwrap();
+        assert!(
+            matches!(&k, Hop::Kubectl { namespace: Some(n), pod, container: Some(c), debug_image: Some(_), .. }
+            if n == "prod" && pod == "api-1" && c == "app")
+        );
+        assert!(matches!(Hop::kubectl("api-1", None, None).unwrap(), Hop::Kubectl { namespace: None, .. }));
+        assert!(Hop::kubectl("a/b/c/d", None, None).is_err());
+        assert_eq!(Target::local().then(k).describe(), "k8s:prod/api-1/app (debug)");
+    }
+
+    #[test]
+    fn finds_running_debug_container() {
+        let pod = serde_json::json!({
+            "spec": {"ephemeralContainers": [
+                {"name": "openprofiler-debug-1", "targetContainerName": "app"},
+                {"name": "openprofiler-debug-2", "targetContainerName": "app"},
+                {"name": "openprofiler-debug-3", "targetContainerName": "sidecar"},
+            ]},
+            "status": {"ephemeralContainerStatuses": [
+                {"name": "openprofiler-debug-1", "state": {"terminated": {}}},
+                {"name": "openprofiler-debug-2", "state": {"running": {}}},
+                {"name": "openprofiler-debug-3", "state": {"running": {}}},
+            ]},
+        });
+        assert_eq!(running_debug_container(&pod, "app").as_deref(), Some("openprofiler-debug-2"));
+        assert_eq!(running_debug_container(&pod, "other"), None);
     }
 
     #[test]

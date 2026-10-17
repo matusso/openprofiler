@@ -1,0 +1,8 @@
+# A distroless JVM (no shell, non-root) for the Kubernetes debug-container test.
+FROM eclipse-temurin:21-jdk AS build
+COPY Busy.java /src/Busy.java
+RUN javac -d /out /src/Busy.java && cd /out && jar --create --file /busy.jar --main-class Busy Busy.class
+
+FROM gcr.io/distroless/java21-debian12:nonroot
+COPY --from=build /busy.jar /app/busy.jar
+CMD ["/app/busy.jar"]

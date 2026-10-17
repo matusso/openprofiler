@@ -45,6 +45,13 @@ import type {
   FsListing,
   InstrumentationInfo,
   ProbesRequest,
+  DiscoverKind,
+  RemoteContainer,
+  RemotePod,
+  RemoteTarget,
+  Share,
+  ShareResponse,
+  VersionInfo,
   Summary,
   TelemetryRequest,
   TelemetryResponse,
@@ -59,6 +66,9 @@ import type {
 export interface OpenProfilerConfig {
   url: string;
   token: string;
+  /** Opened through a read-only share link: only `session` can be read. */
+  readonly?: boolean;
+  session?: string;
 }
 
 declare global {
@@ -74,7 +84,11 @@ export function resolveConfig(): OpenProfilerConfig {
   const url = injected?.url ?? params?.get("api") ?? "";
   const token = injected?.token ?? params?.get("token") ?? sessionStorage.getItem("openprofiler.token") ?? "";
   if (token) sessionStorage.setItem("openprofiler.token", token);
-  return { url: url.replace(/\/$/, ""), token };
+  return {
+    url: url.replace(/\/$/, ""),
+    token,
+    ...(injected?.readonly ? { readonly: true, session: injected.session } : {}),
+  };
 }
 
 export class ApiError extends Error {
@@ -124,6 +138,26 @@ export class OpenProfilerClient {
     this.post<Session>("/sessions/attach", { pid, options });
   close = (id: string) => this.request<unknown>("DELETE", `/sessions/${id}`);
   jvms = () => this.get<LocalJvm[]>("/jvms");
+  version = () => this.get<VersionInfo>("/version");
+  /** Remote discovery; the first call on a target uploads the relay. */
+  discover(target: RemoteTarget, what: "jvms"): Promise<LocalJvm[]>;
+  discover(target: RemoteTarget, what: "containers"): Promise<RemoteContainer[]>;
+  discover(
+    target: RemoteTarget,
+    what: "pods",
+    extra?: { context?: string; namespace?: string },
+  ): Promise<RemotePod[]>;
+  discover(target: RemoteTarget, what: "contexts"): Promise<string[]>;
+  discover(target: RemoteTarget, what: DiscoverKind, extra: { context?: string; namespace?: string } = {}) {
+    return this.post<unknown>("/remote/discover", { target, what, ...extra });
+  }
+
+  // Read-only share links
+  share = (id: string, ttlSecs?: number) =>
+    this.post<ShareResponse>(`/sessions/${id}/share`, ttlSecs ? { ttl_secs: ttlSecs } : {});
+  shares = () => this.get<Share[]>("/shares");
+  revokeShare = (token: string) =>
+    this.request<{ revoked: boolean }>("DELETE", `/shares/${encodeURIComponent(token)}`);
   summary = (id: string) => this.get<Summary>(`/sessions/${id}/summary`);
 
   // Telemetry & trees

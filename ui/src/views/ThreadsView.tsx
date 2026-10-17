@@ -4,7 +4,7 @@ import type { ThreadDto, ThreadDump, ThreadSpan } from "../api/types";
 import { sk, useCurrentSession, useSummary, useThreads } from "../api/hooks";
 import { cssVar } from "../components/TimeChart";
 import { formatClock, formatNanos, formatRelTime } from "../lib/format";
-import { client, inspect, queryClient, store, useApp } from "../state";
+import { client, inspect, queryClient, readonly, store, useApp } from "../state";
 import { STATES } from "./profile/shared";
 import { diffDumps, frameKey } from "../lib/dumps";
 
@@ -252,7 +252,7 @@ function Dumps({ sessionId, live }: { sessionId: string; live: boolean }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", height: "100%" }}>
       <div style={{ borderRight: "1px solid var(--border)", overflow: "auto" }}>
-        {live && (
+        {live && !readonly && (
           <div style={{ padding: 8 }}>
             <button className="btn primary" onClick={() => capture.mutate()} disabled={capture.isPending}>
               Capture thread dump

@@ -68,6 +68,53 @@ jobs:
       - run: cargo build --profile release-relay -p openprofiler-relay
       - run: RUSTFLAGS="-C target-feature=-crt-static" cargo test -p openprofiler-agent -p openprofiler-link
 
+  bundle:
+    name: Remote bundle (x86_64, aarch64, armhf)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,
+            x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,armv7-unknown-linux-gnueabihf
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: pip3 install --user --break-system-packages ziglang==0.14.1
+      - run: scripts/build-bundle.sh
+      - uses: docker/setup-qemu-action@v3
+      - run: scripts/smoke-bundle.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: dist/bundle/
+          if-no-files-found: error
+
+  remote-e2e:
+    name: Remote attach (ssh, docker, distroless pod in kind)
+    needs: bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: dist/bundle
+      - run: chmod +x dist/bundle/*/openprofiler-relay
+      - run: cargo build -p openprofiler-cli
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - run: scripts/e2e-remote.sh
+
   ui:
     name: UI
     runs-on: ubuntu-24.04

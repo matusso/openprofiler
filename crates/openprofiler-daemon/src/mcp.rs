@@ -5,7 +5,7 @@
 
 use crate::engine::{Engine, Session};
 use crate::query::*;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use openprofiler_model::SampleKind;
 use openprofiler_model::views::Aggregation;
 use serde_json::{Value, json};
@@ -16,6 +16,15 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub struct McpServer {
     engine: Arc<Engine>,
+}
+
+/// A remote target (docs/spec/query-api.md, `RemoteTarget`): a chain of ssh, docker and kubectl hops.
+fn remote_target_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Remote target, e.g. {\"hops\":[{\"type\":\"kubectl\",\"namespace\":\"prod\",\"pod\":\"api-0\",\"debug_image\":\"busybox:1.37\"}]}. Hop types: ssh {host, user?, port?, jump?}, docker {container, user?}, kubectl {context?, namespace?, pod, container?, debug_image?}. debug_image runs an ephemeral debug container (distroless images). Omit for this machine.",
+        "properties": { "hops": { "type": "array", "items": { "type": "object" } } },
+    })
 }
 
 fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
@@ -33,8 +42,8 @@ pub fn tools() -> Vec<Value> {
     vec![
         tool(
             "list_jvms",
-            "List JVMs running on this machine that OpenProfiler can attach to.",
-            json!({}),
+            "List JVMs that OpenProfiler can attach to, on this machine or on a remote target.",
+            json!({ "target": remote_target_schema() }),
             &[],
         ),
         tool(
@@ -46,8 +55,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "attach",
-            "Attach the OpenProfiler agent to a running local JVM and start a live session.",
-            json!({ "pid": { "type": "integer" } }),
+            "Attach the OpenProfiler agent to a running JVM, on this machine or on a remote target, and start a live session.",
+            json!({ "pid": { "type": "integer" }, "target": remote_target_schema() }),
             &["pid"],
         ),
         tool("status", "List open sessions with their state and capabilities.", json!({}), &[]),
@@ -279,14 +288,26 @@ impl McpServer {
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
         let engine = self.engine.clone();
         match name {
-            "list_jvms" => Ok(json!({ "jvms": crate::live::list_jvms()?,
-                "suggested_next": "attach with a pid" })),
+            "list_jvms" => {
+                let jvms = match args.get("target").filter(|t| !t.is_null()) {
+                    Some(t) => crate::live::remote_discover(json!({ "target": t, "what": "jvms" })).await?,
+                    None => serde_json::to_value(crate::live::list_jvms()?)?,
+                };
+                Ok(json!({ "jvms": jvms, "suggested_next": "attach with a pid (and the same target)" }))
+            }
             "prepare_profiling" => Ok(crate::live::prepare_profiling(&args)),
             "attach" => {
                 let pid = args["pid"].as_u64().ok_or_else(|| anyhow!("missing pid"))? as u32;
+                let options = match args.get("target").filter(|t| !t.is_null()) {
+                    Some(t) => Some(crate::live::AttachOptions {
+                        remote: Some(serde_json::from_value(t.clone()).context("invalid target")?),
+                        ..Default::default()
+                    }),
+                    None => None,
+                };
                 let s = crate::live::attach(
                     &engine,
-                    crate::live::AttachRequest { pid: Some(pid), options: None, infofile: None },
+                    crate::live::AttachRequest { pid: Some(pid), options, infofile: None },
                 )
                 .await?;
                 Ok(json!({ "session": s.id, "info": s.info(),
