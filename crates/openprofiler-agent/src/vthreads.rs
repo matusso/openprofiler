@@ -186,9 +186,7 @@ unsafe extern "C" fn on_mount(_jvmti: *mut jvmtiEnv) {
     // The blocker is still set: LockSupport.park clears it only after the thread continues.
     let b = crate::park::blocker(a, jni, vthread);
     if !b.object.is_null() {
-        let class = crate::events::object_class_name(a, jni, b.object);
-        let id = crate::events::identity_hash(a, b.object);
-        crate::park::record(a, jni, idx, since, Some(class), owner, id);
+        crate::events::record_park(a, jni, idx, since, now_nanos() - since, b.object, owner);
     }
 }
 

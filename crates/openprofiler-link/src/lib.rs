@@ -345,6 +345,30 @@ impl LinkClient {
         self.request(v1::request::Kind::SetTriggers(v1::SetTriggers { triggers }), None).await.map(|_| ())
     }
 
+    /// Replaces the instrumentation settings (call-count patterns, enabled probes); the agent
+    /// retransforms the affected classes. Empty `probes` enables all, `["none"]` disables all.
+    pub async fn set_instrumentation(
+        &self,
+        include: Vec<String>,
+        exclude: Vec<String>,
+        probes: Vec<String>,
+    ) -> Result<v1::InstrumentationInfo> {
+        let kind = v1::request::Kind::SetInstrumentation(v1::SetInstrumentation { include, exclude, probes });
+        match self.request(kind, None).await?.response.result {
+            Some(v1::response::Result::Instrumentation(i)) => Ok(i),
+            _ => bail!("unexpected instrumentation response"),
+        }
+    }
+
+    /// The current instrumentation settings and statistics.
+    pub async fn instrumentation(&self) -> Result<v1::InstrumentationInfo> {
+        let kind = v1::request::Kind::Instrumentation(v1::InstrumentationRequest {});
+        match self.request(kind, None).await?.response.result {
+            Some(v1::response::Result::Instrumentation(i)) => Ok(i),
+            _ => bail!("unexpected instrumentation response"),
+        }
+    }
+
     /// Asks the agent to write an `.oplink` recording at `path` (on the agent's filesystem).
     pub async fn save_recording(&self, path: &str) -> Result<()> {
         let s = v1::SaveSnapshot { path: path.into() };

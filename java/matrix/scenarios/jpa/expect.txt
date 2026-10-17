@@ -1,0 +1,16 @@
+# Entity operations by entity name.
+call    | jpa | persist Owner
+call    | jpa | find Owner
+call    | jpa | merge Owner
+call    | jpa | remove Owner
+call    | jpa | flush
+# JPQL queries by their query string, with row counts.
+event   | jpa | SELECT o FROM Owner o WHERE o.city = :city | detail~10 rows | context~GET /owners/{id}
+stack   | jpa | SELECT o FROM Owner o WHERE o.city = :city | Main.ownersInCityOf
+call    | jpa | SELECT o FROM Owner o WHERE o.id = :id
+event   | jpa | UPDATE Owner o SET o.city = 'Verona' | detail~5 rows
+nocall  | jpa | getResultList
+# The generated SQL, below the JPA calls and in the request.
+call    | jdbc | insert into owner
+event   | jdbc | from owner | context~GET /owners/{id}
+stack   | jdbc | from owner | Main.ownersInCityOf

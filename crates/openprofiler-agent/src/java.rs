@@ -37,7 +37,9 @@ macro_rules! native {
 }
 
 /// Defines the embedded boot classes in the bootstrap class loader (`DefineClass` with a null
-/// loader). Classes that already exist (second agent instance, `bootjar=`) are left alone.
+/// loader). Classes that already exist (second agent instance, `bootjar=`) are left alone. A class
+/// whose superclass is not defined yet fails with `NoClassDefFoundError`; such classes are retried
+/// until no more can be defined.
 fn define_boot_classes(jni: *mut JNIEnv) {
     let mut b = crate::BOOT_CLASSES;
     let take = |b: &mut &[u8], n: usize| -> Option<Vec<u8>> {
@@ -46,33 +48,47 @@ fn define_boot_classes(jni: *mut JNIEnv) {
         Some(h)
     };
     let read_u32 = |b: &mut &[u8]| take(b, 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]) as usize);
+    let mut pending = vec![];
     while !b.is_empty() {
         let Some(nl) = read_u32(&mut b) else { break };
         let Some(name) = take(&mut b, nl) else { break };
         let Some(len) = read_u32(&mut b) else { break };
         let Some(bytes) = take(&mut b, len) else { break };
         let Ok(cname) = std::ffi::CString::new(name) else { continue };
-        let existing = jni!(jni, FindClass, cname.as_ptr());
-        if !existing.is_null() {
-            jni!(jni, DeleteLocalRef, existing);
-            continue;
+        pending.push((cname, bytes));
+    }
+    loop {
+        let mut failed = vec![];
+        let before = pending.len();
+        for (cname, bytes) in pending {
+            let existing = jni!(jni, FindClass, cname.as_ptr());
+            if !existing.is_null() {
+                jni!(jni, DeleteLocalRef, existing);
+                continue;
+            }
+            jni!(jni, ExceptionClear);
+            let k = jni!(
+                jni,
+                DefineClass,
+                cname.as_ptr(),
+                ptr::null_mut(),
+                bytes.as_ptr() as *const jbyte,
+                bytes.len() as jsize
+            );
+            if k.is_null() {
+                let e = take_exception(jni).unwrap_or_default();
+                failed.push((cname, bytes, e));
+            } else {
+                jni!(jni, DeleteLocalRef, k);
+            }
         }
-        jni!(jni, ExceptionClear);
-        let k = jni!(
-            jni,
-            DefineClass,
-            cname.as_ptr(),
-            ptr::null_mut(),
-            bytes.as_ptr() as *const jbyte,
-            len as jsize
-        );
-        if k.is_null() {
-            if let Some(e) = take_exception(jni) {
+        if failed.is_empty() || failed.len() == before {
+            for (cname, _, e) in &failed {
                 log(&format!("cannot define {}: {e}", cname.to_string_lossy()));
             }
-        } else {
-            jni!(jni, DeleteLocalRef, k);
+            return;
         }
+        pending = failed.into_iter().map(|(c, b, _)| (c, b)).collect();
     }
 }
 

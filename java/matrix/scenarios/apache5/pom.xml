@@ -1,0 +1,13 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>matrix</groupId>
+  <artifactId>apache5</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.httpcomponents.client5</groupId>
+      <artifactId>httpclient5</artifactId>
+      <version>${httpclient.version}</version>
+    </dependency>
+  </dependencies>
+</project>

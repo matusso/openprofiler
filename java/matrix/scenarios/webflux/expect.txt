@@ -1,0 +1,9 @@
+# One call per request, timed until the response completed (after the 20 ms delay).
+count   | http_server | GET /owners/{id} | 30
+event   | http_server | GET /owners/{id} | detail~status 200 | ms~20 | context~GET /owners/{id}
+count   | http_server | GET /fail | 3
+event   | http_server | GET /fail | detail~status 500 | error~HTTP 500
+# The request label follows the pipeline across schedulers.
+every   | custom.work | load owner | context~GET /owners/{id}
+every   | custom.work | render | context~GET /owners/{id}
+sample  | calls | [GET /owners/{id}]

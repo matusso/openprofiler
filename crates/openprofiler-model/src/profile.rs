@@ -27,10 +27,16 @@ pub enum SampleKind {
     Io = 5,
     /// Thrown exceptions. Weight: count.
     Exception = 6,
+    /// Instrumented method calls (exact). Weight: self nanoseconds; count: invocations of the
+    /// stack's leaf method along that path.
+    Calls = 7,
+    /// Probe calls (JDBC, HTTP, …), derived from [`ProbeCall`] rows. Weight: nanoseconds; the
+    /// `class` column holds the payload (e.g. the SQL statement).
+    Probe = 8,
 }
 
 impl SampleKind {
-    pub const ALL: [SampleKind; 7] = [
+    pub const ALL: [SampleKind; 9] = [
         SampleKind::Cpu,
         SampleKind::Wall,
         SampleKind::Alloc,
@@ -38,6 +44,8 @@ impl SampleKind {
         SampleKind::Wait,
         SampleKind::Io,
         SampleKind::Exception,
+        SampleKind::Calls,
+        SampleKind::Probe,
     ];
 
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -61,6 +69,8 @@ impl SampleKind {
             SampleKind::Wait => "wait",
             SampleKind::Io => "io",
             SampleKind::Exception => "exception",
+            SampleKind::Calls => "calls",
+            SampleKind::Probe => "probe",
         }
     }
 
@@ -335,6 +345,84 @@ pub struct ProfileMeta {
     pub properties: BTreeMap<String, String>,
 }
 
+/// A probe registered in the agent (built-in such as `jdbc`, or custom).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProbeInfo {
+    /// Stable id, e.g. `jdbc`, `http_server`, `custom.orders`.
+    pub id: String,
+    pub name: String,
+    /// What payloads are, e.g. `SQL statement`, `URL`.
+    pub payload_label: String,
+    /// What control objects are (`Connection`, `File`), if the probe tracks any.
+    pub control_label: Option<String>,
+}
+
+/// Aggregated probe calls with one payload from one stack in one second.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeCall {
+    /// Start of the one-second bucket.
+    pub time: Nanos,
+    /// Index into [`ProbeData::probes`].
+    pub probe: u32,
+    /// Payload string id.
+    pub payload: StrId,
+    pub thread: u32,
+    pub stack: StackId,
+    pub count: u32,
+    /// Summed duration.
+    pub duration: Nanos,
+    pub max: Nanos,
+    pub errors: u32,
+}
+
+/// One recorded probe event (calls above the event threshold, sampled per second).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeEvent {
+    pub start: Nanos,
+    pub duration: Nanos,
+    pub probe: u32,
+    pub payload: StrId,
+    pub thread: u32,
+    pub stack: StackId,
+    /// Exception class and message when the call failed.
+    pub error: Option<String>,
+    /// Control object the call belongs to (e.g. the connection), if any.
+    pub control: Option<u64>,
+    /// Probe-specific detail (bind parameters, HTTP status, row count).
+    pub detail: Option<String>,
+    /// Request the work was done for, propagated across threads.
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlEventKind {
+    Open,
+    Close,
+}
+
+/// Lifecycle of a probe's control object (a JDBC connection, a file, a socket).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlEvent {
+    pub time: Nanos,
+    pub probe: u32,
+    /// Agent-assigned object id, unique per probe.
+    pub id: u64,
+    pub kind: ControlEventKind,
+    pub description: String,
+    pub thread: u32,
+    pub stack: StackId,
+}
+
+/// Everything recorded by probes.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeData {
+    pub probes: Vec<ProbeInfo>,
+    pub calls: Vec<ProbeCall>,
+    pub events: Vec<ProbeEvent>,
+    pub controls: Vec<ControlEvent>,
+}
+
 /// Everything known about one profiled JVM over a time window.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
@@ -349,6 +437,7 @@ pub struct Profile {
     pub monitors: Vec<MonitorEvent>,
     pub bookmarks: Vec<Bookmark>,
     pub thread_dumps: Vec<ThreadDump>,
+    pub probes: ProbeData,
 }
 
 impl Profile {
@@ -393,6 +482,21 @@ impl Profile {
         if t > self.meta.end {
             self.meta.end = t;
         }
+    }
+
+    /// Records aggregated probe calls; they are also added as [`SampleKind::Probe`] samples
+    /// (payload in the class column) so call trees and back traces work on them.
+    pub fn push_probe_call(&mut self, c: ProbeCall) {
+        self.samples_mut(SampleKind::Probe).push(
+            c.time,
+            c.thread,
+            ThreadState::Runnable,
+            c.stack,
+            c.duration.max(0) as u64,
+            c.count,
+            Some(c.payload),
+        );
+        self.probes.calls.push(c);
     }
 
     /// Sample kinds that have at least one sample.

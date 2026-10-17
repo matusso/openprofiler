@@ -1,0 +1,13 @@
+# Quarkus (Vert.x, RESTEasy Reactive, Hibernate ORM with Panache): URL hot spots.
+call   | http_server | GET /entity/fruits/{id}
+event  | http_server | GET /entity/fruits | detail~status 200
+call   | http_server | GET /repository/fruits
+# SQL hot spots (through Agroal), done on worker threads for the requests and linked to the
+# resource methods that ran them.
+call   | jdbc | from FruitEntity
+event  | jdbc | from FruitEntity | context~GET /entity/fruits
+stack  | jdbc | from FruitEntity | FruitEntityResource
+stack  | jdbc | from Fruit f1_0 | FruitRepositoryResource
+call   | jpa  | find FruitEntity
+control | jdbc | (pooled) | close
+sample | cpu | [GET /entity/fruits/{id}]

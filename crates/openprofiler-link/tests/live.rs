@@ -4,6 +4,7 @@
 
 use openprofiler_link::{AgentInfo, LinkClient, LinkOptions};
 use openprofiler_model::{MonitorEventKind, Profile, SampleKind};
+use openprofiler_proto::v1;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -69,6 +70,23 @@ fn spawn(java: &Path, jvm_args: &[String]) -> (Jvm, u32) {
     BufReader::new(stdout).read_line(&mut line).unwrap();
     let pid = line.trim().strip_prefix("PID ").and_then(|p| p.parse().ok()).expect("workload prints its pid");
     (Jvm(child), pid)
+}
+
+/// Compiles `java/testapp/ProbeWorkload.java` with the public API into `dir`.
+fn compile_probe_workload(dir: &Path) -> bool {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let javac = std::env::var_os("JAVA_HOME")
+        .map(|h| Path::new(&h).join("bin/javac"))
+        .unwrap_or_else(|| "javac".into());
+    let api = root.join("java/openprofiler-api/src/dev/openprofiler/api");
+    Command::new(javac)
+        .args(["-nowarn", "-d"])
+        .arg(dir)
+        .arg(root.join("java/testapp/ProbeWorkload.java"))
+        .arg(api.join("OpenProfiler.java"))
+        .arg(api.join("Probe.java"))
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn has_frame(p: &Profile, kind: SampleKind, needle: &str) -> bool {
@@ -468,6 +486,161 @@ async fn dynamic_attach_with_tls() {
     assert!(openprofiler_attach::list_jvms().iter().any(|j| j.pid == pid && j.profiled));
     exercise(&client, dir.path()).await;
     let _ = std::fs::remove_file(&r.info_path);
+}
+
+/// Probe calls of probe `id` with payloads containing `needle`.
+fn probe_calls(p: &Profile, id: &str, needle: &str) -> u64 {
+    let Some(i) = p.probes.probes.iter().position(|x| x.id == id) else { return 0 };
+    p.probes
+        .calls
+        .iter()
+        .filter(|c| c.probe as usize == i && p.symbols.str(c.payload).contains(needle))
+        .map(|c| c.count as u64)
+        .sum()
+}
+
+async fn check_probes(client: &LinkClient) {
+    let caps = client.hello().capabilities;
+    assert!(caps.iter().any(|c| c == "probes"), "probes capability: {caps:?}");
+    wait_for(client, "JDBC, HTTP, custom and file probe calls", |p| {
+        probe_calls(p, "jdbc", "SELECT * FROM orders WHERE id = ?") > 0
+            && probe_calls(p, "jdbc", "UPDATE stats") > 0
+            && probe_calls(p, "http_server", "GET /orders/{id}") > 0
+            && probe_calls(p, "http_client", "/orders/{id}") > 0
+            && probe_calls(p, "custom.orders", "price order") > 0
+            && probe_calls(p, "custom.manual", "tick") > 0
+            && probe_calls(p, "exceptions", "java.lang.NumberFormatException") > 0
+            && probe_calls(p, "files", "write ") > 0
+    })
+    .await;
+    wait_for(client, "JDBC events with bind parameters and the request as context", |p| {
+        p.probes.events.iter().any(|e| {
+            p.symbols.str(e.payload).starts_with("SELECT")
+                && e.detail.as_deref().is_some_and(|d| d.starts_with("params: "))
+                && e.context.as_deref() == Some("GET /orders/{id}")
+                && p.threads.get(e.thread as usize).is_some_and(|t| t.name == "pw-worker")
+        })
+    })
+    .await;
+    wait_for(client, "file control objects", |p| {
+        let files = p.probes.probes.iter().position(|x| x.id == "files");
+        p.probes
+            .controls
+            .iter()
+            .any(|c| Some(c.probe as usize) == files && c.description.contains("probe-workload"))
+    })
+    .await;
+    // Probe stacks start at the application, not in the boot classes.
+    {
+        let p = client.profile();
+        let p = p.read();
+        let mut frames = vec![];
+        for c in &p.probes.calls {
+            p.stacks.frames_root_first(c.stack, &mut frames);
+            if let Some(&leaf) = frames.last() {
+                let label = p.symbols.method_label(p.symbols.frame(leaf).method);
+                assert!(!label.starts_with("dev.openprofiler.boot."), "probe stack ends in {label}");
+            }
+        }
+    }
+    // Exact call counts, split by request.
+    wait_for(client, "instrumented calls under the request label", |p| {
+        has_frame(p, SampleKind::Calls, "[GET /orders/{id}]")
+            && has_frame(p, SampleKind::Calls, "ProbeWorkload.leaf")
+    })
+    .await;
+    let info = client.instrumentation().await.unwrap();
+    assert!(info.instrumented_classes > 0 && info.include.iter().any(|i| i.starts_with("ProbeWorkload")));
+    assert!(info.available_probes.iter().any(|p| p.id == "jdbc"), "{info:?}");
+    // Method triggers.
+    let trigger = v1::Trigger {
+        id: "price".into(),
+        condition: Some(v1::trigger::Condition::Method(v1::MethodCondition {
+            class_name: "ProbeWorkload".into(),
+            method: "priceOrder".into(),
+        })),
+        actions: vec![v1::TriggerAction {
+            kind: Some(v1::trigger_action::Kind::Bookmark(v1::AddBookmark {
+                label: "priced".into(),
+                color: String::new(),
+            })),
+        }],
+        cooldown_ms: 0,
+        max_fires: 1,
+    };
+    client.set_triggers(vec![trigger]).await.unwrap();
+    wait_for(client, "method trigger bookmark", |p| p.bookmarks.iter().any(|b| b.label == "priced")).await;
+    // Disabling a probe removes its instrumentation.
+    let info =
+        client.set_instrumentation(vec!["ProbeWorkload*".into()], vec![], vec!["jdbc".into()]).await.unwrap();
+    assert_eq!(info.enabled_probes, vec!["jdbc".to_string()]);
+}
+
+async fn probe_session(java: &Path, extra: &str, attach: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let classes = dir.path().join("classes");
+    assert!(compile_probe_workload(&classes), "javac ProbeWorkload");
+    let lib = agent_lib();
+    let info = dir.path().join("info.json");
+    let probe_opts = format!("instrument=ProbeWorkload*,autotune=0{extra}");
+    let opts = format!("port=0,token=probe-token,infofile={},{probe_opts}", info.display());
+    let mut cmd = Command::new(java);
+    if !attach {
+        cmd.arg(format!("-agentpath:{}={opts}", lib.display()));
+    } else {
+        cmd.arg("-XX:+EnableDynamicAgentLoading");
+    }
+    let mut child = cmd
+        .arg("-cp")
+        .arg(&classes)
+        .arg("ProbeWorkload")
+        .arg("60")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("start java");
+    let stdout = child.stdout.take().unwrap();
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().strip_prefix("PID ").and_then(|p| p.parse().ok()).expect("pid line");
+    let _jvm = Jvm(child);
+    let client = if attach {
+        // Let the workload load its classes first: they are instrumented by retransformation.
+        std::thread::sleep(Duration::from_secs(2));
+        let r = openprofiler_attach::attach_agent(pid, &lib, &probe_opts).expect("attach");
+        LinkClient::connect(LinkOptions::new(r.addr(), r.token.clone())).await.unwrap()
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !info.exists() {
+            assert!(Instant::now() < deadline, "agent did not publish its info file");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        LinkClient::connect(LinkOptions::from_info(&AgentInfo::read(&info).unwrap())).await.unwrap()
+    };
+    check_probes(&client).await;
+    client.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probes_with_agentpath() {
+    let Some(java) = java() else {
+        eprintln!("skipping: java not found");
+        return;
+    };
+    probe_session(&java, "", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probes_after_dynamic_attach() {
+    let Some(java) = java() else {
+        eprintln!("skipping: java not found");
+        return;
+    };
+    if is_openj9(&java) {
+        eprintln!("skipping: no HotSpot attach");
+        return;
+    }
+    probe_session(&java, "", true).await;
 }
 
 #[test]

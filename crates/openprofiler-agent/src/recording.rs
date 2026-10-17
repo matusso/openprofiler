@@ -9,6 +9,8 @@ use std::path::Path;
 
 pub fn write(a: &Agent, path: &Path) -> std::io::Result<()> {
     let hello = crate::server::hello(a);
+    crate::events::drain_monitors(a);
+    crate::probes::drain(a);
     let batch = a.collector.lock().cut_batch(&v1::Watermark::default(), true, false);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;

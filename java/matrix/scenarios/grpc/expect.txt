@@ -1,0 +1,9 @@
+# Client calls by full method name, blocking and through futures; failures with their status.
+count   | grpc | call matrix.Owners/Get | 20
+count   | grpc | call (async) matrix.Owners/Get | 10
+event   | grpc | call matrix.Owners/Delete | error~PERMISSION_DENIED
+nocall  | grpc | [unknown]
+# Server calls set the request label, which follows work to an executor.
+count   | grpc | serve matrix.Owners/Get | 30
+every   | custom.work | load owner | context~gRPC matrix.Owners/Get
+call    | grpc | serve matrix.Owners/Delete

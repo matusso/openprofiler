@@ -364,7 +364,33 @@ pub async fn control(engine: &Arc<Engine>, s: &Arc<Session>, action: &str, req: 
             }
             Ok(r)
         }
-        "probe-events" => bail!("probes are not available yet (planned for phase 3)"),
+        "instrumentation" => {
+            // An empty body reads the settings; `include`/`exclude`/`probes` replace them.
+            let list = |k: &str| -> Vec<String> {
+                req[k]
+                    .as_array()
+                    .map_or(vec![], |a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            };
+            let i = if req.get("include").is_some()
+                || req.get("exclude").is_some()
+                || req.get("probes").is_some()
+            {
+                c.set_instrumentation(list("include"), list("exclude"), list("probes")).await?
+            } else {
+                c.instrumentation().await?
+            };
+            Ok(json!({
+                "include": i.include, "exclude": i.exclude,
+                "available_probes": i.available_probes.iter().map(|p| json!({
+                    "id": p.id, "name": p.name, "payload_label": p.payload_label,
+                    "control_label": (!p.control_label.is_empty()).then_some(&p.control_label),
+                })).collect::<Vec<_>>(),
+                "enabled_probes": i.enabled_probes,
+                "instrumented_classes": i.instrumented_classes,
+                "instrumented_methods": i.instrumented_methods,
+                "disabled_methods": i.disabled_methods,
+            }))
+        }
         other => bail!("unknown live action: {other}"),
     }
 }

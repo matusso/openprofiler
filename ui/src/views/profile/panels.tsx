@@ -19,7 +19,7 @@ import { MethodLabel } from "../../components/MethodLabel";
 import { formatCount, formatValue } from "../../lib/format";
 import { goToSource, sourceTarget } from "../../lib/source";
 import { client, focusMethod, inspect, openContextMenu, useApp, type MenuItem } from "../../state";
-import { KIND_UNIT, VIEW_OF_KIND, type TreeParams } from "./shared";
+import { KIND_COUNT_LABEL, KIND_UNIT, VIEW_OF_KIND, type TreeParams } from "./shared";
 
 const ROOT_KEY = 4294967295;
 
@@ -51,7 +51,9 @@ export function frameMenu(
   ];
 }
 
-function treeColumns(unit: Unit, total: () => number) {
+function treeColumns(kind: TreeKind, unit: Unit, total: () => number) {
+  // A calls node's own invocations are its self count; its total count adds its callees'.
+  const own = kind === "calls";
   return [
     {
       id: "total",
@@ -67,7 +69,12 @@ function treeColumns(unit: Unit, total: () => number) {
       ),
     },
     { id: "self", header: "Self", width: 90, render: (n: TreeNodeDto) => formatValue(n.self, unit) },
-    { id: "count", header: "Samples", width: 80, render: (n: TreeNodeDto) => formatCount(n.total_count) },
+    {
+      id: "count",
+      header: KIND_COUNT_LABEL[kind] ?? "Samples",
+      width: 80,
+      render: (n: TreeNodeDto) => formatCount(own ? n.self_count : n.total_count),
+    },
   ];
 }
 
@@ -114,7 +121,7 @@ export function CallTreePanel({
           <MethodLabel label={n.label} kind={n.kind} q={search} />
         )
       }
-      columns={treeColumns(unit, () => total)}
+      columns={treeColumns(params.kind, unit, () => total)}
       onSelect={(n) => inspect({ type: "node", kind: params.kind, node: n, total, unit })}
       onContextMenu={(n, e) =>
         n.parent !== null &&
@@ -197,7 +204,7 @@ export function HotspotsPanel({
           },
           {
             id: "count",
-            header: "Samples",
+            header: KIND_COUNT_LABEL[params.kind] ?? "Samples",
             width: 80,
             align: "right",
             render: (h) => formatCount(h.self_count),

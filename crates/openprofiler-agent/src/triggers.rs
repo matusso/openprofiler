@@ -5,7 +5,9 @@
 //! - timer: on the trigger thread, `delay` after installation, then every `period`;
 //! - threshold: on every telemetry row (once per second), edge-triggered with a hold time;
 //! - out of memory: JVMTI `ResourceExhausted`;
-//! - JVM start: when installed on a live agent; JVM exit: inline in `VMDeath`.
+//! - JVM start: when installed on a live agent; JVM exit: inline in `VMDeath`;
+//! - method: the method is instrumented with `Hooks.trigger` and fires on every call (subject to
+//!   the cooldown); the actions run on the trigger thread, not the calling one.
 //!
 //! Every firing adds a bookmark. Actions run on the "OpenProfiler Triggers" thread (exit actions run in
 //! `VMDeath` itself), one firing at a time.
@@ -24,6 +26,8 @@ use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(100);
 const FIRE_COLOR: &str = "#f59e0b";
+/// Minimum time between two firings of a method trigger without a cooldown.
+const METHOD_COOLDOWN: Duration = Duration::from_secs(1);
 
 struct Armed {
     spec: v1::Trigger,
@@ -126,6 +130,18 @@ pub fn set(triggers: Vec<v1::Trigger>) -> Result<(), String> {
         .filter_map(|t| t.fire(now))
         .collect();
     debug(&format!("{} trigger(s) installed", armed.len()));
+    let methods = armed
+        .iter()
+        .filter_map(|t| match &t.spec.condition {
+            Some(Condition::Method(m)) => Some((
+                t.spec.id.clone(),
+                crate::instrument::internal_pattern(&m.class_name),
+                if m.method.is_empty() { "*".into() } else { m.method.clone() },
+            )),
+            _ => None,
+        })
+        .collect();
+    crate::instrument::set_method_triggers(methods);
     *TRIGGERS.lock() = armed;
     enqueue(jobs);
     Ok(())
@@ -215,6 +231,24 @@ fn metric(keys: &[String], values: &[f64], name: &str) -> Option<f64> {
 }
 
 /// Evaluates threshold triggers against one telemetry row.
+/// A method trigger's method was called.
+pub fn on_method(id: &str) {
+    let now = Instant::now();
+    let job = {
+        let mut ts = TRIGGERS.lock();
+        let Some(t) = ts.iter_mut().find(|t| t.spec.id == id) else { return };
+        // Without an explicit cooldown a hot method would fire continuously.
+        if t.spec.cooldown_ms <= 0 && t.last_fire.is_some_and(|l| now.duration_since(l) < METHOD_COOLDOWN) {
+            return;
+        }
+        t.fire(now)
+    };
+    if let Some(mut j) = job {
+        j.why = Some("method called".into());
+        enqueue(vec![j]);
+    }
+}
+
 pub fn on_telemetry(time: i64, keys: &[String], values: &[f64]) {
     let now = Instant::now();
     let mut jobs = vec![];

@@ -140,14 +140,29 @@ impl Session {
             if !p.thread_dumps.is_empty() || self.live().is_some() {
                 caps.push("thread_dumps".into());
             }
+            if p.probes
+                .probes
+                .iter()
+                .enumerate()
+                .any(|(i, _)| p.probes.calls.iter().any(|c| c.probe as usize == i))
+            {
+                caps.push("probes".into());
+            }
         }
         if self.heap().is_some() {
             caps.push("heap".into());
         }
         if let Some(l) = self.live() {
             caps.push("recording".into());
-            if l.client().hello().capabilities.iter().any(|c| c == "mbeans") {
+            let agent = l.client().hello().capabilities;
+            if agent.iter().any(|c| c == "mbeans") {
                 caps.push("mbeans".into());
+            }
+            if agent.iter().any(|c| c == "probes") && !caps.iter().any(|c| c == "probes") {
+                caps.push("probes".into());
+            }
+            if agent.iter().any(|c| c == "instrument") {
+                caps.push("instrument".into());
             }
         }
         if self.decompiler().is_some() {

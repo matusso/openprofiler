@@ -35,7 +35,7 @@ export const NAV: NavEntry[] = [
     short: "CPU",
     icon: <IconCpu />,
     key: "2",
-    needs: ["cpu", "wall", "io", "exception"],
+    needs: ["cpu", "wall", "io", "exception", "calls"],
   },
   {
     id: "memory",
@@ -62,7 +62,14 @@ export const NAV: NavEntry[] = [
     key: "6",
     needs: ["monitor", "wait"],
   },
-  { id: "probes", label: "Probes", short: "Probes", icon: <IconProbe />, key: "7", needs: [] },
+  {
+    id: "probes",
+    label: "Probes",
+    short: "Probes",
+    icon: <IconProbe />,
+    key: "7",
+    needs: ["probes"],
+  },
   {
     id: "events",
     label: "Events",

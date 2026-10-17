@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use openprofiler_model::{
-    Bookmark, FrameKind, GcEvent, JvmInfo, Method, MonitorEvent, MonitorEventKind, Profile, SampleKind,
-    ThreadInfo, ThreadState, Unit,
+    Bookmark, ControlEvent, ControlEventKind, FrameKind, GcEvent, JvmInfo, Method, MonitorEvent,
+    MonitorEventKind, ProbeCall, ProbeEvent, ProbeInfo, Profile, SampleKind, ThreadInfo, ThreadState, Unit,
 };
 use openprofiler_proto::v1;
 
@@ -63,6 +63,71 @@ pub fn apply_hello(p: &mut Profile, hello: &v1::Hello) {
     p.meta.properties.insert("agent_version".into(), hello.agent_version.clone());
     p.meta.properties.insert("agent_capabilities".into(), hello.capabilities.join(","));
     p.meta.properties.insert("agent_mode".into(), hello.mode.clone());
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn apply_probes(p: &mut Profile, b: &v1::DataBatch) {
+    let base = b.from.as_ref().map_or(0, |w| w.probes) as usize;
+    for (i, info) in b.probes.iter().enumerate() {
+        if base + i < p.probes.probes.len() {
+            continue;
+        }
+        p.probes.probes.push(ProbeInfo {
+            id: info.id.clone(),
+            name: info.name.clone(),
+            payload_label: info.payload_label.clone(),
+            control_label: non_empty(&info.control_label),
+        });
+    }
+    if let Some(c) = &b.probe_calls {
+        for i in 0..c.time.len() {
+            let at = |v: &Vec<u32>| v.get(i).copied().unwrap_or(0);
+            let at64 = |v: &Vec<i64>| v.get(i).copied().unwrap_or(0);
+            p.push_probe_call(ProbeCall {
+                time: c.time[i],
+                probe: at(&c.probe),
+                payload: at(&c.payload),
+                thread: at(&c.thread),
+                stack: at(&c.stack),
+                count: at(&c.count),
+                duration: at64(&c.duration),
+                max: at64(&c.max),
+                errors: at(&c.errors),
+            });
+        }
+        if let (Some(&first), Some(&last)) = (c.time.first(), c.time.last()) {
+            p.extend_range(first);
+            p.extend_range(last + 1_000_000_000);
+        }
+    }
+    for e in &b.probe_events {
+        p.probes.events.push(ProbeEvent {
+            start: e.start,
+            duration: e.duration,
+            probe: e.probe,
+            payload: e.payload,
+            thread: e.thread,
+            stack: e.stack,
+            error: non_empty(&e.error),
+            control: (e.control != 0).then_some(e.control),
+            detail: non_empty(&e.detail),
+            context: non_empty(&e.context),
+        });
+    }
+    for c in &b.probe_controls {
+        p.probes.controls.push(ControlEvent {
+            time: c.time,
+            probe: c.probe,
+            id: c.id,
+            kind: if c.kind == 1 { ControlEventKind::Close } else { ControlEventKind::Open },
+            description: c.description.clone(),
+            thread: c.thread,
+            stack: c.stack,
+        });
+    }
 }
 
 /// Applies one batch. Tables are positional: elements before the profile's current length are
@@ -153,6 +218,10 @@ pub fn apply_batch(p: &mut Profile, b: &v1::DataBatch) -> Result<()> {
     }
     for s in &b.samples {
         let Some(kind) = SampleKind::from_u8(s.kind as u8) else { continue };
+        if kind == SampleKind::Probe {
+            // Derived from probe calls.
+            continue;
+        }
         let n = s.time.len();
         let set = p.samples_mut(kind);
         for i in 0..n {
@@ -235,6 +304,7 @@ pub fn apply_batch(p: &mut Profile, b: &v1::DataBatch) -> Result<()> {
     for d in &b.thread_dumps {
         p.thread_dumps.push(thread_dump(d));
     }
+    apply_probes(p, b);
     if b.time != 0 {
         p.extend_range(b.time);
     }

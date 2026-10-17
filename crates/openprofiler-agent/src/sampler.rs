@@ -73,6 +73,11 @@ fn run(a: &'static Agent) {
                 next_wall = (next_wall + wall).max(now);
             }
         }
+        if do_wall {
+            crate::events::drain_monitors(a);
+            crate::probes::drain(a);
+            crate::events::regulate_contention(a);
+        }
         let next = if sync_cpu { next_cpu.min(next_wall) } else { next_wall };
         let sleep = next.saturating_duration_since(Instant::now());
         std::thread::sleep(sleep.max(Duration::from_micros(200)));
@@ -180,6 +185,11 @@ fn sample_all(
                 if fr.kind == FrameKind::Native && is_net_io(class) {
                     state = ThreadState::NetIo;
                 }
+            }
+            if !ids.is_empty()
+                && let Some(label) = crate::probes::label_frame_of(ti)
+            {
+                ids.push(label);
             }
             let stack = c.stacks.intern_leaf_first(&ids);
             if let Some(w) = weight

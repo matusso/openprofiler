@@ -9,7 +9,9 @@
 //!    "actions": [{"save_snapshot": "/tmp/app-{n}.oplink"}]},
 //!   {"id": "oom", "out_of_memory": {}, "actions": [{"thread_dump": {}}]},
 //!   {"id": "exit", "jvm_exit": {}, "actions": [{"save_snapshot": "/tmp/final.oplink"}]},
-//!   {"id": "start", "jvm_start": {}, "actions": [{"stop_recording": "alloc"}]}
+//!   {"id": "start", "jvm_start": {}, "actions": [{"stop_recording": "alloc"}]},
+//!   {"id": "checkout", "method": {"class": "com.acme.Shop", "method": "checkout"},
+//!    "actions": [{"bookmark": "checkout"}], "cooldown": "1s"}
 //! ]}
 //! ```
 //!
@@ -102,9 +104,21 @@ fn trigger(id: String, o: &Map<String, Value>) -> Result<v1::Trigger, String> {
     if o.contains_key("jvm_exit") {
         conditions.push(Condition::JvmExit(v1::JvmExitCondition {}));
     }
+    if let Some(m) = o.get("method") {
+        let m = m.as_object().ok_or("`method` must be an object")?;
+        let class = m.get("class").and_then(Value::as_str).ok_or("`method.class` is required")?;
+        conditions.push(Condition::Method(v1::MethodCondition {
+            class_name: class.into(),
+            method: m.get("method").and_then(Value::as_str).unwrap_or("*").into(),
+        }));
+    }
     let condition = match conditions.len() {
         1 => conditions.pop(),
-        0 => return Err("no condition (timer, threshold, out_of_memory, jvm_start or jvm_exit)".into()),
+        0 => {
+            return Err(
+                "no condition (timer, threshold, out_of_memory, jvm_start, jvm_exit or method)".into()
+            );
+        }
         _ => return Err("more than one condition".into()),
     };
     let actions = o
@@ -144,8 +158,8 @@ fn action(v: &Value) -> Result<v1::TriggerAction, String> {
     };
     let recording = |what: &str| -> Result<String, String> {
         match arg.as_str() {
-            Some(k @ ("cpu" | "alloc" | "monitor")) => Ok(k.into()),
-            _ => Err(format!("`{what}` takes \"cpu\", \"alloc\" or \"monitor\"")),
+            Some(k @ ("cpu" | "alloc" | "monitor" | "calls" | "probes")) => Ok(k.into()),
+            _ => Err(format!("`{what}` takes \"cpu\", \"alloc\", \"monitor\", \"calls\" or \"probes\"")),
         }
     };
     let kind = match name {
@@ -200,6 +214,11 @@ mod tests {
             Some(Condition::Timer(v1::TimerCondition { delay_ms: 500, period_ms: 60_000 }))
         ));
         assert!(matches!(&t[2].actions[0].kind, Some(Kind::StopRecording(k)) if k == "cpu"));
+        let m = parse_json(r#"[{"method": {"class": "a.B", "method": "run"}, "actions": ["thread_dump"]}]"#)
+            .unwrap();
+        assert!(
+            matches!(&m[0].condition, Some(Condition::Method(c)) if c.class_name == "a.B" && c.method == "run")
+        );
     }
 
     #[test]

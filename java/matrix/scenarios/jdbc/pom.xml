@@ -1,0 +1,23 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>matrix</groupId>
+  <artifactId>jdbc</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>${driver.group}</groupId>
+      <artifactId>${driver.artifact}</artifactId>
+      <version>${driver.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>${hikari.artifact}</artifactId>
+      <version>${hikari.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+  </dependencies>
+</project>

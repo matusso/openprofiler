@@ -89,6 +89,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/thread-states", post(thread_states_h))
         .route("/sessions/{id}/thread-dumps", get(thread_dumps_h).post(live_h))
         .route("/sessions/{id}/monitors", post(monitors_h))
+        .route("/sessions/{id}/probes", post(probes_h))
+        .route("/sessions/{id}/instrumentation", get(live_h).post(live_h))
         .route("/sessions/{id}/insights", get(insights_h))
         .route("/sessions/{id}/events", post(events_h))
         .route("/sessions/{id}/export", post(export_h))
@@ -247,6 +249,7 @@ post_query!(callgraph_h, CallGraphRequest, callgraph);
 post_query!(histogram_h, HistogramRequest, histogram);
 post_query!(thread_states_h, ThreadStatesRequest, thread_states);
 post_query!(monitors_h, MonitorsRequest, monitors);
+post_query!(probes_h, crate::probes::ProbesRequest, crate::probes::probes);
 post_query!(events_h, crate::events::EventsRequest, crate::events::events);
 
 async fn threads_h(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {

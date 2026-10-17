@@ -90,6 +90,9 @@ serves clients lazily. The agent's state is a set of append-only tables:
 | thread_states | closed state spans `(thread, start, end, state)`; open spans are cut once per second |
 | monitors, gc, bookmarks | event rows |
 | thread_dumps | dumps the agent took itself (trigger actions); dropped once acknowledged |
+| probes | registered probes (`ProbeInfo`, positional; never dropped) |
+| probe_calls | per-second aggregated probe calls `(time, probe, payload, thread, stack, count, duration, max, errors)` |
+| probe_events, probe_controls | individual probe events and control-object open/close rows |
 
 A `Watermark` holds one absolute position per table. A `DataBatch` carries everything in
 `[from, to)`. The daemon applies tables in order (symbols, stacks, threads, then the rest) and
@@ -97,7 +100,7 @@ interns them in the same order, so the agent's ids equal the daemon's ids. `Thre
 carry later changes to existing threads (end time, rename).
 
 Sample kinds (`openprofiler_model::SampleKind`): `0 cpu`, `1 wall`, `2 alloc`, `3 monitor`, `4 wait`,
-`5 io`, `6 exception`. Thread states: `0 runnable`, `1 waiting`, `2 blocked`, `3 net_io`,
+`5 io`, `6 exception`, `7 calls`, `8 probe` (never sent; the daemon derives it from probe calls). Thread states: `0 runnable`, `1 waiting`, `2 blocked`, `3 net_io`,
 `4 sleeping`, `5 new`, `6 terminated`, `7 unknown`.
 
 Weights:
@@ -108,11 +111,35 @@ Weights:
   (`size / (1 - e^(-size/interval))`); `class_id` is the allocated class.
 - `monitor` / `wait`: blocked/waiting nanoseconds; `class_id` is the monitor's class (for parks,
   the blocker's class).
+- `calls`: self nanoseconds of instrumented methods; `count` is the number of invocations of the
+  stack's leaf method along that path (see [Instrumentation](#instrumentation)).
+- `probe` (derived): nanoseconds of probe calls; `count` is calls; the class column is the payload.
 
 ### Monitor events
 
 `MonitorEvent.kind` is `0` enter (contended `synchronized`), `1` wait (`Object.wait`) or `2` park
-(`java.util.concurrent`). Only events of at least `monitor_threshold` are sent individually.
+(`java.util.concurrent`). Only events of at least `monitor_threshold` are sent individually, at
+most 1000 per second each for monitors and for parks.
+
+Contention can be very frequent (a hot `synchronized` cache in a web application contends tens of
+thousands of times a second), so recording it must not make it worse:
+
+- Stacks are only taken at the start of a contended enter or wait, before the thread blocks:
+  when a sample is due (see below) and otherwise up to 5000 times a second in case the event turns
+  out long. `MonitorContendedEntered` runs after the thread acquired the monitor, so nothing there
+  walks the stack or takes a lock that other threads hold for long; raw frames are queued and
+  resolved by the sampler thread.
+- Events of at least `monitor_threshold` that have a stack are recorded with their duration. The
+  time of the other events is sampled: once a thread's summed time of them reaches
+  `monitor_interval`, its next event with a stack is recorded as a sample of that weight. Totals
+  per stack are estimates for these, like allocation samples.
+- Parks shorter than `monitor_threshold` are not recorded; longer ones beyond the budget are
+  sampled the same way. Stacks for samples are taken at most 5000 times a second; time beyond
+  carries over to the next sample.
+- Even with nothing to do, JVMTI's delivery of contended-enter events costs a few percent of
+  throughput at tens of thousands of contended enters a second. Above 20,000 a second the agent
+  switches them on for one second in five, and contended-enter samples recorded meanwhile weigh
+  five times their duration. Monitor waits and parks are not affected.
 
 - `owner` (thread index + 1) is the thread holding the lock. For contended monitors it comes from
   JVMTI `GetObjectMonitorUsage`, which runs as a safepoint operation, so at most `owner_rate`
@@ -164,12 +191,14 @@ microbenchmark where 500 virtual threads switched about 40,000 times per second,
 |---|---|---|
 | `ThreadDump` | `ThreadMXBean.dumpAllThreads` (+ virtual threads via `HotSpotDiagnosticMXBean.dumpThreads` on JDK 21+) | `ThreadDump` |
 | `HeapDump{format, live_only, local_path}` | `HotSpotDiagnosticMXBean.dumpHeap` | `HeapDumpResult`; without `local_path` the HPROF follows as `BlobChunk`s (1 MiB, `last` on the final one) |
-| `SetRecording{kind, enabled, interval_us}` | toggles `cpu`, `alloc`, `monitor` | `ok` |
+| `SetRecording{kind, enabled, interval_us}` | toggles `cpu`, `alloc`, `monitor`, `calls`, `probes` | `ok` |
 | `UpdateConfig{config}` | applies a whole `SessionConfig` | `ok` |
 | `SaveSnapshot{path}` | writes an `.oplink` recording on the agent's filesystem | `SnapshotResult` |
 | `RunGc` | JVMTI `ForceGarbageCollection` | `ok` |
 | `AddBookmark{label, color}` | adds a bookmark | `ok` |
 | `SetTriggers{triggers}` | replaces the agent's triggers (see below) | `ok`, or an error for an invalid trigger |
+| `SetInstrumentation{include, exclude, probes}` | replaces the call-counting patterns and enabled probes; retransforms affected classes | `InstrumentationInfo` |
+| `Instrumentation{}` | current instrumentation settings and statistics | `InstrumentationInfo` |
 | `MBeanServers{}` | the MBean servers (platform, others in the JVM, connected remote JMX) | `MBeanServerList` |
 | `MBeanConnect{url, username, password, enabled}` | connects the JVM to a remote JMX server, or disconnects it | `MBeanServerList` |
 | `MBeanList{server, pattern}` | MBeans matching an ObjectName pattern (empty = all) | `MBeanList` (beans + tracked attributes) |
@@ -242,7 +271,9 @@ no daemon is connected. They are installed with the `triggers=<file>` option at 
    "actions": [{"save_snapshot": "/tmp/app-{n}.oplink"}]},
   {"id": "oom", "out_of_memory": {}, "actions": ["thread_dump", {"save_snapshot": "/tmp/oom.oplink"}]},
   {"id": "exit", "jvm_exit": {}, "actions": [{"save_snapshot": "/tmp/final.oplink"}]},
-  {"id": "quiet-start", "jvm_start": {}, "actions": [{"stop_recording": "alloc"}]}
+  {"id": "quiet-start", "jvm_start": {}, "actions": [{"stop_recording": "alloc"}]},
+  {"id": "checkout", "method": {"class": "com.acme.Shop", "method": "checkout"},
+   "actions": [{"bookmark": "checkout"}, "thread_dump"], "cooldown": "10s"}
 ]}
 ```
 
@@ -256,6 +287,7 @@ A bare array works too. Durations are numbers of milliseconds or strings with a 
 | `out_of_memory` | JVMTI `ResourceExhausted` (Java heap, metaspace, native threads) |
 | `jvm_start` | when the agent goes live, or immediately when installed on a live agent |
 | `jvm_exit` | at VM death, before the offline recording is written or the final batch is sent |
+| `method {class, method}` | when the method is called. `class` is a Java class name (`*` wildcards allowed), `method` a name, a name with descriptor (`place(Ljava/lang/String;)V`) or `*`. The method is instrumented with a trigger hook; without a `cooldown` it fires at most once per second |
 
 Threshold metrics are the telemetry keys (`heap.used`, `heap.committed`, `nonheap.used`,
 `gc.activity`, `threads.live`, `classes.loaded`, `cpu.process`, `cpu.system`, `alloc.rate`, …,
@@ -264,7 +296,7 @@ maximum).
 
 | action | effect |
 |---|---|
-| `start_recording` / `stop_recording` `"cpu"\|"alloc"\|"monitor"` | like `SetRecording` |
+| `start_recording` / `stop_recording` `"cpu"\|"alloc"\|"monitor"\|"calls"\|"probes"` | like `SetRecording` |
 | `bookmark` `"label"` or `{label, color}` | adds a bookmark |
 | `thread_dump` | takes a dump and adds it to the data plane (`DataBatch.thread_dumps`) |
 | `heap_dump {path, live_only}` | writes an HPROF file on the agent's filesystem |
@@ -276,6 +308,105 @@ trigger fired). `cooldown` is the minimum time between firings and `max_fires` c
 unlimited). Each firing adds a bookmark `Trigger <id>` (with the threshold value or OOM
 description), plus a bookmark per action that wrote a file or failed. Actions run one firing at a
 time on the agent's trigger thread; `jvm_exit` actions run inside `VMDeath`.
+
+## Instrumentation
+
+The agent rewrites bytecode in its `ClassFileLoadHook` (Rust, `instrument/classfile.rs`; no Java
+code runs while a class loads). It needs the `can_retransform_classes` capability (capability
+group `instrument`; `noinstrument` turns it off). What a class gets:
+
+- **Call counting** for classes matching `instrument=` (and not `exclude=`; JDK classes are never
+  counted): `Hooks.callEnter(id)` at entry and `Hooks.callExit(id)` before every return and in a
+  catch-all handler that rethrows. Each thread keeps a native shadow stack and a call trie; about
+  once a second, at thread end and when its outermost frame returns, the trie becomes `calls`
+  sample rows (self time, invocations) on stacks of the instrumented frames. Auto-tuning
+  (`autotune`, on by default) removes methods called at least 50,000 times in 5 s with a mean
+  self time under 400 ns: they are skipped at once and removed by retransformation.
+- **Probe interceptions** registered by the boot classes' probes: `Hooks.enter(site, this, args)`
+  (arguments boxed into an `Object[]` when the probe asks for them) and `Hooks.exit(result, site)`
+  / `Hooks.exitThrow(throwable, site)`; constructors pass `null` for `this` at entry and `this` as
+  the result.
+- **Custom probes**: methods annotated with `@dev.openprofiler.api.Probe`.
+- **Method triggers**: `Hooks.trigger(site)` at entry.
+
+The handler that runs exit hooks for exceptions covers the whole method, except in constructors,
+where it starts after the `super(...)`/`this(...)` call. Branch offsets, switch padding, the
+exception table, line and local-variable tables and `StackMapTable` frames are remapped; methods
+with `jsr`/`ret`, branches that would overflow or code over 64 KB are left alone.
+
+An interception names a method of one class or of every subtype of a class or interface (the type
+included). The hook knows supertypes only by name, so it records per class a mask of intercepted
+supertypes; a class loads before its supertypes, so masks are completed at `ClassPrepare` (a
+parent's mask counts only once the parent is prepared) and late matches are retransformed right
+there, before any code of the class runs. A subtype may inherit the method from a superclass that
+is not a subtype (Hibernate's `AbstractSelectionQuery.getResultList`); such superclasses are
+instrumented too, and their sites check the receiver's type at run time. Interceptions that only
+act at entry (`Interception.entryOnly()`: JDBC setters and `close`, executor hand-offs, response
+completions) get no exit hooks. Instrumented classes in named modules get a reads edge to the boot loader's
+unnamed module (where `Hooks` lives) before their code runs. Classes loaded before the hook was
+active (bootstrap classes, everything after a dynamic attach) are found by a scan of the loaded
+classes and retransformed. Lambdas and other hidden classes cannot be instrumented.
+
+## Probes
+
+Probes are Java classes in the boot classes implementing the SPI `dev.openprofiler.boot.Probe`:
+`interceptions()` names the methods; `onEnter(call, this, args)` and `onExit(call, this, result,
+error)` fill a `Call` (payload, detail, error, control object id); helpers emit control-object
+opens and closes and set the thread's request label. The runtime guards against re-entrancy
+(calls made by probe code are not intercepted), passes nested calls of the same probe to the
+callbacks but records only the outermost one, and catches every failure
+(`-Dopenprofiler.probes.debug=true` prints the first ones).
+
+Each recorded call is aggregated into `probe_calls`; calls within the per-probe budget
+(`probe_events` per second, default 100, only calls of at least `probe_threshold`) and calls of
+100 ms or more are also sent as `ProbeEvent`s. Stacks end at the intercepted method (the boot
+classes' frames are removed). Walking the stack is most of the cost of a probe call (tens of
+nanoseconds per frame), so events always get their own stack, but a full stack for a (probe,
+request label, payload) is taken at most once per `probe_stack_interval` (default 10 ms, any
+thread) and the calls in between are attributed to it: probe call trees are exact in their totals
+and sampled in their split across call paths. `probe_stack_interval=0` takes a stack for every
+call. Threads aggregate their calls themselves; the sampler thread moves them into the batches.
+A control object (`ControlEvent`) is opened and closed by the probe; one garbage collected without
+being closed is reported as closed with the description `garbage collected without close`. Opens
+carry a stack, closes do not.
+
+| probe id | intercepts | payload | control objects |
+|---|---|---|---|
+| `jdbc` | `Statement.execute*`, `executeBatch`, `Connection.prepare*`, `PreparedStatement.set*`, `Driver.connect`, `DataSource.getConnection`, `Connection.close`, `Statement.close` (all subtypes) | SQL (prepared statements remember theirs); detail: bind parameters | connections (`physical` from drivers, `pooled` from data sources) |
+| `jpa` | `EntityManager` `persist/merge/remove/find/refresh/flush`, `Query` `getResultList/getSingleResult/executeUpdate/getResultStream` (javax and Jakarta, also where a provider implements them in a superclass) | operation and entity, or the JPQL (Hibernate's query string, EclipseLink's `getJPQLString`) | — |
+| `http_server` | Servlet `FilterChain.doFilter` and `HttpServlet.service` (javax and Jakarta; asynchronous requests until their `AsyncListener` reports completion), JDK `Filter$Chain.doFilter`, Netty `SimpleChannelInboundHandler.channelRead` with an `HttpRequest`, Reactor Netty (`HttpServerHandle.onStateChange` to `HttpServerOperations.onOutboundComplete`/`onOutboundError`, so Spring WebFlux), Vert.x HTTP/1.x (`Http1xServerConnection.handleMessage` to `responseComplete`) and HTTP/2 (`Http2ServerStream.onHeaders` to the response's last write, also after an `h2c` upgrade), so Quarkus | method and path with ids replaced (`GET /owners/{id}`); detail: status; also the request label | — |
+| `http_client` | JDK `HttpClient` (`send`, `sendAsync`), `HttpURLConnection`, OkHttp 3/4/5 `RealCall.execute`, Apache HttpClient 4/5 classic `doExecute` (relative request URIs get the target host) | method and URL (ids replaced, no query); detail: status | — |
+| `kafka` | `KafkaProducer.send`, `KafkaConsumer.poll` (empty polls ignored), `commitSync` | `send <topic>`, `poll <subscription>` | — |
+| `grpc` | `ClientCalls` unary calls (blocking, future, async; the method of a `ClientCall` is read from the call), unary server calls | full method name; server calls set the request label | — |
+| `exceptions` | `Throwable` constructors | exception class; detail: message | — |
+| `files` | `FileInputStream`/`FileOutputStream`/`RandomAccessFile` (open, bulk read/write, close) | `read <path>`, `write <path>`; detail: bytes | open files |
+| `sockets` | `Socket.connect`, `ServerSocket.accept`, `Socket.close` | `connect <address>`, `accept <address>` | open sockets |
+| `custom.<name>` | `@Probe(value = "<name>", payload = "…")` methods, `OpenProfiler.probeEvent` | the formatted template (`{0}`, `{this}`) | — |
+
+**Request labels.** A probe serving a request (`http_server`, `grpc` server) sets the thread's
+label for the duration of the call. The label is the root frame of the thread's CPU, wall,
+allocation, monitor, `calls` and probe stacks (`[GET /owners/{id}]`), so call trees split by
+request, and the `context` of its probe events. An internal `async` probe carries the label across
+hand-offs: `FutureTask` (executor `submit`, scheduled executors, Reactor schedulers),
+`ForkJoinTask` (fork/join, parallel streams, `CompletableFuture` stages),
+`ThreadPoolExecutor.execute` of plain runnables, `Thread.start` (platform and virtual threads),
+Kotlin coroutine dispatch and JBoss Threads' `EnhancedQueueExecutor` (Quarkus' and WildFly's
+worker pools).
+
+Asynchronous servers (Reactor Netty, Vert.x, asynchronous servlets) label the thread while the
+request's handler is dispatched and subscribed, so work it schedules inherits the label, and
+record the request when its response completes, with the time from receipt to completion, the
+request as context and its label as the stack's root. Pipeline stages that resume on an event loop
+from I/O callbacks (not from a scheduler or executor the request handed work to) are not labelled.
+
+**Version matrix.** `java/matrix/run.sh` runs the probes against real libraries (see
+`java/matrix/matrix.txt`): JDBC drivers (H2, PostgreSQL, MySQL) behind HikariCP; Hibernate 5–7
+and EclipseLink 2.7/4; Tomcat 9–11, Jetty 9.4–12 and Undertow 2.2/2.3 (javax and Jakarta); Netty
+4.1/4.2; Reactor Netty 1.0–1.2 and Spring WebFlux 5.3–6.2; Vert.x 4.5/5; OkHttp 3–5 and Apache
+HttpClient 4/5; Kafka clients 2.8–4.0; grpc-java 1.40–1.69; Reactor core 3.4–3.7 and Kotlin
+coroutines 1.6–1.10. Each case records with the agent in offline mode and checks payloads,
+events, control objects, request context and call-tree links
+(`crates/openprofiler-link/examples/oplink_check.rs`).
 
 ## Offline recordings (`.oplink`)
 
@@ -308,7 +439,8 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `sampler` | `auto` | `auto`, `async` (Linux), `sync` |
 | `cpu`, `alloc`, `monitors` | on | initial recording state |
 | `alloc_interval` | `512k` | mean bytes between allocation samples |
-| `monitor_threshold` | `100us` | shorter monitor events are only aggregated; shorter parks are not recorded |
+| `monitor_threshold` | `100us` | longer monitor events and parks are sent individually; shorter monitor events are sampled, shorter parks not recorded |
+| `monitor_interval` | `1ms` | blocked or waiting time per thread that yields one sample of short monitor events (see [Monitor events](#monitor-events)) |
 | `owner_rate` | `50` | owner lookups for contended monitors per second (each is a safepoint); `0` disables them |
 | `vthreads` | on | virtual-thread mount tracking (JDK 21+) |
 | `triggers` | — | JSON trigger file loaded at start-up |
@@ -316,6 +448,14 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `max_frames` | `256` | maximum stack depth |
 | `wait` / `nowait` | `nowait` | block VM start until a daemon connected |
 | `bootjar` | embedded | use an external `openprofiler-boot.jar` instead of the embedded classes |
+| `instrument` / `include` | — | `:`-separated class patterns (`com.acme.*:org.x.Y`) that get exact call counts |
+| `exclude` | — | `:`-separated class patterns excluded from call counting |
+| `probes` | `all` | `:`-separated probe ids to enable, `all` or `none` |
+| `autotune` | on | remove hot, trivial methods from call counting |
+| `probe_events` | `100` | individual probe events per probe and second (slower calls are always kept) |
+| `probe_threshold` | `0` | probe calls faster than this are aggregated but not sent as events |
+| `probe_stack_interval` | `10ms` | minimum time between full stacks for probe calls of one (probe, request, payload); `0`: every call |
+| `instrumentation` / `noinstrument` | on | bytecode instrumentation (probes, call counts, method triggers) |
 | `debug` | off | log to stderr |
 
 ## Samplers

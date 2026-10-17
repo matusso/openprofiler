@@ -1,0 +1,6 @@
+# Coroutine work on Dispatchers.Default and IO, also after a suspension, belongs to the request.
+every   | custom.work | async | context~GET /owners/{id}
+every   | custom.work | io | context~GET /owners/{id}
+every   | custom.work | after delay | context~GET /owners/{id}
+every   | custom.work | launch | context~GET /owners/{id}
+count   | http_server | GET /owners/{id} | 20

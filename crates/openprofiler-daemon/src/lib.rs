@@ -21,6 +21,7 @@ pub mod live;
 pub mod loaders;
 pub mod mbeans;
 pub mod mcp;
+pub mod probes;
 pub mod query;
 pub mod save;
 

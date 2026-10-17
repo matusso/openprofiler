@@ -43,6 +43,11 @@ pub struct Options {
     pub alloc_interval: u32,
     pub monitors: bool,
     pub monitor_threshold: Duration,
+    /// Minimum time between full stack captures for probe calls of one (thread, probe, request,
+    /// payload); calls in between reuse the last stack. Zero: every call.
+    pub probe_stack_interval: Duration,
+    /// Blocked or waiting time of shorter monitor events per thread that yields one sample.
+    pub monitor_interval: Duration,
     /// Owner lookups for contended monitors per second (each is a safepoint); 0 disables them.
     pub owner_rate: u32,
     /// Virtual-thread mount/unmount tracking (JDK 21+).
@@ -54,6 +59,19 @@ pub struct Options {
     /// Where to publish `{pid, port, token, fingerprint}`; default `$TMPDIR/openprofiler-<pid>.json`.
     pub infofile: Option<PathBuf>,
     pub debug: bool,
+    /// Bytecode instrumentation (probes, call counts, method triggers); `noinstrument` turns it off.
+    pub instrumentation: bool,
+    /// Class patterns (`com.acme.*`) whose methods get exact call counts; `:`-separated.
+    pub instrument: Vec<String>,
+    pub instrument_exclude: Vec<String>,
+    /// Enabled probe ids (`jdbc:http_server`); `None` = all, empty = none.
+    pub probes: Option<Vec<String>>,
+    /// Remove hot, trivial methods from call counting.
+    pub autotune: bool,
+    /// Individual probe events recorded per probe and second (slower calls are always kept).
+    pub probe_events: u32,
+    /// Probe calls faster than this are aggregated but never recorded as events.
+    pub probe_threshold: Duration,
 }
 
 impl Default for Options {
@@ -75,6 +93,8 @@ impl Default for Options {
             alloc_interval: 512 * 1024,
             monitors: true,
             monitor_threshold: Duration::from_micros(100),
+            monitor_interval: Duration::from_millis(1),
+            probe_stack_interval: Duration::from_millis(10),
             owner_rate: 50,
             vthreads: true,
             triggers: None,
@@ -82,6 +102,13 @@ impl Default for Options {
             bootjar: None,
             infofile: None,
             debug: false,
+            instrumentation: true,
+            instrument: vec![],
+            instrument_exclude: vec![],
+            probes: None,
+            autotune: true,
+            probe_events: 100,
+            probe_threshold: Duration::ZERO,
         }
     }
 }
@@ -114,6 +141,11 @@ fn parse_size(s: &str) -> Option<u32> {
         (s.as_str(), 1)
     };
     num.parse::<u32>().ok().map(|n| n.saturating_mul(mul))
+}
+
+/// A `:`-separated list (commas separate options).
+fn list(v: &str) -> Vec<String> {
+    v.split(':').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
 }
 
 fn flag(v: &str) -> bool {
@@ -212,6 +244,8 @@ impl Options {
                         true
                     }
                     "monitor_threshold" => parse_duration(v).map(|d| o.monitor_threshold = d).is_some(),
+                    "monitor_interval" => parse_duration(v).map(|d| o.monitor_interval = d).is_some(),
+                    "probe_stack_interval" => parse_duration(v).map(|d| o.probe_stack_interval = d).is_some(),
                     "owner_rate" => v.parse().map(|n| o.owner_rate = n).is_ok(),
                     "vthreads" => {
                         o.vthreads = flag(v);
@@ -234,6 +268,36 @@ impl Options {
                         o.debug = flag(v);
                         true
                     }
+                    "instrumentation" => {
+                        o.instrumentation = flag(v);
+                        true
+                    }
+                    "noinstrument" => {
+                        o.instrumentation = !flag(v);
+                        true
+                    }
+                    "instrument" | "include" => {
+                        o.instrument = list(v);
+                        true
+                    }
+                    "exclude" => {
+                        o.instrument_exclude = list(v);
+                        true
+                    }
+                    "probes" => {
+                        o.probes = match v {
+                            "all" | "1" => None,
+                            "none" | "0" | "off" => Some(vec![]),
+                            _ => Some(list(v)),
+                        };
+                        true
+                    }
+                    "autotune" => {
+                        o.autotune = flag(v);
+                        true
+                    }
+                    "probe_events" => v.parse().map(|n| o.probe_events = n).is_ok(),
+                    "probe_threshold" => parse_duration(v).map(|d| o.probe_threshold = d).is_some(),
                     _ => false,
                 };
                 if !ok {
@@ -270,5 +334,14 @@ mod tests {
         assert_eq!(o.owner_rate, 0);
         assert!(!o.vthreads && !o.recover);
         assert_eq!(parse_duration("250us"), Some(Duration::from_micros(250)));
+        let (o, w) = Options::parse(
+            "instrument=com.acme.*:org.x.Y,exclude=com.acme.gen.*,probes=jdbc:http_server",
+            None,
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(o.instrument, vec!["com.acme.*", "org.x.Y"]);
+        assert_eq!(o.instrument_exclude, vec!["com.acme.gen.*"]);
+        assert_eq!(o.probes, Some(vec!["jdbc".to_string(), "http_server".to_string()]));
+        assert_eq!(Options::parse("probes=none", None).0.probes, Some(vec![]));
     }
 }

@@ -1,0 +1,8 @@
+# Sends by topic, also from a request handler.
+count   | kafka | send orders- | 50
+event   | kafka | send orders- | context~GET /orders/{id}
+stack   | kafka | send orders- | Main.main
+# Polls with records (empty ones are idle time) and commits, by subscription.
+event   | kafka | poll [orders- | detail~records
+nocall  | kafka | poll []
+call    | kafka | commit [orders-

@@ -62,7 +62,7 @@ export function CpuView() {
     <ProfileTrees
       view="cpu"
       title="CPU"
-      kinds={["cpu", "wall", "io", "exception"]}
+      kinds={["cpu", "wall", "io", "exception", "calls"]}
       extraTabs={[{ id: "threads", label: "Threads", render: () => <ThreadTotals /> }]}
     />
   );

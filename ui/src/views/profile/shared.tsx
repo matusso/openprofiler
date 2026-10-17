@@ -12,6 +12,14 @@ export const KIND_LABELS: Record<TreeKind, string> = {
   wait: "Waiting / parking",
   io: "I/O",
   exception: "Exceptions",
+  calls: "Calls (instrumented)",
+  probe: "Probe calls",
+};
+
+/** Header of the count column: what one counted unit is for a kind. */
+export const KIND_COUNT_LABEL: Partial<Record<TreeKind, string>> = {
+  calls: "Invocations",
+  probe: "Calls",
 };
 
 export const VIEW_OF_KIND: Record<TreeKind, ViewId> = {
@@ -22,6 +30,8 @@ export const VIEW_OF_KIND: Record<TreeKind, ViewId> = {
   wait: "locks",
   io: "cpu",
   exception: "cpu",
+  calls: "cpu",
+  probe: "probes",
 };
 
 export const KIND_UNIT: Record<TreeKind, Unit> = {
@@ -32,6 +42,8 @@ export const KIND_UNIT: Record<TreeKind, Unit> = {
   wait: "nanos",
   io: "nanos",
   exception: "count",
+  calls: "nanos",
+  probe: "nanos",
 };
 
 export const STATES: ThreadStateName[] = ["runnable", "waiting", "blocked", "net_io", "sleeping", "unknown"];
