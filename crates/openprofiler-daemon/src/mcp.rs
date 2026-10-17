@@ -62,7 +62,7 @@ pub fn tools() -> Vec<Value> {
         tool("status", "List open sessions with their state and capabilities.", json!({}), &[]),
         tool(
             "load_snapshot",
-            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap), or code for the decompiler: an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war, .ear, .jmod, .class). Optionally open a baseline for comparison.",
+            "Open a profiling file (.jfr, .hprof, .hprof.gz, .phd, .opsnap), or code for the decompiler: an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war, .ear, .jmod, .class). Optionally open a baseline for comparison.",
             json!({ "path": { "type": "string" }, "baseline": { "type": "string" } }),
             &["path"],
         ),

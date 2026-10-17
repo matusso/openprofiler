@@ -1,0 +1,18 @@
+[package]
+name = "openprofiler-phd"
+description = "Streaming parser for IBM Portable Heap Dumps (OpenJ9 / Semeru .phd) and conversion to HPROF"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openprofiler-hprof.workspace = true
+flate2.workspace = true
+thiserror.workspace = true
+rustc-hash = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

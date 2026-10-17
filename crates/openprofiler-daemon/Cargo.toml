@@ -10,6 +10,7 @@ openprofiler-model.workspace = true
 openprofiler-snapshot.workspace = true
 openprofiler-jfr.workspace = true
 openprofiler-heap.workspace = true
+openprofiler-phd.workspace = true
 openprofiler-link.workspace = true
 openprofiler-proto.workspace = true
 openprofiler-attach.workspace = true
@@ -30,6 +31,7 @@ futures-util = "0.3"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tempfile.workspace = true
 
 [lints]
 workspace = true

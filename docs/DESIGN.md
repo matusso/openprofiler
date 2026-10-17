@@ -85,6 +85,7 @@ crates/
   openprofiler-model/      symbols, stack trie, samples; call tree, hot spots, flame, call graph, diff
   openprofiler-snapshot/   .opsnap container read/write
   openprofiler-hprof/      zero-copy HPROF parser (1.0.1/1.0.2, gzip)
+  openprofiler-phd/        IBM Portable Heap Dump (OpenJ9) parser and PHD → HPROF conversion
   openprofiler-jfr/        metadata-driven JFR parser → openprofiler-model
   openprofiler-heap/       object index, CSR graphs, dominators, retained sizes, inspections, paths
   openprofiler-attach/     hsperfdata discovery, HotSpot attach, container NSpid handling
@@ -251,6 +252,27 @@ the file in `<file>.openprofiler-idx/`.
 Correctness is checked against Eclipse MAT, which is used as an oracle for retained sizes
 (`crates/openprofiler-heap/tests/mat_parity.rs`). The memory budget is about 32 bytes per object
 across all indexes, on disk and mmap'd.
+
+**IBM Portable Heap Dumps** (`.phd`, optionally gzipped; OpenJ9 / IBM Semeru) are converted to an
+HPROF file in the index directory first (`openprofiler-phd`), then indexed like any other dump. A
+PHD records classes, object addresses, non-null references, array lengths and (from version 6)
+object sizes, but no field names or values, no primitive data and no GC roots. The conversion
+therefore:
+- names references `ref0`, `ref1`, ... (instance fields per class, statics for class objects);
+- writes primitive arrays with their length and a sparse run of zeros as data;
+- carries each object's size from the dump (class instance size, PHD array size) in the record's
+  stack trace serial, which the engine uses instead of the HotSpot layout rules;
+- infers GC roots: classes are sticky-class roots, objects nothing references are unknown roots,
+  and so is one object of each cycle still unreachable (OpenJ9 collects garbage before it writes a
+  heap dump, so everything in it is live);
+- marks the file with an `openprofiler:phd` string record, so a snapshot that embeds it reopens
+  as a PHD.
+
+Histogram, dominators, retained sizes, biggest objects, references and paths to roots work; string
+values, primitive array contents and the inspections (which read field values) do not, and the UI
+marks the session as PHD. The conversion holds the object graph in memory (about 60 bytes per
+object and 8 per reference). Fixtures from OpenJ9 21 with and without compressed references are
+in `crates/openprofiler-phd/tests/data` (`regenerate.sh` rebuilds them in Docker).
 
 ### 3.8 CPU and tree engine (`openprofiler-model`)
 

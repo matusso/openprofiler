@@ -133,6 +133,8 @@ export interface HeapSummary {
   id_size: number;
   dump_time?: number;
   analysis_state: "indexing" | "dominators" | "ready";
+  /** `phd`: an IBM Portable Heap Dump (no field values or primitive data, inferred GC roots). */
+  format?: "hprof" | "phd";
 }
 
 export interface Summary {

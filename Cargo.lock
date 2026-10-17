@@ -1039,6 +1039,7 @@ dependencies = [
  "openprofiler-jfr",
  "openprofiler-link",
  "openprofiler-model",
+ "openprofiler-phd",
  "openprofiler-proto",
  "openprofiler-remote",
  "openprofiler-snapshot",
@@ -1046,6 +1047,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
@@ -1075,6 +1077,7 @@ dependencies = [
  "memmap2",
  "openprofiler-hprof",
  "openprofiler-model",
+ "openprofiler-phd",
  "rand",
  "rayon",
  "rustc-hash",
@@ -1134,6 +1137,17 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "openprofiler-phd"
+version = "0.4.0"
+dependencies = [
+ "flate2",
+ "openprofiler-hprof",
+ "rustc-hash",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

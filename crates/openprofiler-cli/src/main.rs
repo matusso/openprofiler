@@ -92,7 +92,7 @@ enum Cmd {
     },
     /// Precompute analysis (heap indexes, dominators) and print insights.
     Analyze { file: PathBuf },
-    /// Convert a profile (.jfr, .hprof, .opsnap) to an .opsnap snapshot.
+    /// Convert a profile (.jfr, .hprof, .phd, .opsnap) to an .opsnap snapshot.
     Convert {
         input: PathBuf,
         #[arg(short, long)]

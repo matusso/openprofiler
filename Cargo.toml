@@ -14,6 +14,7 @@ openprofiler-model = { path = "crates/openprofiler-model" }
 openprofiler-proto = { path = "crates/openprofiler-proto" }
 openprofiler-snapshot = { path = "crates/openprofiler-snapshot" }
 openprofiler-hprof = { path = "crates/openprofiler-hprof" }
+openprofiler-phd = { path = "crates/openprofiler-phd" }
 openprofiler-heap = { path = "crates/openprofiler-heap" }
 openprofiler-jfr = { path = "crates/openprofiler-jfr" }
 openprofiler-attach = { path = "crates/openprofiler-attach" }

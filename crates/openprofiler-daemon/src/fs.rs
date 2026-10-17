@@ -36,7 +36,7 @@ pub struct Listing {
 /// What a file name looks like to the engine (by extension; the content decides when opening).
 pub fn kind_of(name: &str) -> Option<&'static str> {
     let n = name.to_ascii_lowercase();
-    if n.ends_with(".hprof") || n.ends_with(".hprof.gz") {
+    if n.ends_with(".hprof") || n.ends_with(".hprof.gz") || n.ends_with(".phd") || n.ends_with(".phd.gz") {
         return Some("heap");
     }
     let ext = n.rsplit_once('.').map(|(_, e)| e)?;
@@ -136,6 +136,7 @@ mod tests {
         assert_eq!(l.entries.len(), 4);
         assert!(list(Some("/definitely/not/here"), false).is_err());
         assert_eq!(kind_of("heap.hprof.gz"), Some("heap"));
+        assert_eq!(kind_of("heapdump.20261017.123456.1.0001.phd"), Some("heap"));
         assert_eq!(kind_of("x.JFR"), Some("profile"));
         let _ = std::fs::remove_dir_all(&dir);
     }

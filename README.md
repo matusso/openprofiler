@@ -27,8 +27,9 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **IDE** | IntelliJ IDEA plugin and VS Code / VSCodium extension: CPU heat in the editor, navigation to source, launch with the agent. |
 | **Security** | The agent link uses TLS 1.3 with a pinned fingerprint and a mandatory random token. |
 
-Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, `.opsnap` snapshots and
-`.oplink` offline recordings. The decompiler opens `.apk` (and `.xapk`, `.apks`, `.aab`) and `.dex`
+Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, OpenJ9 / IBM Semeru `.phd`
+heap dumps (also gzipped; references and sizes only, see [design](docs/DESIGN.md)), `.opsnap`
+snapshots and `.oplink` offline recordings. The decompiler opens `.apk` (and `.xapk`, `.apks`, `.aab`) and `.dex`
 files, and JVM bytecode: `.jar`, `.war`, `.ear`, `.jmod`, `.aar` and `.class`.
 
 ## Install
@@ -297,7 +298,7 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 | `crates/openprofiler-agent`, `crates/jvmti-sys` | Native JVMTI agent and bindings |
 | `crates/openprofiler-model` | Symbols, stacks, samples; call tree, hot spots, flame, call graph, diff |
 | `crates/openprofiler-jfr` | JFR parser |
-| `crates/openprofiler-hprof`, `crates/openprofiler-heap` | HPROF parser and heap analysis engine |
+| `crates/openprofiler-hprof`, `crates/openprofiler-phd`, `crates/openprofiler-heap` | HPROF and PHD parsers, heap analysis engine |
 | `crates/openprofiler-snapshot` | `.opsnap` reader and writer ([spec](docs/spec/snapshot-format.md)) |
 | `crates/openprofiler-proto`, `crates/openprofiler-link` | Agent-link protocol ([spec](docs/spec/agent-link.md)) and its daemon-side client |
 | `crates/openprofiler-attach` | JVM discovery and dynamic attach, including containers |
