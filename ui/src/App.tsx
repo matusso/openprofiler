@@ -10,7 +10,7 @@ import { NAV, Nav } from "./components/Nav";
 import { TopBar } from "./components/TopBar";
 import { formatCount, formatNanos } from "./lib/format";
 import { onFileDrop } from "./lib/tauri";
-import { client, queryClient, selectSession, store, useApp } from "./state";
+import { client, queryClient, readonly, selectSession, store, useApp } from "./state";
 import { CompareView } from "./views/CompareView";
 import { CodeView } from "./views/CodeView";
 import { CpuView } from "./views/CpuView";
@@ -82,7 +82,7 @@ function useShortcuts() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         store.set({ paletteOpen: !store.get().paletteOpen });
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o" && !readonly) {
         e.preventDefault();
         store.set({ dialog: "open" });
       } else if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -106,6 +106,7 @@ function useDrop() {
   const open = useOpenFile();
   const [over, setOver] = useState(false);
   useEffect(() => {
+    if (readonly) return;
     let un: (() => void) | undefined;
     onFileDrop((paths) => paths[0] && open.mutate(paths[0]), setOver).then((u) => (un = u));
     // Browser fallback: accept dropped text paths.

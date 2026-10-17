@@ -1,10 +1,11 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { Session } from "../api/types";
 import { useCurrentSession, useSessions, useSummary } from "../api/hooks";
 import {
   client,
   queryClient,
+  readonly,
   selectSession,
   setPalette,
   setTheme,
@@ -23,6 +24,7 @@ import {
   IconPanel,
   IconPlug,
   IconSearch,
+  IconShare,
   IconSun,
   IconTrash,
 } from "./icons";
@@ -54,6 +56,8 @@ function SessionPicker() {
   const current = useCurrentSession();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const version = useQuery({ queryKey: ["version"], queryFn: client.version, staleTime: Infinity });
+  const web = !!version.data?.web;
   useEffect(() => {
     if (!open) return;
     const h = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
@@ -108,23 +112,37 @@ function SessionPicker() {
                 <SessionBadge s={s} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
               </button>
-              <button
-                className="btn ghost icon"
-                aria-label={`Close ${s.name}`}
-                title="Close session"
-                onClick={() => close.mutate(s.id)}
-              >
-                <IconTrash />
-              </button>
+              {!readonly && (
+                <button
+                  className="btn ghost icon"
+                  aria-label={`Close ${s.name}`}
+                  title="Close session"
+                  onClick={() => close.mutate(s.id)}
+                >
+                  <IconTrash />
+                </button>
+              )}
             </div>
           ))}
-          <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-          <button className="menu-item" onClick={() => (setOpen(false), store.set({ dialog: "open" }))}>
-            <IconOpen width={15} /> Open file…
-          </button>
-          <button className="menu-item" onClick={() => (setOpen(false), store.set({ dialog: "attach" }))}>
-            <IconPlug width={15} /> Attach to JVM…
-          </button>
+          {!readonly && (
+            <>
+              <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+              <button className="menu-item" onClick={() => (setOpen(false), store.set({ dialog: "open" }))}>
+                <IconOpen width={15} /> Open file…
+              </button>
+              <button className="menu-item" onClick={() => (setOpen(false), store.set({ dialog: "attach" }))}>
+                <IconPlug width={15} /> Attach to JVM…
+              </button>
+              {web && current && (
+                <button
+                  className="menu-item"
+                  onClick={() => (setOpen(false), store.set({ dialog: "share" }))}
+                >
+                  <IconShare width={15} /> Share read-only link…
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -217,13 +235,21 @@ export function TopBar() {
     <header className="topbar">
       <div className="topbar-row">
         <SessionPicker />
-        <button className="btn ghost" onClick={() => store.set({ dialog: "open" })}>
-          <IconOpen /> Open
-        </button>
-        <button className="btn ghost" onClick={() => store.set({ dialog: "attach" })}>
-          <IconPlug /> Attach
-        </button>
-        {current && <LiveControls s={current} />}
+        {readonly ? (
+          <span className="badge info" title="Opened through a read-only share link">
+            Read-only link
+          </span>
+        ) : (
+          <>
+            <button className="btn ghost" onClick={() => store.set({ dialog: "open" })}>
+              <IconOpen /> Open
+            </button>
+            <button className="btn ghost" onClick={() => store.set({ dialog: "attach" })}>
+              <IconPlug /> Attach
+            </button>
+            {current && <LiveControls s={current} />}
+          </>
+        )}
         <span className="grow" />
         <button
           className="btn"

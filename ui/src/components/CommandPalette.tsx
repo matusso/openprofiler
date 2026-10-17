@@ -5,6 +5,7 @@ import {
   client,
   focusMethod,
   openCode,
+  readonly,
   selectSession,
   setPalette,
   setTheme,
@@ -93,19 +94,23 @@ export function CommandPalette() {
         hint: n.key,
         run: go(n.id),
       })),
-      {
-        id: "open",
-        group: "Actions",
-        label: "Open file…",
-        hint: "⌘O",
-        run: () => store.set({ dialog: "open" }),
-      },
-      {
-        id: "attach",
-        group: "Actions",
-        label: "Attach to local JVM…",
-        run: () => store.set({ dialog: "attach" }),
-      },
+      ...(readonly
+        ? []
+        : [
+            {
+              id: "open",
+              group: "Actions",
+              label: "Open file…",
+              hint: "⌘O",
+              run: () => store.set({ dialog: "open" }),
+            },
+            {
+              id: "attach",
+              group: "Actions",
+              label: "Attach to a JVM…",
+              run: () => store.set({ dialog: "attach" }),
+            },
+          ]),
       {
         id: "clear-range",
         group: "Actions",

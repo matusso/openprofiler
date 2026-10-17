@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { OpenProfilerLogo, IconOpen, IconPlug } from "../components/icons";
 import { recentPaths } from "../lib/tauri";
-import { client, queryClient, selectSession, store } from "../state";
+import { client, queryClient, readonly, selectSession, store } from "../state";
 import { useOpenFile } from "../components/Dialogs";
 import { OpenProfilerWordmark } from "../components/Brand";
 
@@ -15,6 +15,17 @@ export function Welcome() {
     },
   });
   const recent = recentPaths();
+  if (readonly)
+    return (
+      <div className="view-body">
+        <div className="welcome">
+          <h1>
+            <OpenProfilerWordmark />
+          </h1>
+          <div className="muted">The shared session is no longer available. Ask for a new link.</div>
+        </div>
+      </div>
+    );
   return (
     <div className="view-body">
       <div className="welcome">
@@ -49,7 +60,10 @@ export function Welcome() {
             <h3>
               <IconPlug width={14} /> Attach to a JVM
             </h3>
-            <div className="muted">Profile a running local JVM without restarting it.</div>
+            <div className="muted">
+              Profile a running JVM without restarting it: local, over SSH, in a Docker container or a
+              Kubernetes pod.
+            </div>
           </button>
         </div>
         {recent.length > 0 && (

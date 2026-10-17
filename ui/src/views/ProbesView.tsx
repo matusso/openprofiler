@@ -16,7 +16,7 @@ import { DataTable, PctBar } from "../components/DataTable";
 import { MethodLabel } from "../components/MethodLabel";
 import { TimeChart } from "../components/TimeChart";
 import { formatClock, formatCount, formatNanos, formatRelTime } from "../lib/format";
-import { client, store, useApp } from "../state";
+import { client, readonly, store, useApp } from "../state";
 import { CallTreePanel } from "./profile/panels";
 import { SearchBox, useTreeParams } from "./profile/shared";
 
@@ -700,7 +700,7 @@ export function ProbesView() {
           </span>
         )}
         <span className="grow" />
-        {live && (
+        {live && !readonly && (
           <button className="btn ghost" aria-pressed={panel} onClick={() => setPanel((p) => !p)}>
             Instrumentation…
           </button>
