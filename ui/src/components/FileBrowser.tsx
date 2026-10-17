@@ -91,7 +91,7 @@ export function FileBrowser({
             onKeyDown={(k) => k.key === "Enter" && (k.preventDefault(), enter(e))}
             title={e.path}
           >
-            {e.dir ? <IconOpen /> : <span className="fs-icon" />}
+            {e.dir ? <IconOpen className="fs-icon" /> : <span className="fs-icon" />}
             <span className="grow fs-name">{e.name}</span>
             {e.kind && <span className="badge">{KIND_LABEL[e.kind] ?? e.kind}</span>}
             {!e.dir && <span className="faint fs-size">{formatBytes(e.size)}</span>}
