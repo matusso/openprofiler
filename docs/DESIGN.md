@@ -230,10 +230,17 @@ compare and export. The UI subscribes per visible view and the daemon pushes inv
 
 ### 3.6 Snapshot format (`.opsnap`)
 
-See [spec/snapshot-format.md](spec/snapshot-format.md). A header, independently zstd-compressed
+See [spec/snapshot-format.md](spec/snapshot-format.md). A header, independently compressed
 sections (symbols, stacks, samples, threads, telemetry, monitors, bookmarks, thread dumps,
-embedded HPROF), an index with xxh3 checksums, and a trailer. The heap analysis index lives next to
-the file in `<file>.openprofiler-idx/`.
+embedded HPROF), an index with xxh3 checksums, and a trailer. Since format 1.1 the columnar event
+and telemetry tables (samples, thread states, telemetry, GC, monitors, probe calls, events and
+control events) are Arrow IPC files with zstd-compressed buffers, 64-byte aligned in the file, so
+pyarrow, Polars or DuckDB can read a section in place; strings are deduplicated string views.
+Symbols, stacks, threads and the rest stay protobuf. `openprofiler arrow` lists the Arrow sections
+with their offsets, or exports every table (plus threads, stacks, frames and probes to resolve
+ids) as standalone `.arrow` files with plain strings for readers without view support, such as
+DuckDB's `read_arrow`. 1.0 files are still read. The heap analysis index lives next to the file
+in `<file>.openprofiler-idx/`.
 
 ### 3.7 Heap analysis engine (`openprofiler-heap`)
 

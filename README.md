@@ -19,7 +19,7 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Probes** | SQL statements with bind parameters, HTTP requests in and out (Servlet containers, Netty, Reactor Netty and WebFlux, Vert.x and Quarkus), JPA, Kafka, gRPC, exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools, `CompletableFuture`s, Reactor schedulers and coroutines. Custom probes with one annotation. Tested against the real libraries in a version matrix. |
 | **Exact call counts** | Bytecode instrumentation of the packages you choose: invocation counts and times in the call tree, with auto-tuning of hot, trivial methods. |
 | **Telemetry** | Heap, GC, CPU, threads and classes over time, with a global time range that filters every view. |
-| **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG or collapsed stacks. |
+| **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG, collapsed stacks or Arrow tables for DuckDB/Polars. |
 | **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start, exit or when a method is called. |
 | **Remote and containers** | Attach over ssh, `docker exec` and `kubectl exec`, including ephemeral debug containers for distroless images. The agent port is never exposed. (Daemon API today; UI and CLI support planned.) |
 | **Automation** | A CLI, a CI regression gate (`--fail-if "cpu.total > +10%"`), and an MCP server so AI agents can profile and read results. |
@@ -201,6 +201,7 @@ comment and an `UnsupportedOperationException`.
 openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"   # exit 1 on regression
 openprofiler export app.opsnap --view flame --format svg -o flame.svg      # csv|json|html|svg|collapsed
 openprofiler convert recording.jfr -o recording.opsnap
+openprofiler arrow app.opsnap -o tables/     # Arrow IPC tables for DuckDB, Polars, pyarrow
 ```
 
 ### Use it from an AI agent (MCP)

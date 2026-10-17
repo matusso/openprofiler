@@ -2,14 +2,16 @@
 //!
 //! ```text
 //! [Header]  "OPRFSNAP" | u16 major | u16 minor | u32 flags | i64 created_ns | u32 len | JvmInfo(protobuf)
-//! [Section]* u32 kind | u64 len | u8 codec | payload
+//! [Section]* (zero padding) | u32 kind | u64 len | u8 codec | payload
 //! [Index]   protobuf Index (section table with offsets and xxh3 checksums)
 //! [Trailer] u64 index_offset | u64 index_len | "OPRFSEND"
 //! ```
 //!
 //! All integers are little-endian. Every section is compressed independently, so readers can
 //! load only the sections they need. The heap dump section uses independent zstd frames so it
-//! can be extracted (or randomly accessed) without decompressing everything.
+//! can be extracted (or randomly accessed) without decompressing everything. Since 1.1 the
+//! columnar event and telemetry tables are Arrow IPC files (codec 3, see [`arrow`]) that other
+//! tools can read in place.
 
 use anyhow::{Context, Result, bail, ensure};
 use openprofiler_model::*;
@@ -18,6 +20,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+pub mod arrow;
+
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/openprofiler.snapshot.v1.rs"));
 }
@@ -25,7 +29,7 @@ pub mod pb {
 pub const MAGIC: &[u8; 8] = b"OPRFSNAP";
 pub const END_MAGIC: &[u8; 8] = b"OPRFSEND";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 0;
+pub const MINOR: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -54,7 +58,12 @@ pub enum Codec {
     Zstd = 1,
     /// Independent zstd frames: `u32 raw_frame_size | u32 n | n × u64 compressed_len | frames`.
     ZstdFrames = 2,
+    /// An Arrow IPC file (with its own buffer compression), starting 64-byte aligned.
+    Arrow = 3,
 }
+
+/// Alignment of Arrow section payloads in the file, so they can be memory-mapped zero-copy.
+const ARROW_ALIGN: u64 = 64;
 
 const HEAP_FRAME: usize = 8 << 20;
 
@@ -69,6 +78,10 @@ pub struct SnapshotWriter {
 
 impl SnapshotWriter {
     pub fn create(path: &Path, jvm: &JvmInfo) -> Result<Self> {
+        Self::create_version(path, jvm, MINOR)
+    }
+
+    fn create_version(path: &Path, jvm: &JvmInfo, minor: u16) -> Result<Self> {
         let f = File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
         let mut w =
             Self { out: BufWriter::with_capacity(1 << 20, f), pos: 0, index: pb::Index::default(), level: 3 };
@@ -80,7 +93,7 @@ impl SnapshotWriter {
         let mut header = Vec::with_capacity(32 + jvm.len());
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&MAJOR.to_le_bytes());
-        header.extend_from_slice(&MINOR.to_le_bytes());
+        header.extend_from_slice(&minor.to_le_bytes());
         header.extend_from_slice(&0u32.to_le_bytes());
         header.extend_from_slice(&created.to_le_bytes());
         header.extend_from_slice(&(jvm.len() as u32).to_le_bytes());
@@ -99,6 +112,15 @@ impl SnapshotWriter {
     pub fn section(&mut self, kind: SectionKind, name: &str, payload: &[u8]) -> Result<()> {
         let stored = zstd::bulk::compress(payload, self.level)?;
         self.section_raw(kind, name, Codec::Zstd, &stored, payload.len() as u64)
+    }
+
+    /// Writes a table as an Arrow IPC section (codec 3).
+    pub fn arrow(&mut self, kind: SectionKind, name: &str, batch: &arrow_array::RecordBatch) -> Result<()> {
+        let stored = arrow::encode(batch)?;
+        // Readers find sections through the index, so padding between sections is allowed.
+        let pad = (ARROW_ALIGN - (self.pos + 13) % ARROW_ALIGN) % ARROW_ALIGN;
+        self.write_raw(&[0u8; ARROW_ALIGN as usize][..pad as usize])?;
+        self.section_raw(kind, name, Codec::Arrow, &stored, stored.len() as u64)
     }
 
     fn section_raw(
@@ -247,7 +269,9 @@ impl SnapshotReader {
         })
     }
 
-    fn stored(&self, e: &pb::SectionEntry) -> Result<&[u8]> {
+    /// The stored bytes of a section, after checking its checksum. For an Arrow section (codec 3)
+    /// this is a complete Arrow IPC file.
+    pub fn stored(&self, e: &pb::SectionEntry) -> Result<&[u8]> {
         let start = e.offset as usize + 13;
         let b = self.map.get(start..start + e.length as usize).context("section out of bounds")?;
         ensure!(xxhash_rust::xxh3::xxh3_64(b) == e.xxh3, "checksum mismatch in section {}", e.kind);
@@ -259,16 +283,27 @@ impl SnapshotReader {
         Ok(match e.codec {
             0 => b.to_vec(),
             1 => zstd::bulk::decompress(b, e.raw_length as usize)?,
-            c => bail!("section {} has codec {c}; use extract_heap", e.kind),
+            c => bail!("section {} has codec {c}; use stored or extract_heap", e.kind),
         })
+    }
+
+    /// The Arrow sections of `kind`.
+    fn arrows(&self, kind: SectionKind) -> impl Iterator<Item = &pb::SectionEntry> {
+        self.sections(kind).filter(|e| e.codec == Codec::Arrow as u32)
+    }
+
+    /// The Arrow section of `kind` named `name`.
+    fn arrow(&self, kind: SectionKind, name: &str) -> Result<Option<&[u8]>> {
+        self.arrows(kind).find(|e| e.name == name).map(|e| self.stored(e)).transpose()
     }
 
     fn sections(&self, kind: SectionKind) -> impl Iterator<Item = &pb::SectionEntry> {
         self.info.sections.iter().filter(move |s| s.kind == kind as u32)
     }
 
+    /// The first protobuf section of `kind`.
     fn one<M: Message + Default>(&self, kind: SectionKind) -> Result<Option<M>> {
-        match self.sections(kind).next() {
+        match self.sections(kind).find(|e| e.codec != Codec::Arrow as u32) {
             Some(e) => Ok(Some(M::decode(&*self.payload(e)?)?)),
             None => Ok(None),
         }
@@ -315,7 +350,11 @@ impl SnapshotReader {
             frame.extend(s.frame);
             p.stacks = StackTrie::from_raw(&parent, &frame);
         }
-        for e in self.sections(SectionKind::Samples) {
+        for e in self.arrows(SectionKind::Samples) {
+            let kind = SampleKind::parse(&e.name).context("unknown sample kind")?;
+            p.samples.insert(kind, arrow::read_samples(self.stored(e)?, &mut p.symbols)?);
+        }
+        for e in self.sections(SectionKind::Samples).filter(|e| e.codec != Codec::Arrow as u32) {
             let s = pb::Samples::decode(&*self.payload(e)?)?;
             let kind = SampleKind::from_u8(s.kind as u8).context("unknown sample kind")?;
             let n = s.time_delta.len();
@@ -351,6 +390,9 @@ impl SnapshotReader {
                 })
                 .collect();
         }
+        if let Some(b) = self.arrow(SectionKind::ThreadStates, "thread_states")? {
+            arrow::read_thread_states(b, &mut p.thread_states)?;
+        }
         if let Some(s) = self.one::<pb::ThreadStates>(SectionKind::ThreadStates)? {
             let mut t = 0i64;
             for i in 0..s.thread.len() {
@@ -363,6 +405,9 @@ impl SnapshotReader {
                 );
             }
         }
+        if let Some(b) = self.arrow(SectionKind::Telemetry, "telemetry")? {
+            p.telemetry = arrow::read_telemetry(b)?;
+        }
         if let Some(tel) = self.one::<pb::Telemetry>(SectionKind::Telemetry)? {
             for s in tel.series {
                 let mut ts = TelemetrySeries::new(&s.key, &s.label, unit_from(s.unit));
@@ -373,6 +418,9 @@ impl SnapshotReader {
                 }
                 p.telemetry.push(ts);
             }
+        }
+        if let Some(b) = self.arrow(SectionKind::Gc, "gc")? {
+            p.gc = arrow::read_gc(b)?;
         }
         if let Some(g) = self.one::<pb::Gc>(SectionKind::Gc)? {
             p.gc = g
@@ -388,6 +436,9 @@ impl SnapshotReader {
                     pause: g.pause,
                 })
                 .collect();
+        }
+        if let Some(b) = self.arrow(SectionKind::Monitors, "monitors")? {
+            p.monitors = arrow::read_monitors(b)?;
         }
         if let Some(m) = self.one::<pb::Monitors>(SectionKind::Monitors)? {
             p.monitors = m
@@ -468,6 +519,17 @@ impl SnapshotReader {
                     stack: c.stack,
                 })
                 .collect();
+        }
+        if let Some(b) = self.arrow(SectionKind::Probes, "probe_calls")? {
+            for c in arrow::read_probe_calls(b, &p.probes.probes, &mut p.symbols)? {
+                p.push_probe_call(c);
+            }
+        }
+        if let Some(b) = self.arrow(SectionKind::Probes, "probe_events")? {
+            p.probes.events = arrow::read_probe_events(b, &p.probes.probes, &mut p.symbols)?;
+        }
+        if let Some(b) = self.arrow(SectionKind::Probes, "probe_controls")? {
+            p.probes.controls = arrow::read_probe_controls(b, &p.probes.probes)?;
         }
         if let Some(b) = self.one::<pb::Bookmarks>(SectionKind::Bookmarks)? {
             p.bookmarks = b
@@ -623,6 +685,11 @@ fn deltas(v: impl Iterator<Item = i64>) -> Vec<i64> {
 
 /// Writes every part of `p` as sections (no heap dump).
 pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()> {
+    write_sections(w, p, true)
+}
+
+/// Writes the sections of `p`, the columnar tables as Arrow (1.1) or as protobuf (1.0).
+fn write_sections(w: &mut SnapshotWriter, p: &Profile, use_arrow: bool) -> Result<()> {
     w.message(
         SectionKind::Meta,
         "meta",
@@ -658,6 +725,10 @@ pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()>
     )?;
     for (kind, s) in &p.samples {
         if *kind == SampleKind::Probe {
+            continue;
+        }
+        if use_arrow {
+            w.arrow(SectionKind::Samples, kind.name(), &arrow::samples(p, *kind, s)?)?;
             continue;
         }
         let all_one = s.count.iter().all(|&c| c == 1);
@@ -697,6 +768,81 @@ pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()>
                 .collect(),
         },
     )?;
+    let ts = &p.thread_states;
+    if use_arrow {
+        if !ts.is_empty() {
+            w.arrow(SectionKind::ThreadStates, "thread_states", &arrow::thread_states(p)?)?;
+        }
+        w.arrow(SectionKind::Telemetry, "telemetry", &arrow::telemetry(p)?)?;
+        w.arrow(SectionKind::Gc, "gc", &arrow::gc(p)?)?;
+        w.arrow(SectionKind::Monitors, "monitors", &arrow::monitors(p)?)?;
+    } else {
+        write_protobuf_events(w, p)?;
+    }
+    if !p.probes.probes.is_empty() {
+        let pr = &p.probes;
+        let probes = pr
+            .probes
+            .iter()
+            .map(|i| pb::ProbeInfo {
+                id: i.id.clone(),
+                name: i.name.clone(),
+                payload_label: i.payload_label.clone(),
+                control_label: i.control_label.clone(),
+            })
+            .collect();
+        if use_arrow {
+            w.message(SectionKind::Probes, "probes", &pb::Probes { probes, ..Default::default() })?;
+            w.arrow(SectionKind::Probes, "probe_calls", &arrow::probe_calls(p)?)?;
+            w.arrow(SectionKind::Probes, "probe_events", &arrow::probe_events(p)?)?;
+            w.arrow(SectionKind::Probes, "probe_controls", &arrow::probe_controls(p)?)?;
+        } else {
+            write_protobuf_probes(w, p, probes)?;
+        }
+    }
+    w.message(
+        SectionKind::Bookmarks,
+        "bookmarks",
+        &pb::Bookmarks {
+            bookmarks: p
+                .bookmarks
+                .iter()
+                .map(|b| pb::Bookmark { time: b.time, label: b.label.clone(), color: b.color.clone() })
+                .collect(),
+        },
+    )?;
+    w.message(
+        SectionKind::ThreadDumps,
+        "thread_dumps",
+        &pb::ThreadDumps {
+            dumps: p
+                .thread_dumps
+                .iter()
+                .map(|d| pb::ThreadDump {
+                    time: d.time,
+                    label: d.label.clone(),
+                    threads: d
+                        .threads
+                        .iter()
+                        .map(|t| pb::DumpedThread {
+                            name: t.name.clone(),
+                            java_id: t.java_id,
+                            state: t.state.clone(),
+                            is_virtual: t.is_virtual,
+                            frames: t.frames.clone(),
+                            locked: t.locked.clone(),
+                            waiting_on: t.waiting_on.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Thread states, telemetry, GC and monitor events as 1.0 protobuf sections.
+fn write_protobuf_events(w: &mut SnapshotWriter, p: &Profile) -> Result<()> {
     let ts = &p.thread_states;
     if !ts.is_empty() {
         w.message(
@@ -770,107 +916,62 @@ pub fn write_profile_sections(w: &mut SnapshotWriter, p: &Profile) -> Result<()>
                 .collect(),
         },
     )?;
-    if !p.probes.probes.is_empty() {
-        let pr = &p.probes;
-        w.message(
-            SectionKind::Probes,
-            "probes",
-            &pb::Probes {
-                probes: pr
-                    .probes
-                    .iter()
-                    .map(|i| pb::ProbeInfo {
-                        id: i.id.clone(),
-                        name: i.name.clone(),
-                        payload_label: i.payload_label.clone(),
-                        control_label: i.control_label.clone(),
-                    })
-                    .collect(),
-                calls: Some(pb::ProbeCalls {
-                    time_delta: deltas(pr.calls.iter().map(|c| c.time)),
-                    probe: pr.calls.iter().map(|c| c.probe).collect(),
-                    payload: pr.calls.iter().map(|c| c.payload).collect(),
-                    thread: pr.calls.iter().map(|c| c.thread).collect(),
-                    stack: pr.calls.iter().map(|c| c.stack).collect(),
-                    count: pr.calls.iter().map(|c| c.count).collect(),
-                    duration: pr.calls.iter().map(|c| c.duration).collect(),
-                    max: pr.calls.iter().map(|c| c.max).collect(),
-                    errors: pr.calls.iter().map(|c| c.errors).collect(),
-                }),
-                events: pr
-                    .events
-                    .iter()
-                    .map(|e| pb::ProbeEvent {
-                        start: e.start,
-                        duration: e.duration,
-                        probe: e.probe,
-                        payload: e.payload,
-                        thread: e.thread,
-                        stack: e.stack,
-                        error: e.error.clone(),
-                        control: e.control,
-                        detail: e.detail.clone(),
-                        context: e.context.clone(),
-                    })
-                    .collect(),
-                controls: pr
-                    .controls
-                    .iter()
-                    .map(|c| pb::ControlEvent {
-                        time: c.time,
-                        probe: c.probe,
-                        id: c.id,
-                        kind: match c.kind {
-                            ControlEventKind::Open => 0,
-                            ControlEventKind::Close => 1,
-                        },
-                        description: c.description.clone(),
-                        thread: c.thread,
-                        stack: c.stack,
-                    })
-                    .collect(),
-            },
-        )?;
-    }
+    Ok(())
+}
+
+/// Probe calls, events and control events as one 1.0 protobuf section.
+fn write_protobuf_probes(w: &mut SnapshotWriter, p: &Profile, probes: Vec<pb::ProbeInfo>) -> Result<()> {
+    let pr = &p.probes;
     w.message(
-        SectionKind::Bookmarks,
-        "bookmarks",
-        &pb::Bookmarks {
-            bookmarks: p
-                .bookmarks
+        SectionKind::Probes,
+        "probes",
+        &pb::Probes {
+            probes,
+            calls: Some(pb::ProbeCalls {
+                time_delta: deltas(pr.calls.iter().map(|c| c.time)),
+                probe: pr.calls.iter().map(|c| c.probe).collect(),
+                payload: pr.calls.iter().map(|c| c.payload).collect(),
+                thread: pr.calls.iter().map(|c| c.thread).collect(),
+                stack: pr.calls.iter().map(|c| c.stack).collect(),
+                count: pr.calls.iter().map(|c| c.count).collect(),
+                duration: pr.calls.iter().map(|c| c.duration).collect(),
+                max: pr.calls.iter().map(|c| c.max).collect(),
+                errors: pr.calls.iter().map(|c| c.errors).collect(),
+            }),
+            events: pr
+                .events
                 .iter()
-                .map(|b| pb::Bookmark { time: b.time, label: b.label.clone(), color: b.color.clone() })
+                .map(|e| pb::ProbeEvent {
+                    start: e.start,
+                    duration: e.duration,
+                    probe: e.probe,
+                    payload: e.payload,
+                    thread: e.thread,
+                    stack: e.stack,
+                    error: e.error.clone(),
+                    control: e.control,
+                    detail: e.detail.clone(),
+                    context: e.context.clone(),
+                })
                 .collect(),
-        },
-    )?;
-    w.message(
-        SectionKind::ThreadDumps,
-        "thread_dumps",
-        &pb::ThreadDumps {
-            dumps: p
-                .thread_dumps
+            controls: pr
+                .controls
                 .iter()
-                .map(|d| pb::ThreadDump {
-                    time: d.time,
-                    label: d.label.clone(),
-                    threads: d
-                        .threads
-                        .iter()
-                        .map(|t| pb::DumpedThread {
-                            name: t.name.clone(),
-                            java_id: t.java_id,
-                            state: t.state.clone(),
-                            is_virtual: t.is_virtual,
-                            frames: t.frames.clone(),
-                            locked: t.locked.clone(),
-                            waiting_on: t.waiting_on.clone(),
-                        })
-                        .collect(),
+                .map(|c| pb::ControlEvent {
+                    time: c.time,
+                    probe: c.probe,
+                    id: c.id,
+                    kind: match c.kind {
+                        ControlEventKind::Open => 0,
+                        ControlEventKind::Close => 1,
+                    },
+                    description: c.description.clone(),
+                    thread: c.thread,
+                    stack: c.stack,
                 })
                 .collect(),
         },
-    )?;
-    Ok(())
+    )
 }
 
 /// Writes a complete snapshot of `p`, optionally embedding an HPROF heap dump.
@@ -878,6 +979,19 @@ pub fn write_snapshot(path: &Path, p: &Profile, heap: Option<&Path>) -> Result<(
     let tmp = path.with_extension("openprofiler.partial");
     let mut w = SnapshotWriter::create(&tmp, &p.meta.jvm)?;
     write_profile_sections(&mut w, p)?;
+    if let Some(h) = heap {
+        w.heap_dump(h)?;
+    }
+    w.finish()?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Writes a 1.0 snapshot (protobuf only), readable by openprofiler 0.4 and older.
+pub fn write_snapshot_v1_0(path: &Path, p: &Profile, heap: Option<&Path>) -> Result<()> {
+    let tmp = path.with_extension("openprofiler.partial");
+    let mut w = SnapshotWriter::create_version(&tmp, &p.meta.jvm, 0)?;
+    write_sections(&mut w, p, false)?;
     if let Some(h) = heap {
         w.heap_dump(h)?;
     }
@@ -1023,6 +1137,124 @@ mod tests {
         let out = dir.path().join("out.hprof");
         assert!(SnapshotReader::open(&path).unwrap().extract_heap(&out).unwrap());
         assert_eq!(std::fs::read(&out).unwrap(), heap_bytes);
+    }
+
+    fn assert_same(q: &Profile, p: &Profile) {
+        assert_eq!(q.meta, p.meta);
+        assert_eq!(q.symbols.strings(), p.symbols.strings());
+        assert_eq!(q.stacks.raw(), p.stacks.raw());
+        for (k, a) in &p.samples {
+            let b = &q.samples[k];
+            assert_eq!(
+                (&a.time, &a.thread, &a.state, &a.stack),
+                (&b.time, &b.thread, &b.state, &b.stack),
+                "{k:?}"
+            );
+            assert_eq!((&a.weight, &a.count, &a.class), (&b.weight, &b.count, &b.class), "{k:?}");
+        }
+        assert_eq!(q.samples.len(), p.samples.len());
+        assert_eq!(q.threads, p.threads);
+        assert_eq!(
+            (&q.thread_states.thread, &q.thread_states.start, &q.thread_states.end, &q.thread_states.state),
+            (&p.thread_states.thread, &p.thread_states.start, &p.thread_states.end, &p.thread_states.state)
+        );
+        assert_eq!(q.telemetry, p.telemetry);
+        assert_eq!(q.gc, p.gc);
+        assert_eq!(q.monitors, p.monitors);
+        assert_eq!(q.bookmarks, p.bookmarks);
+        assert_eq!(q.thread_dumps, p.thread_dumps);
+        assert_eq!(q.probes.probes, p.probes.probes);
+        assert_eq!(q.probes.calls, p.probes.calls);
+        assert_eq!(q.probes.events, p.probes.events);
+        assert_eq!(q.probes.controls, p.probes.controls);
+    }
+
+    /// `tests/fixtures/v1_0.opsnap` was written by the 1.0 writer (openprofiler 0.4).
+    #[test]
+    fn reads_1_0_fixture() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1_0.opsnap");
+        let r = SnapshotReader::open(&path).unwrap();
+        assert_eq!((r.info.major, r.info.minor), (1, 0));
+        assert_same(&r.read_profile().unwrap(), &sample_profile());
+    }
+
+    #[test]
+    fn writes_1_0() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.opsnap");
+        write_snapshot_v1_0(&path, &sample_profile(), None).unwrap();
+        let r = SnapshotReader::open(&path).unwrap();
+        assert_eq!(r.info.minor, 0);
+        assert!(r.info.sections.iter().all(|e| e.codec != Codec::Arrow as u32));
+        assert_same(&r.read_profile().unwrap(), &sample_profile());
+    }
+
+    #[test]
+    fn arrow_sections_are_aligned_standalone_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.opsnap");
+        let mut p = sample_profile();
+        p.telemetry_mut("cpu.process", "Process CPU", Unit::Percent);
+        write_snapshot(&path, &p, None).unwrap();
+        let r = SnapshotReader::open(&path).unwrap();
+        assert_eq!(r.info.minor, MINOR);
+        let names: Vec<_> = r
+            .info
+            .sections
+            .iter()
+            .filter(|e| e.codec == Codec::Arrow as u32)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "cpu",
+                "alloc",
+                "thread_states",
+                "telemetry",
+                "gc",
+                "monitors",
+                "probe_calls",
+                "probe_events",
+                "probe_controls"
+            ]
+        );
+        for e in r.info.sections.iter().filter(|e| e.codec == Codec::Arrow as u32) {
+            assert_eq!((e.offset + 13) % ARROW_ALIGN, 0, "{}", e.name);
+            let b = r.stored(e).unwrap();
+            assert!(b.starts_with(b"ARROW1") && b.ends_with(b"ARROW1"));
+            let (md, _) = arrow::decode(b).unwrap();
+            assert!(md["openprofiler.table"].len() > 1);
+        }
+        let q = r.read_profile().unwrap();
+        // A series without points survives through the dictionaries.
+        assert_eq!(q.telemetry[1].key, "cpu.process");
+        assert_same(&q, &p);
+    }
+
+    #[test]
+    fn arrow_many_batches_and_empty_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.opsnap");
+        let mut p = sample_profile();
+        let cls = p.symbols.intern_str("int[]");
+        let s = p.samples_mut(SampleKind::Wall);
+        for i in 0..(super::arrow::tests_batch_rows() * 2 + 17) {
+            s.push(
+                i as i64,
+                0,
+                ThreadState::from_u8((i % 8) as u8),
+                1,
+                i as u64,
+                1,
+                (i % 3 == 0).then_some(cls),
+            );
+        }
+        write_snapshot(&path, &p, None).unwrap();
+        assert_same(&read_snapshot(&path).unwrap().0, &p);
+        let empty = Profile::new("x");
+        write_snapshot(&path, &empty, None).unwrap();
+        assert_same(&read_snapshot(&path).unwrap().0, &empty);
     }
 
     #[test]

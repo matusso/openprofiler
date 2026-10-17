@@ -75,6 +75,18 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Write the event and telemetry tables of a profile as Arrow IPC files (one `.arrow` file
+    /// per table, plain UTF-8 strings) for DuckDB, Polars or pyarrow, plus `threads`, `stacks`,
+    /// `frames` and `probes` tables to resolve their ids.
+    Arrow {
+        file: PathBuf,
+        #[arg(short, long, required_unless_present = "list")]
+        output: Option<PathBuf>,
+        /// List the Arrow sections of an .opsnap file with their payload offsets and lengths
+        /// instead (each is a complete Arrow IPC file that can be read in place).
+        #[arg(long)]
+        list: bool,
+    },
     /// Compare two profiles; optionally fail (exit 1) when a regression gate trips.
     Compare {
         base: PathBuf,
@@ -430,6 +442,42 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
                     use std::io::Write;
                     std::io::stdout().write_all(&out.body)?;
                 }
+            }
+            Ok(())
+        }
+        Cmd::Arrow { file, output, list } => {
+            if list {
+                let r = openprofiler_snapshot::SnapshotReader::open(&file)?;
+                println!("{:<16} {:>12} {:>12}  table", "section", "offset", "length");
+                for e in
+                    r.info.sections.iter().filter(|e| e.codec == openprofiler_snapshot::Codec::Arrow as u32)
+                {
+                    println!("{:<16} {:>12} {:>12}  {}", e.kind, e.offset + 13, e.length, e.name);
+                }
+                return Ok(());
+            }
+            let dir = output.context("--output is required")?;
+            let s = engine.open_blocking(&file)?;
+            let p = s.profile().context("not a profile")?;
+            let p = p.read();
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            let mut tables: Vec<(String, _)> = openprofiler_snapshot::arrow::section_tables(&p)?
+                .into_iter()
+                .map(|t| {
+                    let name = match t.kind {
+                        openprofiler_snapshot::SectionKind::Samples => format!("samples_{}", t.name),
+                        _ => t.name,
+                    };
+                    (name, t.batch)
+                })
+                .collect();
+            tables.extend(openprofiler_snapshot::arrow::dimension_tables(&p)?);
+            for (name, batch) in tables {
+                let path = dir.join(format!("{name}.arrow"));
+                let batch = openprofiler_snapshot::arrow::portable(&batch)?;
+                std::fs::write(&path, openprofiler_snapshot::arrow::encode(&batch)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                println!("{:>10} rows  {}", batch.num_rows(), path.display());
             }
             Ok(())
         }

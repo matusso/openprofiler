@@ -47,6 +47,10 @@ sha2 = "0.10"
 hex = "0.4"
 rand = "0.9"
 parking_lot = "0.12"
+# Arrow 58 is the newest line whose MSRV (1.85) matches the workspace.
+arrow-array = { version = "58", default-features = false }
+arrow-schema = { version = "58", default-features = false }
+arrow-ipc = { version = "58", default-features = false, features = ["zstd"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
