@@ -136,8 +136,8 @@ fn rewritten_corpus_verifies_and_behaves_identically() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{jar}: javac: {}", String::from_utf8_lossy(&out.stderr));
-        let cp = format!("{}:{}", classes.display(), harness.display());
-        let run = Command::new("java").args(["-Xshare:off", "-cp", &cp, "Check"]).output().unwrap();
+        let cp = std::env::join_paths([&classes, &harness]).unwrap();
+        let run = Command::new("java").arg("-Xshare:off").arg("-cp").arg(&cp).arg("Check").output().unwrap();
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert_eq!(
             String::from_utf8_lossy(&run.stdout),
