@@ -66,25 +66,34 @@ jobs:
           if-no-files-found: error
 
   bundle:
-    name: Remote bundle (${{ matrix.arch }})
+    name: Remote bundle (x86_64, aarch64, armhf)
     needs: check
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            os: ubuntu-24.04
-          - arch: aarch64
-            os: ubuntu-24.04-arm
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      # Static musl relay + musl and glibc (Debian bookworm) agents for this architecture.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,
+            x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,armv7-unknown-linux-gnueabihf
+      # The agent embeds its Java boot classes, compiled at build time.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: pip3 install --user --break-system-packages ziglang==0.14.1
+      # Static musl relays + musl and glibc (2.17+) agents, cross-compiled with cargo-zigbuild.
       - run: scripts/build-bundle.sh
+      - uses: docker/setup-qemu-action@v3
+      - run: scripts/smoke-bundle.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ matrix.arch }}
+          name: bundle-linux
           path: dist/bundle/
           if-no-files-found: error
 

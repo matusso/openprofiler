@@ -1,0 +1,8 @@
+# A JVM host reachable over SSH (key auth only) for scripts/e2e-remote.sh.
+FROM eclipse-temurin:21-jdk
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server \
+ && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd /root/.ssh \
+ && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+COPY Busy.java /app/Busy.java
+RUN javac -d /app /app/Busy.java
+CMD ["sh", "-c", "cd /app && (java -cp /app Busy &) && exec /usr/sbin/sshd -D -e"]

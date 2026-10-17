@@ -581,7 +581,11 @@ fn arm(tid: i32) {
         if libc::timer_create(clock, &mut sev, &mut timer) != 0 {
             return;
         }
-        let ts = libc::timespec { tv_sec: interval / 1_000_000_000, tv_nsec: interval % 1_000_000_000 };
+        // The fields are 32-bit on armhf.
+        let ts = libc::timespec {
+            tv_sec: (interval / 1_000_000_000) as _,
+            tv_nsec: (interval % 1_000_000_000) as _,
+        };
         let spec = libc::itimerspec { it_interval: ts, it_value: ts };
         if libc::timer_settime(timer, 0, &spec, std::ptr::null_mut()) != 0 {
             libc::timer_delete(timer);
