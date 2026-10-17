@@ -262,9 +262,19 @@ across all indexes, on disk and mmap'd.
   NSpid translation, `/proc/<pid>/root`, and copying the agent into the target's mount namespace.
 - **`openprofiler-relay`** (static musl, about 1 MB) runs on the remote host or in the container:
   `relay <port>` (stdio ↔ TCP with a READY handshake), `list`, `attach`, `dump`, `pty-exec`.
-- **Transports:** ssh, `docker exec -i`, `kubectl exec -i`, and ephemeral debug containers
-  (`kubectl debug --target`) for distroless images. The relay and agent bundle are uploaded through
-  stdin with sha256 verification, so no port is ever exposed.
+- **Transports:** ssh (with jump hosts), `docker exec -i`, `kubectl exec -i`, and ephemeral debug
+  containers (`kubectl debug --target --profile=general`, reused while running) for distroless
+  images. The relay and agent bundle are uploaded through stdin with sha256 verification, so no
+  port is ever exposed. The agent build (musl or glibc) follows the JVM's dynamic loader under
+  `/proc/<pid>/root`, not the shell's. Running as root next to a non-root JVM, the relay takes the
+  JVM's uid/gid for the attach handshake. Attaching again reuses an agent that is already loaded.
+- **Clients:** the UI's Attach dialog (Local, SSH, Docker, Kubernetes tabs), CLI flags (`--ssh`,
+  `--docker`, `--kube`, `--debug-container`) on `list`, `attach`, `record` and `dump`, and the MCP
+  `list_jvms`/`attach` tools take the same target chain.
+- **Bundle:** `scripts/build-bundle.sh` cross-builds the static relay and the musl and glibc
+  (2.17+) agents for x86_64, aarch64 and armv7 with cargo-zigbuild; CI runs them under QEMU
+  (`scripts/smoke-bundle.sh`) and attaches over ssh, docker and to a distroless pod in kind
+  (`scripts/e2e-remote.sh`).
 
 ### 3.10 UI
 
@@ -290,7 +300,8 @@ across all indexes, on disk and mmap'd.
   bridge.
 - Flame graphs with search, zoom and differential colouring; a sunburst of the dominator tree; a
   reference graph; an Insights panel with severity and estimated waste.
-- Web mode: `openprofiler daemon --web` serves the same UI with token auth.
+- Web mode: `openprofiler daemon --web` serves the same UI with token auth. Read-only share links
+  carry a token scoped to reads of one session.
 
 ### 3.11 MCP and automation
 
@@ -425,7 +436,7 @@ same calls.
 | 1 Offline analyzer | HPROF/heap engine, JFR import, Query API, UI, CLI, MCP | Done |
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
 | 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU overhead open (#38) |
-| 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, web mode, CI gate | Mostly done |
+| 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, remote attach in UI/CLI/MCP, x86_64/aarch64/armhf bundle, web mode, read-only share links, CI gate | Done |
 | 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
@@ -451,7 +462,8 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
   A Quarkus request costs about 0.1 ms of CPU, so the probes' fixed cost per request (HTTP,
   connection checkout, JPA, SQL, worker hand-off) shows: about 23 µs.
 - Phase 4: attach to a JVM in a distroless pod on a remote cluster in three clicks or fewer, without
-  exposing ports.
+  exposing ports. *(met: Attach → Kubernetes → double-click the pod; `scripts/e2e-remote.sh`
+  attaches to a non-root distroless pod in kind through a debug container.)*
 
 ## 5. Risks and mitigations
 

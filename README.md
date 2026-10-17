@@ -77,9 +77,45 @@ openprofiler record --pid <pid> --triggers triggers.json -o app.opsnap  # dumps 
 openprofiler dump <pid> -o heap.hprof                 # heap dump only
 ```
 
-In the UI, use **Attach** to pick a local JVM. Remote attach over ssh, Docker and Kubernetes is
-available through the daemon's Query API (`POST /sessions/attach` with `options.remote`, built
-with `scripts/build-bundle.sh`); UI and CLI support for it is still planned.
+In the UI, use **Attach** to pick a local JVM.
+
+### Profile a JVM on another machine, in a container or in Kubernetes
+
+The same commands take a remote target. Without a pid they pick the only JVM there.
+
+```sh
+openprofiler list --ssh me@build-01                         # JVMs on an ssh host
+openprofiler attach --ssh bastion --ssh me@app-01:2222      # through a jump host
+openprofiler attach --docker shop-api                       # docker exec into a container
+openprofiler attach --ssh me@host --docker shop-api         # a container on an ssh host
+openprofiler record --kube prod/shop-api-0 -o shop.opsnap   # [namespace/]pod[/container]
+openprofiler attach --kube prod/shop-api-0 --context prod-eu --debug-container   # distroless pod
+openprofiler dump --kube prod/shop-api-0 -o heap.hprof
+```
+
+No port is opened on the target. OpenProfiler runs `ssh`, `docker exec -i` and `kubectl exec -i`
+with your own credentials and configuration. It uploads a small static helper
+(`openprofiler-relay`) and the agent through stdin, checks their SHA-256, and tunnels the agent
+link through the helper's stdio. Distroless and other shell-less images are reached with
+`--debug-container`. It adds an ephemeral debug container (`busybox:1.37` by default, or
+`--debug-container <image>`) that shares the pod's process namespace and has `CAP_SYS_PTRACE`
+(`kubectl debug --profile=general`). Later attaches reuse it, since Kubernetes can't remove
+ephemeral containers. Pods under the `restricted` Pod Security level reject such a container.
+
+The relay and agents come from the bundle directory: `bundle/` next to the `openprofiler` binary
+in release archives, `$OPENPROFILER_BUNDLE_DIR`, `--bundle-dir`, or `dist/bundle` built by
+`scripts/build-bundle.sh` (Linux x86_64, aarch64 and armv7, musl and glibc).
+
+In the UI, **Attach** has Local, SSH, Docker and Kubernetes tabs. On the Kubernetes tab,
+double-clicking a pod attaches to its JVM, so a pod on a remote cluster is three clicks away. The
+debug container is preselected for distroless and Chainguard images.
+
+### Share a session read-only
+
+In web mode (`openprofiler daemon --web`), **Share read-only link…** in the session menu creates a
+link that opens just that session, optionally expiring after an hour, a day or a week. The
+holder can browse every view and export, but can't attach, record, dump, open files, use MBeans
+or see other sessions. Links are revoked from the same dialog or when the daemon stops.
 
 ### Start a JVM with the agent
 
@@ -229,7 +265,8 @@ cargo build --release                 # all crates, incl. target/release/libopen
 java/build.sh                         # openprofiler-boot.jar / openprofiler-api.jar (optional; the agent embeds the boot classes)
 (cd ui && npm ci && npm run build)    # web UI → ui/dist
 (cd ui && npm run tauri build)        # desktop app (embeds the daemon)
-scripts/build-bundle.sh               # Linux relay + agents for remote attach → dist/bundle
+scripts/build-bundle.sh               # Linux relay + agents (x86_64, aarch64, armv7) → dist/bundle; needs cargo-zigbuild
+scripts/build-bundle.sh --docker      # the same in a builder container (e.g. on macOS)
 ```
 
 **Tests**
@@ -239,6 +276,8 @@ cargo test --workspace                                                   # incl.
 MAT_HOME=/path/to/mat cargo test -p openprofiler-heap --test mat_parity  # retained sizes vs Eclipse MAT (Docker)
 java/matrix/run.sh                    # probes against real libraries and versions (Docker, JDK 17+)
 java/bench/run.sh                     # agent overhead on Spring Petclinic and Quarkus (java/bench/linux.sh: on Linux)
+scripts/smoke-bundle.sh               # run the bundle's relays and agents under emulation (Docker)
+scripts/e2e-remote.sh                 # attach over ssh, docker exec and to a distroless pod in kind
 (cd ui && npm run lint && npm run typecheck && npm test)
 ```
 

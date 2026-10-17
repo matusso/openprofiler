@@ -32,6 +32,8 @@ Conventions:
 | `GET /api/v1/jvms` | | `LocalJvm[]` |
 | `GET /api/v1/sessions/{id}/summary` | | `Summary` |
 | `POST /api/v1/fs/list` | `{ "path"?: string, "hidden"?: boolean }` | `FsListing` |
+| `POST /api/v1/remote/discover` | `{ "target"?: RemoteTarget, "what": "jvms" \| "containers" \| "pods" \| "contexts", "context"?: string, "namespace"?: string, "options"?: AttachOptions }` | `LocalJvm[]` \| `RemoteContainer[]` \| `RemotePod[]` \| `string[]` |
+| `GET /api/v1/version` | | `{ version, api: 1, web: boolean, readonly: boolean }` |
 
 `fs/list` lists a directory on the daemon's machine for the Open dialog (the home directory when
 `path` is omitted; a file path lists its directory). Entries are directories first, then files;
@@ -43,6 +45,59 @@ type FsEntry = { name: string; path: string; dir: boolean; size: number; modifie
 type FsListing = { path: string; parent?: string; home?: string; entries: FsEntry[];
                    truncated: boolean };
 ```
+
+### Remote targets
+
+`AttachOptions.remote` (attach) and `target` (discovery) name where the JVM runs: a chain of hops,
+each run through the previous one, ending where the JVM is. Nothing listens on the remote side:
+the daemon uploads `openprofiler-relay` and the agent through the exec channel's stdin (verified
+by SHA-256) and tunnels the agent link through the relay's stdio. The agent build is chosen by the
+JVM's C library (musl or glibc, read from its root filesystem).
+
+```ts
+type RemoteHop =
+  | { type: "ssh"; host: string; user?: string; port?: number; jump?: string[];
+      identity?: string; extra_args?: string[] }
+  | { type: "docker"; container: string; user?: string }
+  | { type: "kubectl"; context?: string; namespace?: string; pod: string; container?: string;
+      // Run in an ephemeral debug container with this image (`kubectl debug --target
+      // --profile=general`) for distroless images; a running one is reused.
+      debug_image?: string };
+interface RemoteTarget { hops: RemoteHop[] }   // [] = this machine
+interface AttachOptions {
+  tls?: boolean; interval?: string; agent_options?: string; agent_path?: string;
+  connect?: { addr: string; token: string; fingerprint?: string };
+  remote?: RemoteTarget;
+  bundle_dir?: string;          // default $OPENPROFILER_BUNDLE_DIR, <exe dir>/bundle, dist/bundle
+}
+interface RemoteContainer { id: string; name: string; image: string; status: string }
+interface RemotePod { namespace: string; name: string; phase: string; containers: string[];
+                      images: string[]; node?: string }
+```
+
+`what: "containers"` runs `docker ps` and `"contexts"`/`"pods"` run kubectl on the target (which
+may be an ssh host); `"jvms"` uploads the relay and lists JVMs at the end of the chain.
+
+### Read-only share links
+
+| Method & path | Body | Result |
+|---|---|---|
+| `POST /api/v1/sessions/{id}/share` | `{ "ttl_secs"?: number }` | `{ share: Share, path: string, web: boolean }` |
+| `GET /api/v1/shares` | | `Share[]` |
+| `DELETE /api/v1/shares/{token}` | | `{ revoked: boolean }` |
+
+```ts
+interface Share { token: string; session: string; created: number; expires?: number } // epoch ms
+```
+
+A share token works wherever the API token does, but only for reads of its session: `GET
+/sessions` lists just that session, the events WebSocket only carries its events, and the session's
+views (`summary`, `tree`, `hotspots`, `flame`, `callgraph`, `histogram`, `telemetry`, threads,
+monitors, probes, events, insights, `export`, `heap/*` except `histogram-diff`, `code/*`) answer.
+Everything else is `403`: attach, open, discovery, file browsing, compare, closing, recording
+control, dumps, snapshots, bookmarks, GC, triggers, MBeans, instrumentation and managing shares.
+In web mode `path` (`/?token=…`) opens the UI read-only on that session. Shares live in memory: a
+daemon restart revokes them.
 
 ```ts
 type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
