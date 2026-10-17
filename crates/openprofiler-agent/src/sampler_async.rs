@@ -38,6 +38,7 @@ const TIMER_MAGIC: usize = 0x454d_4252;
 /// such as a JIT compiler thread.
 const NO_JAVA_FRAMES: i32 = -100;
 /// Upper bound for the distance between SP and a frame pointer worth following.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const MAX_FRAME_SPAN: usize = 8 << 20;
 
 struct Slot {
@@ -316,6 +317,7 @@ unsafe fn recover(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTrace, uc: *
 }
 
 /// Reads a word that may not be mapped, without faulting (`process_vm_readv` on ourselves).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn safe_read(addr: usize) -> Option<usize> {
     let mut v = 0usize;
     let local = libc::iovec { iov_base: &mut v as *mut usize as *mut c_void, iov_len: size_of::<usize>() };
@@ -327,6 +329,7 @@ fn safe_read(addr: usize) -> Option<usize> {
 
 /// The frame record `(saved fp, return address)` at `fp`, if `fp` plausibly points into the
 /// stack above `sp`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn frame_record(sp: usize, fp: usize) -> Option<(usize, usize)> {
     if fp <= sp || fp - sp > MAX_FRAME_SPAN || !fp.is_multiple_of(size_of::<usize>()) {
         return None;
