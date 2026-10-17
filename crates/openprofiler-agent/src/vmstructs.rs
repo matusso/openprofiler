@@ -10,10 +10,29 @@ use std::ffi::{CStr, c_char, c_void};
 
 /// Reads the value of an exported libjvm variable of type `T`.
 fn var<T: Copy>(name: &CStr) -> Option<T> {
+    let p = symbol(name)?;
+    // SAFETY: the symbol is a variable of type `T` in libjvm.
+    Some(unsafe { *(p as *const T) })
+}
+
+#[cfg(unix)]
+fn symbol(name: &CStr) -> Option<*const c_void> {
     // SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name.
     let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-    // SAFETY: the symbol is a variable of type `T` in libjvm.
-    (!p.is_null()).then(|| unsafe { *(p as *const T) })
+    (!p.is_null()).then_some(p as *const c_void)
+}
+
+#[cfg(windows)]
+fn symbol(name: &CStr) -> Option<*const c_void> {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    // SAFETY: looks up an export of the already loaded jvm.dll; both names are NUL-terminated.
+    unsafe {
+        let jvm = GetModuleHandleA(c"jvm.dll".as_ptr() as _);
+        if jvm.is_null() {
+            return None;
+        }
+        GetProcAddress(jvm, name.as_ptr() as _).map(|f| f as *const c_void)
+    }
 }
 
 fn c_string(p: *const c_void) -> Option<String> {

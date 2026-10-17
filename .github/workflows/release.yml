@@ -150,12 +150,12 @@ jobs:
             triple: x86_64-apple-darwin
             os: macos-15
             agent: libopenprofiler_agent.dylib
-          # Windows ships the CLI, daemon and web UI for files and remote attach; the agent and
-          # local attach are Unix-only.
+          # Local attach on Windows is x86-64 only, so only windows-amd64 ships the agent.
           - platform: windows-amd64
             triple: x86_64-pc-windows-msvc
             os: windows-2025
             exe: .exe
+            agent: openprofiler_agent.dll
           - platform: windows-arm64
             triple: aarch64-pc-windows-msvc
             os: windows-2025

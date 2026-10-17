@@ -28,7 +28,7 @@ mod sampler_async;
 mod server;
 mod tls;
 mod triggers;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod vmstructs;
 mod vthreads;
 

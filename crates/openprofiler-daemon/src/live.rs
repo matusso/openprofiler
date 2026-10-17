@@ -85,7 +85,13 @@ pub struct AttachRequest {
 }
 
 fn lib_name() -> &'static str {
-    if cfg!(target_os = "macos") { "libopenprofiler_agent.dylib" } else { "libopenprofiler_agent.so" }
+    if cfg!(windows) {
+        "openprofiler_agent.dll"
+    } else if cfg!(target_os = "macos") {
+        "libopenprofiler_agent.dylib"
+    } else {
+        "libopenprofiler_agent.so"
+    }
 }
 
 /// Locates the native agent: `$OPENPROFILER_AGENT_PATH`, next to the running executable, `../lib/`,

@@ -15,7 +15,14 @@
 //! ```
 
 mod jvm;
+#[cfg(unix)]
 mod pty;
+#[cfg(not(unix))]
+mod pty {
+    pub fn exec(_: &[String]) -> Result<i32, String> {
+        Err("pty-exec is not supported on this platform".into())
+    }
+}
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};

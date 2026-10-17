@@ -3,7 +3,7 @@
 #   dist/openprofiler-<tag>-<os>-<arch>.tar.gz   (.zip on Windows) containing
 #   openprofiler-<tag>-<os>-<arch>/
 #     openprofiler[.exe]                 CLI and daemon
-#     libopenprofiler_agent.{so,dylib}   native agent for local JVMs (not on Windows)
+#     [lib]openprofiler_agent.{so,dylib,dll}  native agent for local JVMs (not on windows-arm64)
 #     ui/                                web UI (`openprofiler daemon --web`)
 #     bundle/<triple>/                   Linux relay + agents for remote and container attach
 #     LICENSE (Apache-2.0), LICENSE-agent (MPL-2.0, the native agent), README.md

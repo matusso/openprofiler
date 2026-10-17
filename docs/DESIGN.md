@@ -23,8 +23,7 @@ formats are specified separately:
 - **Secure by default.** The agent port uses TLS with a pinned fingerprint and a mandatory token.
 - Licence: Apache-2.0; the native agent is MPL-2.0.
 
-**Non-goals for v1:** Java < 11, IBM PHD import (later), a Windows agent (v1.x), Eclipse and
-NetBeans plugins.
+**Non-goals for v1:** Java < 11, IBM PHD import (later), Eclipse and NetBeans plugins.
 
 ## 2. Technology choices
 
@@ -110,6 +109,12 @@ the `OPENPROFILER_AGENT_OPTIONS` env var, or the attach argument. With `port=0` 
 ephemeral port and publishes `{pid, port, token, fingerprint}` in `$TMPDIR/openprofiler-<pid>.json`
 (mode 0600).
 
+**Platforms.** Linux (glibc and musl), macOS and Windows (`openprofiler_agent.dll`). On Windows
+the agent uses the sync sampler, finds VMStructs through `jvm.dll`'s exports, and writes the info
+file to `%TEMP%` without Unix permission bits (the user's profile directory is private). The
+Windows port was written and cross-compiled on macOS; CI builds it and runs the workspace tests
+(live agent and attach included) on `windows-2025`, which is its first real run.
+
 **Capabilities** are requested in groups, and the agent records which ones were granted, so it
 degrades gracefully when the JVM refuses one group.
 
@@ -117,8 +122,8 @@ degrades gracefully when the JVM refuses one group.
 1. **Async (default on Linux):** per-thread CPU timers deliver a signal; the handler calls
    `AsyncGetCallTrace` and copies frames into a lock-free ring buffer. A drainer thread aggregates
    samples into the call tree. VMStructs are used only for robustness checks and stack-walk repair.
-2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS and when async
-   sampling is unavailable.
+2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS, Windows and
+   when async sampling is unavailable.
 3. **JFR mode (planned):** stream JFR `ExecutionSample` events for locked-down environments.
 4. **Virtual threads:** mount and unmount extension events, aggregated per carrier.
 
@@ -258,7 +263,10 @@ across all indexes, on disk and mmap'd.
 
 - **Local discovery:** hsperfdata and `/proc`: JVM name, arguments, version, whether an agent is
   already loaded.
-- **Attach:** HotSpot dynamic attach (`.attach_pid`, SIGQUIT, `.java_pid` socket). In containers:
+- **Attach:** HotSpot dynamic attach (`.attach_pid`, SIGQUIT, `.java_pid` socket). On Windows
+  (x86-64 only) a named pipe is created and a small stub is injected into the JVM with
+  `CreateRemoteThread`; it calls `jvm.dll`'s `JVM_EnqueueOperation`, and the JVM writes the reply
+  to the pipe (the JDK's own mechanism). In containers:
   NSpid translation, `/proc/<pid>/root`, and copying the agent into the target's mount namespace.
 - **`openprofiler-relay`** (static musl, about 1 MB) runs on the remote host or in the container:
   `relay <port>` (stdio ↔ TCP with a READY handshake), `list`, `attach`, `dump`, `pty-exec`.

@@ -40,8 +40,9 @@ docker run --rm -p 7878:7878 ghcr.io/matusso/openprofiler   # daemon + web UI
 
 Archives for macOS, Linux and Windows (amd64, arm64) are on the
 [releases page](https://github.com/matusso/openprofiler/releases). Each one holds the
-`openprofiler` CLI, the native agent, the web UI and the remote bundle; keep them together. The
-Windows build covers files and the web UI; the agent and local attach are Unix-only.
+`openprofiler` CLI, the native agent, the web UI and the remote bundle; keep them together. On
+Windows the agent samples CPU with the sync sampler (no async signal sampling), and local attach
+works on x86-64 only; the windows-arm64 archive has no agent.
 
 ## Quick start
 

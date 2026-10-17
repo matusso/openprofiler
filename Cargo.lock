@@ -987,6 +987,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1000,6 +1001,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
