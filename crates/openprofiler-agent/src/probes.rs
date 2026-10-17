@@ -491,6 +491,35 @@ pub extern "system" fn probe_call_labelled0(
     });
 }
 
+thread_local! {
+    /// Complexity site → method frame, so recording a point does not take the instrumentation lock.
+    static COMPLEXITY_FRAMES: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
+}
+
+/// `Hooks.complexity0(site, size, nanos)`: a call of a method configured for complexity analysis.
+pub extern "system" fn complexity0(env: *mut JNIEnv, _cls: jclass, site: jint, size: jlong, nanos: jlong) {
+    let Some(a) = agent() else { return };
+    if size < 0 || a.shutting_down.load(Ordering::Relaxed) {
+        return;
+    }
+    let site = site as u32;
+    let frame = COMPLEXITY_FRAMES.try_with(|m| {
+        if let Some(&f) = m.borrow().get(&site) {
+            return Some(f);
+        }
+        let f = instrument::complexity_frame(site)?;
+        m.borrow_mut().insert(site, f);
+        Some(f)
+    });
+    let Ok(Some(frame)) = frame else { return };
+    let Some(thread) = thread_index(env) else { return };
+    let time = now_nanos() - nanos;
+    a.collector.lock().add_complexity(
+        openprofiler_model::ComplexityPoint { time, thread, frame, size: size as u64, duration: nanos },
+        a.opts.complexity_rate,
+    );
+}
+
 /// `Hooks.trigger(site)`: a method trigger fired.
 pub extern "system" fn trigger(_env: *mut JNIEnv, _cls: jclass, site: jint) {
     if let Some(id) = instrument::trigger_of_site(site as u32) {
@@ -540,6 +569,7 @@ pub fn bind(env: *mut JNIEnv) -> bool {
         ),
         native!("control0", "(IJZLjava/lang/String;)V", control0),
         native!("setContext0", "(Ljava/lang/String;)V", set_context0),
+        native!("complexity0", "(IJJ)V", complexity0),
     ];
     let ok = jni!(env, RegisterNatives, cls, methods.as_ptr(), methods.len() as jint) == 0;
     if !ok {

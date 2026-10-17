@@ -15,11 +15,12 @@ final class Reflect {
     private static final Object MISSING = new Object();
 
     /**
-     * No-argument methods, one-argument methods and fields by name; plain names as keys, so a
-     * lookup allocates nothing.
+     * Methods with no, one and two arguments and fields by name; plain names as keys, so a lookup
+     * allocates nothing.
      */
     private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS0 = cache();
     private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS1 = cache();
+    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS2 = cache();
     private static final ClassValue<ConcurrentHashMap<String, Object>> FIELDS = cache();
 
     private static ClassValue<ConcurrentHashMap<String, Object>> cache() {
@@ -41,6 +42,11 @@ final class Reflect {
     /** {@code target.name(arg)} for a one-parameter method, or null. */
     static Object call1(Object target, String name, Object arg) {
         return call(target, name, 1, new Object[] {arg});
+    }
+
+    /** {@code target.name(a, b)} for a two-parameter method, or null. */
+    static Object call2(Object target, String name, Object a, Object b) {
+        return call(target, name, 2, new Object[] {a, b});
     }
 
     /** {@code target.name(arg)} for a one-parameter method; whether it ran without throwing. */
@@ -74,7 +80,8 @@ final class Reflect {
         if (target == null) {
             return null;
         }
-        ConcurrentHashMap<String, Object> cache = (argc == 0 ? METHODS0 : METHODS1).get(target.getClass());
+        ConcurrentHashMap<String, Object> cache =
+            (argc == 0 ? METHODS0 : argc == 1 ? METHODS1 : METHODS2).get(target.getClass());
         Object m = cache.get(name);
         if (m == null) {
             m = find(target.getClass(), name, argc);

@@ -33,8 +33,13 @@ fn workload() -> PathBuf {
 fn agent_lib() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
-    let name =
-        if cfg!(target_os = "macos") { "libopenprofiler_agent.dylib" } else { "libopenprofiler_agent.so" };
+    let name = if cfg!(windows) {
+        "openprofiler_agent.dll"
+    } else if cfg!(target_os = "macos") {
+        "libopenprofiler_agent.dylib"
+    } else {
+        "libopenprofiler_agent.so"
+    };
     let lib = profile_dir.join(name);
     let target_dir = profile_dir.parent().unwrap();
     let status = Command::new(env!("CARGO"))
@@ -502,7 +507,7 @@ fn probe_calls(p: &Profile, id: &str, needle: &str) -> u64 {
 async fn check_probes(client: &LinkClient) {
     let caps = client.hello().capabilities;
     assert!(caps.iter().any(|c| c == "probes"), "probes capability: {caps:?}");
-    wait_for(client, "JDBC, HTTP, custom and file probe calls", |p| {
+    wait_for(client, "JDBC, HTTP, custom, file and RMI probe calls", |p| {
         probe_calls(p, "jdbc", "SELECT * FROM orders WHERE id = ?") > 0
             && probe_calls(p, "jdbc", "UPDATE stats") > 0
             && probe_calls(p, "http_server", "GET /orders/{id}") > 0
@@ -511,6 +516,8 @@ async fn check_probes(client: &LinkClient) {
             && probe_calls(p, "custom.manual", "tick") > 0
             && probe_calls(p, "exceptions", "java.lang.NumberFormatException") > 0
             && probe_calls(p, "files", "write ") > 0
+            && probe_calls(p, "rmi", "call Pricing.price") > 0
+            && probe_calls(p, "rmi", "serve Pricing.price") > 0
     })
     .await;
     wait_for(client, "JDBC events with bind parameters and the request as context", |p| {
@@ -546,11 +553,14 @@ async fn check_probes(client: &LinkClient) {
     // Exact call counts, split by request.
     wait_for(client, "instrumented calls under the request label", |p| {
         has_frame(p, SampleKind::Calls, "[GET /orders/{id}]")
+            && has_frame(p, SampleKind::Calls, "[RMI Pricing.price]")
             && has_frame(p, SampleKind::Calls, "ProbeWorkload.leaf")
     })
     .await;
     let info = client.instrumentation().await.unwrap();
     assert!(info.instrumented_classes > 0 && info.include.iter().any(|i| i.starts_with("ProbeWorkload")));
+    assert_eq!(info.complexity, vec!["ProbeWorkload.sortItems".to_string()]);
+    check_call_analysis(client).await;
     assert!(info.available_probes.iter().any(|p| p.id == "jdbc"), "{info:?}");
     // Method triggers.
     let trigger = v1::Trigger {
@@ -571,9 +581,65 @@ async fn check_probes(client: &LinkClient) {
     client.set_triggers(vec![trigger]).await.unwrap();
     wait_for(client, "method trigger bookmark", |p| p.bookmarks.iter().any(|b| b.label == "priced")).await;
     // Disabling a probe removes its instrumentation.
-    let info =
-        client.set_instrumentation(vec!["ProbeWorkload*".into()], vec![], vec!["jdbc".into()]).await.unwrap();
+    let info = client
+        .set_instrumentation(vec!["ProbeWorkload*".into()], vec![], vec!["jdbc".into()], vec![])
+        .await
+        .unwrap();
     assert_eq!(info.enabled_probes, vec!["jdbc".to_string()]);
+}
+
+fn frame_is(p: &Profile, frame: u32, needle: &str) -> bool {
+    (frame as usize) < p.symbols.frames().len()
+        && p.symbols.method_label(p.symbols.frame(frame).method).ends_with(needle)
+}
+
+/// Call tracer, call-site outliers and complexity points.
+async fn check_call_analysis(client: &LinkClient) {
+    wait_for(client, "call-site statistics of ProbeWorkload.work", |p| {
+        let mut frames = vec![];
+        p.calls.sites.iter().any(|s| {
+            p.stacks.frames_root_first(s.stack, &mut frames);
+            frames.last().is_some_and(|&f| frame_is(p, f, "ProbeWorkload.work"))
+                && s.max > 0
+                && s.total >= s.max
+        })
+    })
+    .await;
+    wait_for(client, "complexity points of sortItems with several sizes", |p| {
+        let sizes: std::collections::HashSet<u64> = p
+            .calls
+            .complexity
+            .iter()
+            .filter(|c| frame_is(p, c.frame, "ProbeWorkload.sortItems"))
+            .map(|c| c.size)
+            .collect();
+        sizes.len() >= 3 && sizes.iter().all(|&n| n >= 100 && n % 100 == 0)
+    })
+    .await;
+    assert!(client.profile().read().calls.trace.is_empty(), "no trace before it is started");
+    client.call_trace(true, 3000, 20_000).await.unwrap();
+    // `work` calls `leaf` 20,000 times, so the cap is usually reached inside it.
+    wait_for(client, "traced entries and exits of ProbeWorkload.leaf", |p| {
+        let t = &p.calls.trace;
+        t.iter().any(|e| !e.exit && frame_is(p, e.frame, "ProbeWorkload.leaf"))
+            && t.iter().any(|e| e.exit && frame_is(p, e.frame, "ProbeWorkload.leaf"))
+    })
+    .await;
+    let n = client.profile().read().calls.trace.len();
+    assert!(n <= 20_000, "trace capped at max_events: {n}");
+    {
+        let p = client.profile();
+        let p = p.read();
+        let mut last: std::collections::HashMap<u32, i64> = Default::default();
+        for e in &p.calls.trace {
+            let t = last.entry(e.thread).or_insert(i64::MIN);
+            assert!(e.time >= *t, "trace events of a thread are ordered");
+            *t = e.time;
+        }
+    }
+    let info = client.instrumentation().await.unwrap();
+    assert!(info.trace_events > 0);
+    client.call_trace(false, 0, 0).await.unwrap();
 }
 
 async fn probe_session(java: &Path, extra: &str, attach: bool) {
@@ -582,7 +648,8 @@ async fn probe_session(java: &Path, extra: &str, attach: bool) {
     assert!(compile_probe_workload(&classes), "javac ProbeWorkload");
     let lib = agent_lib();
     let info = dir.path().join("info.json");
-    let probe_opts = format!("instrument=ProbeWorkload*,autotune=0{extra}");
+    let probe_opts =
+        format!("instrument=ProbeWorkload*,autotune=0,complexity=ProbeWorkload.sortItems{extra}");
     let opts = format!("port=0,token=probe-token,infofile={},{probe_opts}", info.display());
     let mut cmd = Command::new(java);
     if !attach {

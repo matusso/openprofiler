@@ -16,10 +16,10 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **Memory** | Allocation call tree and hot spots, live versus collected objects, GC and heap telemetry. |
 | **Heap dumps** | Out-of-core HPROF analysis: dominator tree, retained sizes (identical to Eclipse MAT), biggest objects, references, paths to GC roots, and leak and waste inspections. A 10 GB dump opens in about 25 s cold and under 5 ms warm. |
 | **Threads and locks** | Thread history, states, thread dumps, monitor and `java.util.concurrent` contention with lock owners, virtual threads. |
-| **Probes** | SQL statements with bind parameters, HTTP requests in and out (Servlet containers, Netty, Reactor Netty and WebFlux, Vert.x and Quarkus), JPA, Kafka, gRPC, exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools, `CompletableFuture`s, Reactor schedulers and coroutines. Custom probes with one annotation. Tested against the real libraries in a version matrix. |
+| **Probes** | SQL statements with bind parameters, HTTP requests in and out (Servlet containers, Netty, Reactor Netty and WebFlux, Vert.x and Quarkus), JPA, Kafka, gRPC, MongoDB, Cassandra, JMS, RMI, SOAP web services, AI/LLM clients (OpenAI, Anthropic, LangChain4j, Spring AI: model and tokens), exceptions, files and sockets: hot spots linked to call trees, events, timelines, connection and file leak detection, and call trees split by request, also across thread pools, `CompletableFuture`s, Reactor schedulers and coroutines. Custom probes with one annotation. Tested against the real libraries in a version matrix. |
 | **Exact call counts** | Bytecode instrumentation of the packages you choose: invocation counts and times in the call tree, with auto-tuning of hot, trivial methods. |
 | **Telemetry** | Heap, GC, CPU, threads and classes over time, with a global time range that filters every view. |
-| **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG or collapsed stacks. |
+| **Snapshots** | Save sessions as `.opsnap` files, compare two snapshots, export to HTML, CSV, JSON, SVG, collapsed stacks or Arrow tables for DuckDB/Polars. |
 | **Triggers** | Take heap or thread dumps and save recordings automatically on thresholds, OOM, timers, start, exit or when a method is called. |
 | **Remote and containers** | Attach over ssh, `docker exec` and `kubectl exec`, including ephemeral debug containers for distroless images. The agent port is never exposed. (Daemon API today; UI and CLI support planned.) |
 | **Automation** | A CLI, a CI regression gate (`--fail-if "cpu.total > +10%"`), and an MCP server so AI agents can profile and read results. |
@@ -27,8 +27,9 @@ CLI. The UI is React, served in a browser or as a Tauri desktop app.
 | **IDE** | IntelliJ IDEA plugin and VS Code / VSCodium extension: CPU heat in the editor, navigation to source, launch with the agent. |
 | **Security** | The agent link uses TLS 1.3 with a pinned fingerprint and a mandatory random token. |
 
-Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, `.opsnap` snapshots and
-`.oplink` offline recordings. The decompiler opens `.apk` (and `.xapk`, `.apks`, `.aab`) and `.dex`
+Supported inputs: live JVMs (JDK 11+), `.jfr`, `.hprof`, `.hprof.gz`, OpenJ9 / IBM Semeru `.phd`
+heap dumps (also gzipped; references and sizes only, see [design](docs/DESIGN.md)), `.opsnap`
+snapshots and `.oplink` offline recordings. The decompiler opens `.apk` (and `.xapk`, `.apks`, `.aab`) and `.dex`
 files, and JVM bytecode: `.jar`, `.war`, `.ear`, `.jmod`, `.aar` and `.class`.
 
 ## Install
@@ -40,8 +41,9 @@ docker run --rm -p 7878:7878 ghcr.io/matusso/openprofiler   # daemon + web UI
 
 Archives for macOS, Linux and Windows (amd64, arm64) are on the
 [releases page](https://github.com/matusso/openprofiler/releases). Each one holds the
-`openprofiler` CLI, the native agent, the web UI and the remote bundle; keep them together. The
-Windows build covers files and the web UI; the agent and local attach are Unix-only.
+`openprofiler` CLI, the native agent, the web UI and the remote bundle; keep them together. On
+Windows the agent samples CPU with the sync sampler (no async signal sampling), and local attach
+works on x86-64 only; the windows-arm64 archive has no agent.
 
 ## Quick start
 
@@ -73,6 +75,7 @@ openprofiler list                                     # local JVMs
 openprofiler attach <pid> --duration 10s              # live hot spots in the terminal
 openprofiler record --pid <pid> --duration 60s -o app.opsnap          # record a snapshot
 openprofiler record --pid <pid> --heap -o app.opsnap                  # ... with a heap dump at the end
+openprofiler record --pid <pid> --recorded-only -o app.opsnap         # ... only objects allocation recording sampled
 openprofiler record --pid <pid> --triggers triggers.json -o app.opsnap  # dumps on thresholds, OOM, timers
 openprofiler dump <pid> -o heap.hprof                 # heap dump only
 ```
@@ -199,6 +202,7 @@ comment and an `UnsupportedOperationException`.
 openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"   # exit 1 on regression
 openprofiler export app.opsnap --view flame --format svg -o flame.svg      # csv|json|html|svg|collapsed
 openprofiler convert recording.jfr -o recording.opsnap
+openprofiler arrow app.opsnap -o tables/     # Arrow IPC tables for DuckDB, Polars, pyarrow
 ```
 
 ### Use it from an AI agent (MCP)
@@ -296,7 +300,7 @@ secret). Pre-release tags (`v0.2.0-rc1`) skip the tap and the `latest` image tag
 | `crates/openprofiler-agent`, `crates/jvmti-sys` | Native JVMTI agent and bindings |
 | `crates/openprofiler-model` | Symbols, stacks, samples; call tree, hot spots, flame, call graph, diff |
 | `crates/openprofiler-jfr` | JFR parser |
-| `crates/openprofiler-hprof`, `crates/openprofiler-heap` | HPROF parser and heap analysis engine |
+| `crates/openprofiler-hprof`, `crates/openprofiler-phd`, `crates/openprofiler-heap` | HPROF and PHD parsers, heap analysis engine |
 | `crates/openprofiler-snapshot` | `.opsnap` reader and writer ([spec](docs/spec/snapshot-format.md)) |
 | `crates/openprofiler-proto`, `crates/openprofiler-link` | Agent-link protocol ([spec](docs/spec/agent-link.md)) and its daemon-side client |
 | `crates/openprofiler-attach` | JVM discovery and dynamic attach, including containers |

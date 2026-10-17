@@ -191,6 +191,13 @@ impl<'a> Cursor<'a> {
 
 /// Reads a big-endian id of `id_size` bytes at `pos` of `buf`.
 #[inline]
+/// Id of the UTF8 record in which OpenProfiler's native dumper leaves `key=value;…` hints about
+/// the dumping JVM (`compressedRefs=true|false`). Its object ids are synthetic, not addresses, so
+/// readers should prefer hints over address heuristics. All ones is never a symbol address.
+pub fn hints_id(id_size: u32) -> u64 {
+    if id_size == 8 { u64::MAX } else { u32::MAX as u64 }
+}
+
 pub fn read_id(buf: &[u8], pos: usize, id_size: u32) -> u64 {
     if id_size == 8 {
         u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap())
@@ -275,6 +282,12 @@ impl Hprof {
             Some(&(s, e)) => String::from_utf8_lossy(&self.map[s..e]),
             None => std::borrow::Cow::Borrowed(""),
         }
+    }
+
+    /// Value of `key` in the dump's hint record (see [`hints_id`]), if any.
+    pub fn hint(&self, top: &TopLevel, key: &str) -> Option<String> {
+        let text = self.string(top, hints_id(self.header.id_size));
+        text.split(';').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=').map(str::to_string))
     }
 
     /// Scans all top-level records. Heap dump bodies are only located, not parsed.
@@ -737,6 +750,11 @@ pub mod writer {
             self.record(tag::UTF8, &b)
         }
 
+        /// Writes the hint record (see [`super::hints_id`]).
+        pub fn hints(&mut self, text: &str) -> io::Result<()> {
+            self.utf8(super::hints_id(self.id_size), text)
+        }
+
         pub fn load_class(&mut self, serial: u32, class_id: u64, name_id: u64) -> io::Result<()> {
             let mut b = Vec::new();
             b.extend_from_slice(&serial.to_be_bytes());
@@ -764,14 +782,23 @@ pub mod writer {
         }
 
         pub fn root(&mut self, kind: u8, id: u64) -> io::Result<()> {
+            self.thread_root(kind, id, 0, 0)
+        }
+
+        /// A root with its thread serial and, for frame roots, the frame number (stack trace
+        /// serial for `ROOT_THREAD_OBJECT`); ignored by kinds that carry no thread.
+        pub fn thread_root(&mut self, kind: u8, id: u64, thread_serial: u32, frame: u32) -> io::Result<()> {
             let mut b = vec![kind];
             self.id_bytes(id, &mut b);
             match kind {
                 tag::ROOT_JNI_GLOBAL => self.id_bytes(0, &mut b),
                 tag::ROOT_JNI_LOCAL | tag::ROOT_JAVA_FRAME | tag::ROOT_THREAD_OBJECT => {
-                    b.extend_from_slice(&[0; 8]);
+                    b.extend_from_slice(&thread_serial.to_be_bytes());
+                    b.extend_from_slice(&frame.to_be_bytes());
                 }
-                tag::ROOT_NATIVE_STACK | tag::ROOT_THREAD_BLOCK => b.extend_from_slice(&[0; 4]),
+                tag::ROOT_NATIVE_STACK | tag::ROOT_THREAD_BLOCK => {
+                    b.extend_from_slice(&thread_serial.to_be_bytes())
+                }
                 _ => {}
             }
             self.seg.extend_from_slice(&b);
@@ -789,10 +816,23 @@ pub mod writer {
             statics: &[(u64, u8, u64)],
             fields: &[(u64, u8)],
         ) -> io::Result<()> {
+            self.class_dump_with([class_id, super_id, loader_id, 0, 0], instance_size, statics, fields)
+        }
+
+        /// Like [`Self::class_dump`]; `ids` are the class, superclass, loader, signers and
+        /// protection domain ids.
+        pub fn class_dump_with(
+            &mut self,
+            ids: [u64; 5],
+            instance_size: u32,
+            statics: &[(u64, u8, u64)],
+            fields: &[(u64, u8)],
+        ) -> io::Result<()> {
+            let [class_id, super_id, loader_id, signers_id, domain_id] = ids;
             let mut b = vec![tag::CLASS_DUMP];
             self.id_bytes(class_id, &mut b);
             b.extend_from_slice(&0u32.to_be_bytes());
-            for id in [super_id, loader_id, 0, 0, 0, 0] {
+            for id in [super_id, loader_id, signers_id, domain_id, 0, 0] {
                 self.id_bytes(id, &mut b);
             }
             b.extend_from_slice(&instance_size.to_be_bytes());

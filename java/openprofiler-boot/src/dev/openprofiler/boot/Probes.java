@@ -34,7 +34,9 @@ final class Probes {
     static void init() {
         Probe[] builtin = {
             new JdbcProbe(), new JpaProbe(), new HttpServerProbe(), new HttpClientProbe(), new KafkaProbe(),
-            new GrpcProbe(), new ExceptionProbe(), new FileProbe(), new SocketProbe(), new AsyncProbe(),
+            new GrpcProbe(), new MongoProbe(), new CassandraProbe(), new JmsProbe(), new RmiProbe(),
+            new WebServiceProbe(), new LlmProbe(), new ExceptionProbe(), new FileProbe(), new SocketProbe(),
+            new AsyncProbe(),
         };
         try {
             for (Probe p : builtin) {
@@ -106,6 +108,9 @@ final class Probes {
         int interception = (int) info;
         if (interception == -1) {
             return CustomProbe.forSite(probe, site);
+        }
+        if (interception == ComplexityProbe.INTERCEPTION) {
+            return ComplexityProbe.INSTANCE;
         }
         Probe[] ps = byIndex;
         return probe < ps.length ? ps[probe] : null;

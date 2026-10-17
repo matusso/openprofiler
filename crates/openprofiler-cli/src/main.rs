@@ -59,7 +59,8 @@ enum Cmd {
     /// Export a view to CSV/JSON/HTML/SVG/collapsed stacks.
     Export {
         file: PathBuf,
-        /// calltree, backtraces, hotspots, flame, telemetry, threads, insights, classes, biggest
+        /// calltree, backtraces, hotspots, flame, telemetry, threads, insights, outliers, complexity,
+        /// trace, classes, biggest
         #[arg(long, default_value = "hotspots")]
         view: String,
         /// csv, json, html, svg, collapsed
@@ -74,6 +75,18 @@ enum Cmd {
         request: Option<String>,
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Write the event and telemetry tables of a profile as Arrow IPC files (one `.arrow` file
+    /// per table, plain UTF-8 strings) for DuckDB, Polars or pyarrow, plus `threads`, `stacks`,
+    /// `frames` and `probes` tables to resolve their ids.
+    Arrow {
+        file: PathBuf,
+        #[arg(short, long, required_unless_present = "list")]
+        output: Option<PathBuf>,
+        /// List the Arrow sections of an .opsnap file with their payload offsets and lengths
+        /// instead (each is a complete Arrow IPC file that can be read in place).
+        #[arg(long)]
+        list: bool,
     },
     /// Compare two profiles; optionally fail (exit 1) when a regression gate trips.
     Compare {
@@ -92,7 +105,7 @@ enum Cmd {
     },
     /// Precompute analysis (heap indexes, dominators) and print insights.
     Analyze { file: PathBuf },
-    /// Convert a profile (.jfr, .hprof, .opsnap) to an .opsnap snapshot.
+    /// Convert a profile (.jfr, .hprof, .phd, .opsnap) to an .opsnap snapshot.
     Convert {
         input: PathBuf,
         #[arg(short, long)]
@@ -165,6 +178,13 @@ enum Cmd {
         /// Also embed a heap dump taken at the end.
         #[arg(long)]
         heap: bool,
+        /// Heap dumper: hotspot (HotSpotDiagnosticMXBean.dumpHeap) or native (JVMTI heap walk).
+        #[arg(long, default_value = "hotspot", value_parser = ["hotspot", "native"])]
+        heap_dumper: String,
+        /// Embed only the objects recorded by allocation recording and their paths from the GC
+        /// roots (native dumper; implies --heap).
+        #[arg(long)]
+        recorded_only: bool,
         /// JSON trigger file to install in the agent (see docs/spec/agent-link.md).
         #[arg(long)]
         triggers: Option<PathBuf>,
@@ -282,19 +302,29 @@ async fn run(cli: Cli) -> Result<()> {
             engine.close(&s.id)?;
             Ok(())
         }
-        Cmd::Record { pid, remote, duration, interval, heap, triggers, output } => {
+        Cmd::Record {
+            pid,
+            remote,
+            duration,
+            interval,
+            heap,
+            heap_dumper,
+            recorded_only,
+            triggers,
+            output,
+        } => {
             let engine = Engine::new();
             let s = attach_live(&engine, pid, remote.attach_options(interval)?).await?;
             install_triggers(&engine, &s, triggers.as_deref()).await?;
             eprintln!("Recording {} for {duration:?}…", s.name);
             tokio::time::sleep(duration).await;
-            let heap_path = if heap {
+            let heap_path = if heap || recorded_only {
                 eprintln!("Taking heap dump…");
                 let r = openprofiler_daemon::live::control(
                     &engine,
                     &s,
                     "heap-dump",
-                    json!({ "live_only": true }),
+                    json!({ "live_only": true, "dumper": heap_dumper, "recorded_only": recorded_only }),
                 )
                 .await?;
                 Some(PathBuf::from(r["path"].as_str().unwrap_or_default()))
@@ -430,6 +460,42 @@ fn run_blocking(cmd: Cmd) -> Result<()> {
                     use std::io::Write;
                     std::io::stdout().write_all(&out.body)?;
                 }
+            }
+            Ok(())
+        }
+        Cmd::Arrow { file, output, list } => {
+            if list {
+                let r = openprofiler_snapshot::SnapshotReader::open(&file)?;
+                println!("{:<16} {:>12} {:>12}  table", "section", "offset", "length");
+                for e in
+                    r.info.sections.iter().filter(|e| e.codec == openprofiler_snapshot::Codec::Arrow as u32)
+                {
+                    println!("{:<16} {:>12} {:>12}  {}", e.kind, e.offset + 13, e.length, e.name);
+                }
+                return Ok(());
+            }
+            let dir = output.context("--output is required")?;
+            let s = engine.open_blocking(&file)?;
+            let p = s.profile().context("not a profile")?;
+            let p = p.read();
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            let mut tables: Vec<(String, _)> = openprofiler_snapshot::arrow::section_tables(&p)?
+                .into_iter()
+                .map(|t| {
+                    let name = match t.kind {
+                        openprofiler_snapshot::SectionKind::Samples => format!("samples_{}", t.name),
+                        _ => t.name,
+                    };
+                    (name, t.batch)
+                })
+                .collect();
+            tables.extend(openprofiler_snapshot::arrow::dimension_tables(&p)?);
+            for (name, batch) in tables {
+                let path = dir.join(format!("{name}.arrow"));
+                let batch = openprofiler_snapshot::arrow::portable(&batch)?;
+                std::fs::write(&path, openprofiler_snapshot::arrow::encode(&batch)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                println!("{:>10} rows  {}", batch.num_rows(), path.display());
             }
             Ok(())
         }

@@ -406,5 +406,76 @@ pub fn demo_profile() -> Profile {
     };
     p.thread_dumps.push(dump("Before load", start + 10 * NS, false));
     p.thread_dumps.push(dump("During load", start + 25 * NS, true));
+    demo_calls(&mut p, &threads, start, &mut rng);
     p
+}
+
+/// Instrumented method analysis: call sites with outliers, a short call trace on one worker and
+/// complexity points of a linear and a quadratic method.
+fn demo_calls(p: &mut Profile, threads: &[u32], start: Nanos, rng: &mut Rng) {
+    let shop = "dev.openprofiler.shop.";
+    let frame = |p: &mut Profile, class: &str, name: &str, sig: &str| {
+        let m = p.symbols.intern_method(&format!("{shop}{class}"), name, sig);
+        p.symbols.intern_frame(m, -1, FrameKind::Unknown)
+    };
+    let search = frame(p, "CatalogController", "search", "(Ljava/lang/String;)Ljava/util/List;");
+    let cache = frame(p, "ProductCache", "get", "(J)Ldev/openprofiler/shop/Product;");
+    let price = frame(p, "PriceCalculator", "total", "(Ljava/util/List;)J");
+    let rank = frame(p, "SearchRanker", "rank", "(Ljava/util/List;)Ljava/util/List;");
+    let sites = [
+        (p.stacks.intern_root_first([search]), 40, 2_000_000, 3.0),
+        (p.stacks.intern_root_first([search, cache]), 400, 40_000, 120.0),
+        (p.stacks.intern_root_first([search, price]), 300, 150_000, 2.0),
+        (p.stacks.intern_root_first([search, rank]), 40, 900_000, 6.0),
+    ];
+    for s in 0..60i64 {
+        for (i, &th) in threads.iter().skip(1).enumerate() {
+            for &(stack, calls, mean, spread) in &sites {
+                let count = (calls / 8 + rng.below(4)) as u32;
+                let slow = (s + i as i64) % 17 == 0;
+                let max = (mean as f64 * if slow { spread } else { 1.5 + rng.unit() }) as i64;
+                p.calls.sites.push(CallSiteStat {
+                    time: start + s * NS,
+                    thread: th,
+                    stack,
+                    count,
+                    total: mean * count as i64 + max,
+                    max,
+                });
+            }
+        }
+    }
+    // 200 ms of one worker's calls, starting at 25 s.
+    let th = threads[1];
+    let mut t = start + 25 * NS;
+    for _ in 0..40 {
+        p.calls.trace.push(TraceEvent { time: t, thread: th, frame: search, exit: false });
+        for f in [cache, cache, price, rank] {
+            t += 20_000 + rng.below(10_000) as i64;
+            p.calls.trace.push(TraceEvent { time: t, thread: th, frame: f, exit: false });
+            t += if f == rank { 800_000 } else { 40_000 } + rng.below(30_000) as i64;
+            p.calls.trace.push(TraceEvent { time: t, thread: th, frame: f, exit: true });
+        }
+        t += 30_000;
+        p.calls.trace.push(TraceEvent { time: t, thread: th, frame: search, exit: true });
+        t += 1_000_000 + rng.below(2_000_000) as i64;
+    }
+    // Totals grow linearly with the cart, ranking quadratically with the result list.
+    for i in 0..600i64 {
+        let n = 1 + rng.below(500);
+        let noise = 0.9 + 0.2 * rng.unit();
+        let (f, d) = if i % 2 == 0 {
+            (price, ((2_000 + 300 * n) as f64 * noise) as i64)
+        } else {
+            (rank, ((5_000 + 4 * n * n) as f64 * noise) as i64)
+        };
+        let th = threads[1 + (i as usize % 8)];
+        p.calls.complexity.push(ComplexityPoint {
+            time: start + i * 100_000_000,
+            thread: th,
+            frame: f,
+            size: n,
+            duration: d,
+        });
+    }
 }

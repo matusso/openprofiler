@@ -1,0 +1,9 @@
+# Client calls through the proxy by interface and operation, with the endpoint as detail.
+count   | webservices | call OrderService.getOrder | 30
+event   | webservices | call OrderService.getOrder | context~GET /owners/{id}
+event   | webservices | call OrderService.getOrder | detail~/ws/orders
+stack   | webservices | call OrderService.getOrder | Main.main
+call    | webservices | dispatch http://127.0.0.1
+# Served operations (35: proxy and dispatch calls) are requests.
+count   | webservices | serve | 35
+sample  | calls | [SOAP

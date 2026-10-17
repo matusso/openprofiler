@@ -72,6 +72,14 @@ pub struct Options {
     pub probe_events: u32,
     /// Probe calls faster than this are aggregated but never recorded as events.
     pub probe_threshold: Duration,
+    /// Methods recorded for complexity analysis (`com.acme.Sorter.sort#0`); `:`-separated.
+    pub complexity: Vec<String>,
+    /// Complexity points kept per method and second.
+    pub complexity_rate: u32,
+    /// Run the call tracer for this long once the agent is live.
+    pub trace: Option<Duration>,
+    /// Event cap of call traces started without one.
+    pub trace_events: u64,
 }
 
 impl Default for Options {
@@ -109,6 +117,10 @@ impl Default for Options {
             autotune: true,
             probe_events: 100,
             probe_threshold: Duration::ZERO,
+            complexity: vec![],
+            complexity_rate: 100,
+            trace: None,
+            trace_events: crate::instrument::calls::TRACE_EVENTS,
         }
     }
 }
@@ -298,6 +310,13 @@ impl Options {
                     }
                     "probe_events" => v.parse().map(|n| o.probe_events = n).is_ok(),
                     "probe_threshold" => parse_duration(v).map(|d| o.probe_threshold = d).is_some(),
+                    "complexity" => {
+                        o.complexity = list(v);
+                        true
+                    }
+                    "complexity_rate" => v.parse().map(|n| o.complexity_rate = n).is_ok(),
+                    "trace" => parse_duration(v).map(|d| o.trace = Some(d)).is_some(),
+                    "trace_events" => v.parse().map(|n| o.trace_events = n).is_ok(),
                     _ => false,
                 };
                 if !ok {
@@ -343,5 +362,9 @@ mod tests {
         assert_eq!(o.instrument_exclude, vec!["com.acme.gen.*"]);
         assert_eq!(o.probes, Some(vec!["jdbc".to_string(), "http_server".to_string()]));
         assert_eq!(Options::parse("probes=none", None).0.probes, Some(vec![]));
+        let (o, bad) = Options::parse("complexity=a.B.sort#0:a.C.run,trace=5s,trace_events=1000", None);
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!(o.complexity, vec!["a.B.sort#0", "a.C.run"]);
+        assert_eq!((o.trace, o.trace_events), (Some(Duration::from_secs(5)), 1000));
     }
 }

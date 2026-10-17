@@ -45,6 +45,7 @@ import type {
   FsListing,
   InstrumentationInfo,
   ProbesRequest,
+  CallsRequest,
   DiscoverKind,
   RemoteContainer,
   RemotePod,
@@ -257,7 +258,9 @@ export class OpenProfilerClient {
   // Live control
   setRecording = (id: string, kind: string, enabled: boolean, interval_ms?: number) =>
     this.post(`/sessions/${id}/recording`, { kind, enabled, interval_ms });
-  heapDump = (id: string) => this.post<Session>(`/sessions/${id}/heap-dump`);
+  /** `dumper: "native"` walks the heap in the agent; `recorded_only` dumps only recorded objects. */
+  heapDump = (id: string, opts?: { dumper?: "hotspot" | "native"; recorded_only?: boolean }) =>
+    this.post<Session>(`/sessions/${id}/heap-dump`, opts);
   saveSnapshot = (id: string, path: string) => this.post(`/sessions/${id}/snapshot`, { path });
   bookmark = (id: string, label: string) => this.post(`/sessions/${id}/bookmark`, { label });
   gc = (id: string) => this.post(`/sessions/${id}/gc`);
@@ -265,8 +268,16 @@ export class OpenProfilerClient {
   // Probes (any session) and instrumentation (live)
   probes = <T>(id: string, req: ProbesRequest) => this.post<T>(`/sessions/${id}/probes`, req);
   instrumentation = (id: string) => this.get<InstrumentationInfo>(`/sessions/${id}/instrumentation`);
-  setInstrumentation = (id: string, req: { include: string[]; exclude: string[]; probes: string[] }) =>
-    this.post<InstrumentationInfo>(`/sessions/${id}/instrumentation`, req);
+  /** Fields left out keep their current value. */
+  setInstrumentation = (
+    id: string,
+    req: { include?: string[]; exclude?: string[]; probes?: string[]; complexity?: string[] },
+  ) => this.post<InstrumentationInfo>(`/sessions/${id}/instrumentation`, req);
+
+  // Instrumented method analysis (any session); the call tracer (live)
+  calls = <T>(id: string, req: CallsRequest) => this.post<T>(`/sessions/${id}/calls`, req);
+  callTrace = (id: string, enabled: boolean, duration_ms?: number, max_events?: number) =>
+    this.post(`/sessions/${id}/recording`, { kind: "trace", enabled, duration_ms, max_events });
 
   // MBeans (live); `server` is an MBeanServerInfo id, "" for the platform server
   mbeanServers = (id: string) => this.post<{ servers: MBeanServerInfo[] }>(`/sessions/${id}/mbean-servers`);

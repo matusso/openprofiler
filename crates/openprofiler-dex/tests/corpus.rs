@@ -150,7 +150,7 @@ fn recompiles_and_behaves_identically() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{f}: harness: {}", String::from_utf8_lossy(&out.stderr));
-        let cp = format!("{}:{}", classes.display(), harness.display());
+        let cp = std::env::join_paths([&classes, &harness]).unwrap();
         let run = Command::new("java").arg("-cp").arg(cp).arg("Check").output().unwrap();
         let actual = normalize(&String::from_utf8_lossy(&run.stdout));
         assert_eq!(

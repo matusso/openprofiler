@@ -12,6 +12,7 @@ import {
   IconHeap,
   IconLock,
   IconMemory,
+  IconMethods,
   IconOverview,
   IconProbe,
   IconThreads,
@@ -69,6 +70,14 @@ export const NAV: NavEntry[] = [
     icon: <IconProbe />,
     key: "7",
     needs: ["probes"],
+  },
+  {
+    id: "methods",
+    label: "Method analysis (outliers, call tracer, complexity)",
+    short: "Methods",
+    icon: <IconMethods />,
+    key: "m",
+    needs: ["call_analysis"],
   },
   {
     id: "events",

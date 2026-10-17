@@ -1,4 +1,5 @@
-//! Heap sessions: HPROF dumps (or snapshots with an embedded dump) analysed by `openprofiler-heap`.
+//! Heap sessions: HPROF or PHD dumps (or snapshots with an embedded dump) analysed by
+//! `openprofiler-heap`.
 
 use crate::engine::{Engine, Session, SessionState};
 use crate::export::Format;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct HeapHandle {
     pub analysis: Arc<HeapAnalysis>,
-    /// The raw HPROF backing the analysis.
+    /// The raw HPROF backing the analysis (for a PHD, its HPROF conversion).
     pub path: PathBuf,
 }
 
@@ -21,6 +22,7 @@ pub struct HeapHandle {
 pub fn load_hprof(path: &Path, session: &Session) -> Result<()> {
     let phases = [
         Phase::Decompressing,
+        Phase::Converting,
         Phase::Scanning,
         Phase::Indexing,
         Phase::Graph,
@@ -41,7 +43,9 @@ pub fn load_hprof(path: &Path, session: &Session) -> Result<()> {
         }
     })
     .with_context(|| format!("analysing {}", path.display()))?;
-    session.set_heap(HeapHandle { analysis: Arc::new(analysis), path: path.to_owned() });
+    // Snapshots embed a PHD as its conversion, which keeps the PHD semantics when reopened.
+    let path = if analysis.is_phd() { analysis.hprof_path().to_owned() } else { path.to_owned() };
+    session.set_heap(HeapHandle { analysis: Arc::new(analysis), path });
     Ok(())
 }
 
@@ -208,5 +212,35 @@ pub fn export(s: &Session, view: &str, f: Format, req: &Value) -> Result<Vec<u8>
         }
         ("inspections", _) => Ok(serde_json::to_vec_pretty(&a.inspections())?),
         (v, f) => bail!("heap view {v} cannot be exported as {f:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opens_phd_and_keeps_it_in_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let phd = dir.path().join("heapdump.phd.gz");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../openprofiler-phd/tests/data/compressed.phd.gz");
+        std::fs::copy(fixture, &phd).unwrap();
+        assert_eq!(crate::engine::detect_format(&phd).unwrap(), crate::engine::FileFormat::Phd);
+
+        let engine = crate::Engine::new();
+        let s = engine.open_blocking(&phd).unwrap();
+        assert_eq!(s.kind, crate::SessionKind::Hprof);
+        let h = s.heap().unwrap();
+        let sum = summary_json(&h).unwrap();
+        assert_eq!(sum["format"], "phd");
+
+        // The snapshot embeds the conversion, which still reads as a PHD.
+        let snap = dir.path().join("heap.opsnap");
+        crate::save::save_snapshot(&s, &snap).unwrap();
+        let s2 = engine.open_blocking(&snap).unwrap();
+        let sum2 = summary_json(&s2.heap().unwrap()).unwrap();
+        assert_eq!(sum2["format"], "phd");
+        assert_eq!(sum2["objects"], sum["objects"]);
     }
 }

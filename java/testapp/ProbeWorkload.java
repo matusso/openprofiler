@@ -11,6 +11,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.rmi.Remote;
+import java.rmi.RemoteException;
+import java.rmi.server.UnicastRemoteObject;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,7 +25,7 @@ import java.util.concurrent.Future;
 /**
  * Exercises OpenProfiler's probes without third-party libraries: a JDBC "driver" made of
  * {@link Proxy} instances, the JDK HTTP server and client, an executor hand-off from a request
- * handler, exceptions, files, a custom {@link Probe} and plain methods for call counting.
+ * handler, exceptions, files, RMI, a custom {@link Probe} and plain methods for call counting.
  *
  * <p>Prints {@code PID <pid>} first, then loops for the number of seconds given as the argument.
  */
@@ -33,6 +36,18 @@ public class ProbeWorkload {
         return t;
     });
     static volatile long sink;
+
+    /** A remote interface served and called in this JVM. */
+    public interface Pricing extends Remote {
+        long price(int id) throws RemoteException;
+    }
+
+    static final class PricingImpl implements Pricing {
+        @Override
+        public long price(int id) {
+            return work(id);
+        }
+    }
 
     /** A JDBC connection whose statements sleep a little and return nothing. */
     static Connection connection() {
@@ -105,6 +120,20 @@ public class ProbeWorkload {
         return (i * 31L) % 7;
     }
 
+    /** Insertion sort, for complexity analysis (time grows with the square of the length). */
+    static int[] sortItems(int[] items) {
+        for (int i = 1; i < items.length; i++) {
+            int v = items[i];
+            int j = i - 1;
+            while (j >= 0 && items[j] > v) {
+                items[j + 1] = items[j];
+                j--;
+            }
+            items[j + 1] = v;
+        }
+        return items;
+    }
+
     static void touchFile(File f) throws Exception {
         try (FileOutputStream out = new FileOutputStream(f, false)) {
             out.write("hello probes".getBytes(StandardCharsets.UTF_8), 0, 12);
@@ -140,6 +169,8 @@ public class ProbeWorkload {
         server.start();
         int port = server.getAddress().getPort();
         HttpClient client = HttpClient.newHttpClient();
+        PricingImpl pricingImpl = new PricingImpl();
+        Pricing pricing = (Pricing) UnicastRemoteObject.exportObject(pricingImpl, 0);
         File tmp = File.createTempFile("probe-workload", ".txt");
         tmp.deleteOnExit();
         long end = System.nanoTime() + seconds * 1_000_000_000L;
@@ -154,10 +185,17 @@ public class ProbeWorkload {
                 sink++;
             }
             touchFile(tmp);
+            sink += pricing.price(i);
             OpenProfiler.probeEvent("manual", "tick", 1_000_000);
+            int[] items = new int[100 + (i % 20) * 100];
+            for (int k = 0; k < items.length; k++) {
+                items[k] = items.length - k;
+            }
+            sink += sortItems(items)[0];
             Thread.sleep(20);
         }
         server.stop(0);
+        UnicastRemoteObject.unexportObject(pricingImpl, true);
         System.out.println("done " + sink);
     }
 }

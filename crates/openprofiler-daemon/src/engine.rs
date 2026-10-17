@@ -148,6 +148,9 @@ impl Session {
             {
                 caps.push("probes".into());
             }
+            if !p.calls.is_empty() {
+                caps.push("call_analysis".into());
+            }
         }
         if self.heap().is_some() {
             caps.push("heap".into());
@@ -163,6 +166,9 @@ impl Session {
             }
             if agent.iter().any(|c| c == "instrument") {
                 caps.push("instrument".into());
+                if !caps.iter().any(|c| c == "call_analysis") {
+                    caps.push("call_analysis".into());
+                }
             }
         }
         if self.decompiler().is_some() {
@@ -280,6 +286,8 @@ impl Session {
 pub enum FileFormat {
     Hprof,
     HprofGz,
+    /// IBM Portable Heap Dump (OpenJ9 / Semeru), optionally gzip-compressed.
+    Phd,
     Jfr,
     Snapshot,
     Recording,
@@ -311,11 +319,14 @@ pub fn detect_format(path: &Path) -> Result<FileFormat> {
         );
     }
     let mut f = std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut head = [0u8; 18];
+    let mut head = [0u8; 20];
     let n = f.read(&mut head)?;
     let head = &head[..n];
     if head.starts_with(b"JAVA PROFILE 1.0") {
         return Ok(FileFormat::Hprof);
+    }
+    if openprofiler_phd::is_phd(head) {
+        return Ok(FileFormat::Phd);
     }
     if head.starts_with(b"FLR\0") {
         return Ok(FileFormat::Jfr);
@@ -327,6 +338,9 @@ pub fn detect_format(path: &Path) -> Result<FileFormat> {
         return Ok(FileFormat::Recording);
     }
     if head.starts_with(&[0x1f, 0x8b]) {
+        if openprofiler_phd::sniff(path).unwrap_or(false) {
+            return Ok(FileFormat::Phd);
+        }
         return Ok(FileFormat::HprofGz);
     }
     if head.starts_with(b"dex\n") {
@@ -344,7 +358,7 @@ pub fn detect_format(path: &Path) -> Result<FileFormat> {
     }
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
     bail!(
-        "unrecognized file format: {name} (expected .hprof, .hprof.gz, .jfr, .opsnap, \
+        "unrecognized file format: {name} (expected .hprof, .hprof.gz, .phd, .jfr, .opsnap, \
          or for the decompiler .apk / .dex / .jar / .class)"
     )
 }
@@ -477,7 +491,7 @@ impl Engine {
         let path = std::fs::canonicalize(path).with_context(|| format!("cannot open {}", path.display()))?;
         let format = detect_format(&path)?;
         let kind = match format {
-            FileFormat::Hprof | FileFormat::HprofGz => SessionKind::Hprof,
+            FileFormat::Hprof | FileFormat::HprofGz | FileFormat::Phd => SessionKind::Hprof,
             FileFormat::Jfr => SessionKind::Jfr,
             FileFormat::Snapshot | FileFormat::Recording => SessionKind::Snapshot,
             FileFormat::Dex | FileFormat::Class | FileFormat::ClassDir | FileFormat::Archive => {

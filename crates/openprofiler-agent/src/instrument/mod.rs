@@ -8,7 +8,9 @@
 //! - **probe interceptions** registered by the boot classes' probes (`Hooks.registerInterception0`):
 //!   a method of an exact class, or of every subtype of a class or interface;
 //! - **custom probes**: methods annotated with `@dev.openprofiler.api.Probe`;
-//! - **method triggers**: `MethodCondition`s of the installed triggers.
+//! - **method triggers**: `MethodCondition`s of the installed triggers;
+//! - **complexity analysis**: methods matching `complexity=` specs get probe-style sites whose
+//!   calls report an argument-derived size and their duration (`ComplexityProbe`).
 //!
 //! Subtype matching needs the supertypes of a class, which the hook sees only by name. The
 //! hook records, per class name, a bit mask of the intercepted types it is a subtype of. A class
@@ -78,8 +80,65 @@ pub struct Interception {
 
 #[derive(Debug, Clone)]
 pub enum SiteKind {
-    Probe { probe: u32, interception: u32 },
-    Custom { probe: u32, payload: String },
+    Probe {
+        probe: u32,
+        interception: u32,
+    },
+    Custom {
+        probe: u32,
+        payload: String,
+    },
+    /// Complexity analysis of the method with frame id `frame`; `arg` selects the size argument.
+    Complexity {
+        frame: u32,
+        arg: String,
+    },
+}
+
+/// Interception index reported to the boot classes for complexity sites.
+pub const COMPLEXITY_INTERCEPTION: u32 = 0xFFFF_FFFE;
+
+/// A `complexity=` spec: `class.method[(desc)][#arg]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComplexitySpec {
+    /// Internal class name pattern.
+    pub class: String,
+    pub method: String,
+    pub desc: Option<String>,
+    /// Parameter index, `this`, or empty for the first argument with a size.
+    pub arg: String,
+}
+
+impl ComplexitySpec {
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (target, arg) = spec.trim().split_once('#').unwrap_or((spec.trim(), ""));
+        let (target, desc) = match target.find('(') {
+            Some(i) => (&target[..i], Some(target[i..].to_string())),
+            None => (target, None),
+        };
+        let (class, method) = target.rsplit_once('.')?;
+        if class.is_empty() || method.is_empty() {
+            return None;
+        }
+        Some(Self { class: internal_pattern(class), method: method.into(), desc, arg: arg.trim().into() })
+    }
+
+    fn matches(&self, class: &str, name: &str, desc: &str) -> bool {
+        glob(&self.class, class) && self.method == name && self.desc.as_deref().is_none_or(|d| d == desc)
+    }
+
+    /// The spec as written (Java class name).
+    pub fn display(&self) -> String {
+        let mut s = format!("{}.{}", self.class.replace('/', "."), self.method);
+        if let Some(d) = &self.desc {
+            s.push_str(d);
+        }
+        if !self.arg.is_empty() {
+            s.push('#');
+            s.push_str(&self.arg);
+        }
+        s
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +194,7 @@ struct State {
     triggers: Vec<(String, String, String)>,
     trigger_sites: Vec<String>,
     trigger_keys: HashMap<(String, String, String, String), u32>,
+    complexity: Vec<ComplexitySpec>,
     unprepared: HashSet<Box<str>>,
     /// Classes currently carrying injected code.
     instrumented: HashSet<Box<str>>,
@@ -413,6 +473,24 @@ impl State {
                         Some(ProbeSite { site, args: payload.contains('{'), entry: true, exit: true });
                 }
             }
+            if plan.probe.is_none()
+                && let Some(spec) =
+                    self.complexity.iter().find(|c| c.matches(class, &m.name, &m.desc)).cloned()
+                && m.name != "<init>"
+                && m.name != "<clinit>"
+            {
+                let id = self.method_id(class, &m.name, &m.desc);
+                let frame = self.methods[id as usize].frame;
+                let site = self.site_id(
+                    class,
+                    &m.name,
+                    &m.desc,
+                    -2,
+                    SiteKind::Complexity { frame, arg: spec.arg.clone() },
+                    None,
+                );
+                plan.probe = Some(ProbeSite { site, args: true, entry: true, exit: true });
+            }
             for (tid, spec) in &triggers {
                 let matches = spec == "*"
                     || *spec == m.name
@@ -632,6 +710,7 @@ pub fn install(a: &Agent) -> bool {
         st.include = a.opts.instrument.iter().map(|p| internal_pattern(p)).collect();
         st.exclude = a.opts.instrument_exclude.iter().map(|p| internal_pattern(p)).collect();
         st.enabled_probes = a.opts.probes.as_ref().map(|v| v.iter().cloned().collect());
+        st.complexity = parse_complexity(&a.opts.complexity);
     });
     ENABLED.store(true, Ordering::SeqCst);
     let _ = a.jvmti.enable_event(JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, true);
@@ -719,7 +798,16 @@ pub fn site(site: u32) -> Option<(u32, Option<u32>, Option<String>)> {
         Some(match &s.kind {
             SiteKind::Probe { probe, interception } => (*probe, Some(*interception), None),
             SiteKind::Custom { probe, payload } => (*probe, None, Some(payload.clone())),
+            SiteKind::Complexity { arg, .. } => (0, Some(COMPLEXITY_INTERCEPTION), Some(arg.clone())),
         })
+    })
+}
+
+/// Frame id of the method of a complexity site.
+pub fn complexity_frame(site: u32) -> Option<u32> {
+    with_state(|st| match st.sites.get(site as usize)?.kind {
+        SiteKind::Complexity { frame, .. } => Some(frame),
+        _ => None,
     })
 }
 
@@ -760,14 +848,26 @@ pub fn set_method_triggers(list: Vec<(String, String, String)>) {
     });
 }
 
-/// Replaces include/exclude patterns and enabled probes; retransforms what changes.
-pub fn configure(include: Vec<String>, exclude: Vec<String>, probes: Option<Vec<String>>) {
+/// Replaces include/exclude patterns, enabled probes and complexity specs; retransforms what
+/// changes.
+pub fn configure(
+    include: Vec<String>,
+    exclude: Vec<String>,
+    probes: Option<Vec<String>>,
+    complexity: Vec<String>,
+) {
     with_state(|st| {
         st.include = include.iter().map(|p| internal_pattern(p)).collect();
         st.exclude = exclude.iter().map(|p| internal_pattern(p)).collect();
         st.enabled_probes = probes.map(|v| v.into_iter().collect());
+        let old = std::mem::replace(&mut st.complexity, parse_complexity(&complexity));
+        st.retransform.extend(old.into_iter().map(|c| format!("glob:{}", c.class)));
         st.retransform.insert("scan:".into());
     });
+}
+
+fn parse_complexity(specs: &[String]) -> Vec<ComplexitySpec> {
+    specs.iter().filter_map(|s| ComplexitySpec::parse(s)).collect()
 }
 
 pub struct Info {
@@ -778,6 +878,7 @@ pub struct Info {
     pub classes: usize,
     pub methods: usize,
     pub disabled: Vec<String>,
+    pub complexity: Vec<String>,
 }
 
 pub fn info() -> Info {
@@ -799,6 +900,7 @@ pub fn info() -> Info {
             classes: st.instrumented.len(),
             methods: st.instrumented_methods,
             disabled: st.disabled.iter().map(|(c, n, _)| format!("{}.{n}", c.replace('/', "."))).collect(),
+            complexity: st.complexity.iter().map(ComplexitySpec::display).collect(),
         }
     })
 }
@@ -923,6 +1025,7 @@ fn scan(a: &Agent, jni: *mut JNIEnv) {
                     })
                     || st.inherited.contains_key(n)
                     || st.triggers.iter().any(|(_, c, _)| glob(c, n))
+                    || st.complexity.iter().any(|c| glob(&c.class, n))
             })
             .map(|(n, _)| n.clone())
             .collect()
@@ -1032,6 +1135,29 @@ mod tests {
         let bytes = test_class("other/X", "other/Unseen", &["run"]);
         st.plan(&ClassFile::parse(&bytes).unwrap());
         assert!(st.incomplete.contains_key("other/X"));
+    }
+
+    #[test]
+    fn complexity_specs() {
+        let c = ComplexitySpec::parse("com.acme.Sorter.sort#1").unwrap();
+        assert_eq!(
+            (c.class.as_str(), c.method.as_str(), c.desc.as_deref(), c.arg.as_str()),
+            ("com/acme/Sorter", "sort", None, "1")
+        );
+        let c = ComplexitySpec::parse("com.acme.*.sort(Ljava/util/List;)V").unwrap();
+        assert_eq!(c.desc.as_deref(), Some("(Ljava/util/List;)V"));
+        assert!(c.matches("com/acme/X", "sort", "(Ljava/util/List;)V"));
+        assert!(!c.matches("com/acme/X", "sort", "([I)V"));
+        assert_eq!(c.display(), "com.acme.*.sort(Ljava/util/List;)V");
+        assert!(ComplexitySpec::parse("nomethod").is_none());
+
+        let mut st = State { ready: true, ..Default::default() };
+        st.complexity = vec![ComplexitySpec::parse("app.Impl.run#this").unwrap()];
+        let bytes = test_class("app/Impl", "java/lang/Object", &["run", "other"]);
+        let plans = st.plan(&ClassFile::parse(&bytes).unwrap());
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].probe.as_ref().is_some_and(|p| p.args && p.exit));
+        assert!(matches!(&st.sites[0].kind, SiteKind::Complexity { arg, .. } if arg == "this"));
     }
 
     fn subtype_state(type_name: &str, method: &str) -> State {

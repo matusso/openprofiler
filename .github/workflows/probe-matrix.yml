@@ -2,7 +2,8 @@ name: Probe matrix
 
 # The probes against real libraries and versions (java/matrix/run.sh): JDBC drivers and pools,
 # JPA providers, servlet containers, Netty, Reactor Netty, WebFlux, Vert.x, HTTP clients, Kafka,
-# gRPC, Reactor and Kotlin coroutines. PostgreSQL, MySQL and Kafka run in containers.
+# gRPC, Reactor, Kotlin coroutines, MongoDB, Cassandra, JMS, JAX-WS and AI/LLM clients. PostgreSQL,
+# MySQL, Kafka, MongoDB, Cassandra and ActiveMQ Artemis run in containers.
 
 on:
   pull_request:

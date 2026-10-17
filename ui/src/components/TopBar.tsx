@@ -163,7 +163,8 @@ function LiveControls({ s }: { s: Session }) {
     onSuccess: (_r, v) => setOn((o) => ({ ...o, [v.kind]: v.enabled })),
   });
   const heap = useMutation({
-    mutationFn: () => client.heapDump(s.id),
+    mutationFn: (recordedOnly: boolean) =>
+      client.heapDump(s.id, recordedOnly ? { dumper: "native", recorded_only: true } : undefined),
     onSuccess: (ns) => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       selectSession(ns.id);
@@ -204,8 +205,21 @@ function LiveControls({ s }: { s: Session }) {
       <button className="btn ghost" title="Capture thread dump" onClick={() => dump.mutate()}>
         <IconCamera /> Thread dump
       </button>
-      <button className="btn ghost" title="Heap dump" disabled={heap.isPending} onClick={() => heap.mutate()}>
-        {heap.isPending ? <span className="spinner" /> : null} Heap dump
+      <button
+        className="btn ghost"
+        title="Heap dump"
+        disabled={heap.isPending}
+        onClick={() => heap.mutate(false)}
+      >
+        {heap.isPending && !heap.variables ? <span className="spinner" /> : null} Heap dump
+      </button>
+      <button
+        className="btn ghost"
+        title="Heap dump of the objects recorded by allocation recording, with their paths from the GC roots"
+        disabled={heap.isPending || !on.alloc}
+        onClick={() => heap.mutate(true)}
+      >
+        {heap.isPending && heap.variables ? <span className="spinner" /> : null} Recorded objects
       </button>
       <button className="btn ghost" title="Run garbage collector" onClick={() => client.gc(s.id)}>
         Run GC

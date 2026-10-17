@@ -158,8 +158,10 @@ fn action(v: &Value) -> Result<v1::TriggerAction, String> {
     };
     let recording = |what: &str| -> Result<String, String> {
         match arg.as_str() {
-            Some(k @ ("cpu" | "alloc" | "monitor" | "calls" | "probes")) => Ok(k.into()),
-            _ => Err(format!("`{what}` takes \"cpu\", \"alloc\", \"monitor\", \"calls\" or \"probes\"")),
+            Some(k @ ("cpu" | "alloc" | "monitor" | "calls" | "probes" | "trace")) => Ok(k.into()),
+            _ => Err(format!(
+                "`{what}` takes \"cpu\", \"alloc\", \"monitor\", \"calls\", \"probes\" or \"trace\""
+            )),
         }
     };
     let kind = match name {
@@ -173,6 +175,8 @@ fn action(v: &Value) -> Result<v1::TriggerAction, String> {
         "heap_dump" => Kind::HeapDump(v1::HeapDumpAction {
             path: path(name)?,
             live_only: arg.get("live_only").and_then(Value::as_bool).unwrap_or(true),
+            dumper: arg.get("dumper").and_then(Value::as_str).unwrap_or("").into(),
+            recorded_only: arg.get("recorded_only").and_then(Value::as_bool).unwrap_or(false),
         }),
         "thread_dump" => Kind::ThreadDump(v1::ThreadDumpRequest {}),
         "run_gc" => Kind::RunGc(v1::RunGc {}),

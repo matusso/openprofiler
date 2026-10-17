@@ -21,6 +21,7 @@ import { MBeansView } from "./views/MBeansView";
 import { MemoryView } from "./views/MemoryView";
 import { OverviewView } from "./views/OverviewView";
 import { ProbesView } from "./views/ProbesView";
+import { MethodsView } from "./views/MethodsView";
 import { ThreadsView } from "./views/ThreadsView";
 import { Welcome } from "./views/Welcome";
 
@@ -206,6 +207,8 @@ function Main() {
       return <CompareView />;
     case "probes":
       return <ProbesView />;
+    case "methods":
+      return <MethodsView />;
     case "mbeans":
       return <MBeansView />;
   }

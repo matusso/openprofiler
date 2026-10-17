@@ -15,6 +15,10 @@ pub struct HeapSummary {
     pub reachable_objects: u64,
     pub reachable_shallow: u64,
     pub edges: u64,
+    /// Source format: `hprof`, or `phd` (IBM Portable Heap Dump: no field values or primitive
+    /// data, inferred GC roots).
+    #[serde(default)]
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

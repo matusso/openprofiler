@@ -257,6 +257,9 @@ pub fn set_recording(a: &Agent, kind: &str, on: bool, interval_us: u32) {
             }
         }
         "alloc" if has_cap(a, "alloc") => {
+            if on && !a.alloc_on.swap(true, Ordering::SeqCst) {
+                crate::heapdump::reset_recorded(a.vm);
+            }
             a.alloc_on.store(on, Ordering::SeqCst);
             let _ = a.jvmti.enable_event(JVMTI_EVENT_SAMPLED_OBJECT_ALLOC, on);
         }
@@ -266,8 +269,26 @@ pub fn set_recording(a: &Agent, kind: &str, on: bool, interval_us: u32) {
         }
         "calls" => crate::instrument::calls::ON.store(on, Ordering::SeqCst),
         "probes" => crate::probes::ON.store(on, Ordering::SeqCst),
+        "trace" => set_trace(a, on, 0, 0),
         _ => debug(&format!("ignoring recording toggle {kind}")),
     }
+}
+
+/// Starts (for `duration_ms`, 0 = default, and `max_events`, 0 = `trace_events=`) or stops the
+/// call tracer.
+pub fn set_trace(a: &Agent, on: bool, duration_ms: u32, max_events: u32) {
+    use crate::instrument::calls;
+    if !on {
+        calls::stop_trace();
+        return;
+    }
+    let duration = if duration_ms == 0 {
+        calls::TRACE_DURATION
+    } else {
+        std::time::Duration::from_millis(duration_ms as u64)
+    };
+    let max = if max_events == 0 { a.opts.trace_events } else { max_events as u64 };
+    calls::start_trace(duration, max);
 }
 
 /// Starts everything that needs a live VM. Idempotent.
@@ -304,6 +325,9 @@ pub fn on_live(a: &'static Agent, jni: *mut JNIEnv) {
     crate::sampler_async::start(a, jni);
     crate::sampler::start(a);
     crate::triggers::start(a);
+    if let Some(d) = a.opts.trace {
+        crate::instrument::calls::start_trace(d, a.opts.trace_events);
+    }
     if a.opts.mode == Mode::Live {
         crate::server::start(a);
         if a.opts.wait {
@@ -548,7 +572,7 @@ unsafe extern "C" fn sampled_object_alloc(
     _jvmti: *mut jvmtiEnv,
     jni: *mut JNIEnv,
     thread: jthread,
-    _object: jobject,
+    object: jobject,
     klass: jclass,
     size: jlong,
 ) {
@@ -556,6 +580,7 @@ unsafe extern "C" fn sampled_object_alloc(
     if !a.alloc_on.load(Ordering::Relaxed) || a.shutting_down.load(Ordering::Relaxed) {
         return;
     }
+    crate::heapdump::record(object);
     let Some(idx) = thread_index(a, jni, thread) else { return };
     let Some(stack) = capture_stack(a, jni, ptr::null_mut()) else { return };
     let mut c = a.collector.lock();
