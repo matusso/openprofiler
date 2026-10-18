@@ -743,39 +743,59 @@ async fn async_sampler_walks_stacks() {
         p.stacks.frames_root_first(stack, frames);
         frames.last().map_or(String::new(), |&f| p.symbols.method_label(p.symbols.frame(f).method))
     };
-    // Java threads of the workload: every sample should end in a Java method.
-    wait_for(&client, "5,000 CPU samples of the workload threads", |p| {
-        p.samples.get(&SampleKind::Cpu).is_some_and(|s| {
-            let workload = (0..s.len()).filter(|&i| thread_name(p, Some(s.thread[i])).starts_with("stack-"));
-            workload.map(|i| s.count[i] as usize).sum::<usize>() >= 5_000
-        })
-    })
-    .await;
-    {
-        let p = client.profile();
-        let p = p.read();
+    // Workload samples, failed walks among them by thread and label, and labels of other threads.
+    type Tally = (usize, std::collections::BTreeMap<String, usize>, Vec<(String, String)>);
+    let tally = |p: &Profile| -> Tally {
         let set = &p.samples[&SampleKind::Cpu];
         let mut frames = vec![];
-        let (mut java_total, mut java_failed, mut other) = (0usize, 0usize, Vec::new());
-        let mut failures: std::collections::BTreeMap<String, usize> = Default::default();
+        let (mut java_total, mut failures, mut other) =
+            (0usize, std::collections::BTreeMap::new(), Vec::new());
         for i in 0..set.len() {
-            let name = thread_name(&p, Some(set.thread[i]));
-            let label = leaf(&p, set.stack[i], &mut frames);
+            let name = thread_name(p, Some(set.thread[i]));
+            let label = leaf(p, set.stack[i], &mut frames);
             let n = set.count[i] as usize;
             if name.starts_with("stack-") {
                 java_total += n;
                 if label.starts_with('[') {
-                    java_failed += n;
                     *failures.entry(format!("{name}: {label}")).or_default() += n;
                 }
             } else if label.starts_with('[') && !other.contains(&(name.to_string(), label.clone())) {
                 other.push((name.to_string(), label));
             }
         }
+        (java_total, failures, other)
+    };
+    let workload_samples = |p: &Profile| {
+        p.samples.get(&SampleKind::Cpu).map_or(0, |s| {
+            let workload = (0..s.len()).filter(|&i| thread_name(p, Some(s.thread[i])).starts_with("stack-"));
+            workload.map(|i| s.count[i] as usize).sum::<usize>()
+        })
+    };
+    // Walk quality is measured once the workload is compiled: OpenJ9's AsyncGetCallTrace cannot
+    // walk from the bytecode interpreter (it seeds the walk from the signal context only in JIT
+    // code, and the interpreter keeps its SP and PC in registers), nor from VM code that JIT code
+    // calls without recording its frame (allocation, array copies). The agent repairs the latter
+    // on HotSpot only, hence the separate bound.
+    let max_failed = if is_openj9(&java) { 0.10 } else { 0.05 };
+    wait_for(&client, "5,000 CPU samples of the workload threads", |p| workload_samples(p) >= 5_000).await;
+    let (warm_total, warm_failures, _) = tally(&client.profile().read());
+    // Java threads of the workload: every sample should end in a Java method.
+    wait_for(&client, "5,000 more CPU samples of the workload threads", |p| {
+        workload_samples(p) >= warm_total + 5_000
+    })
+    .await;
+    {
+        let (total, mut failures, other) = tally(&client.profile().read());
+        for (k, n) in &warm_failures {
+            *failures.get_mut(k).unwrap() -= n;
+        }
+        failures.retain(|_, n| *n > 0);
+        let java_total = total - warm_total;
+        let java_failed: usize = failures.values().sum();
         let ratio = java_failed as f64 / java_total as f64;
         eprintln!("failed walks: {java_failed} of {java_total} ({:.2}%): {failures:?}", ratio * 100.0);
         eprintln!("threads without Java frames: {other:?}");
-        assert!(ratio < 0.05, "too many failed stack walks: {:.2}% {failures:?}", ratio * 100.0);
+        assert!(ratio < max_failed, "too many failed stack walks: {:.2}% {failures:?}", ratio * 100.0);
         // Threads without Java frames are attributed by role, not lumped together.
         let vm_thread = |n: &str| n.starts_with("GC Thread") || n.starts_with("G1 ") || n == "VM Thread";
         assert!(
