@@ -122,7 +122,9 @@ degrades gracefully when the JVM refuses one group.
 **CPU sampling.**
 1. **Async (default on Linux):** per-thread CPU timers deliver a signal; the handler calls
    `AsyncGetCallTrace` and copies frames into a lock-free ring buffer. A drainer thread aggregates
-   samples into the call tree. VMStructs are used only for robustness checks and stack-walk repair.
+   samples into the call tree. VMStructs are used only for robustness checks and stack-walk repair
+   (frame anchors, code-cache bounds and blob frame sizes, thread state); samples without Java
+   frames are attributed by thread role or name (see `spec/agent-link.md`).
 2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS, Windows and
    when async sampling is unavailable.
 3. **JFR mode (planned):** stream JFR `ExecutionSample` events for locked-down environments.

@@ -8,14 +8,18 @@
 //!
 //! `AsyncGetCallTrace` gives up on two common situations, which the handler repairs and retries:
 //! - The thread is in Java code but the PC is in a frameless stub (array zeroing/copying,
-//!   itable/vtable stubs) or in a method prologue/epilogue (`ticks_unknown_Java`). The handler
-//!   unwinds one frame on a copy of the signal context and calls it again.
+//!   itable/vtable stubs), in a method prologue/epilogue, or in VM/libc code reached by a leaf
+//!   call that does not set the anchor (`ticks_unknown_Java`). The handler unwinds one frame on a
+//!   copy of the signal context and calls it again; failing that, it follows the frame-pointer
+//!   chain until a return address lands in the code cache (bounds from `gHotSpotVMStructs`).
 //! - The thread is in the VM, called from Java through a path that leaves the last-Java-frame
 //!   anchor without a PC (`ticks_unknown_not_Java`). Like HotSpot's own `make_walkable()`, the
 //!   handler fills in the PC from the anchor's SP for the duration of the call (offsets come from
 //!   `gHotSpotVMStructs`).
 //!
-//! Threads without Java frames (JIT compiler, GC, VM thread) are labelled by role.
+//! Threads without Java frames (JIT compiler, GC, VM thread) are labelled by role, other native
+//! threads by name, and walks that still fail on a Java thread by its VM thread state. Native
+//! threads the VM starts later (GC workers) are picked up by rescanning `/proc/self/task`.
 
 use crate::collector::now_nanos;
 use crate::jvm::jni;
@@ -37,6 +41,17 @@ const TIMER_MAGIC: usize = 0x454d_4252;
 /// Sample code (beside the `ASGCT_*` codes) for a Java thread that has no Java frames at all,
 /// such as a JIT compiler thread.
 const NO_JAVA_FRAMES: i32 = -100;
+/// Sample code for a thread the VM does not know as a Java thread (no `JNIEnv`).
+const NOT_A_JAVA_THREAD: i32 = -101;
+/// `JavaThreadState` values (stable since JDK 8); the `_trans` variants are one higher.
+const THREAD_IN_NATIVE: i32 = 4;
+const THREAD_IN_VM: i32 = 6;
+const THREAD_BLOCKED: i32 = 10;
+/// How many native frames the code-cache-guided unwinding follows.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const MAX_NATIVE_FRAMES: usize = 16;
+/// How often `/proc/self/task` is rescanned for threads to arm.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// Upper bound for the distance between SP and a frame pointer worth following.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const MAX_FRAME_SPAN: usize = 8 << 20;
@@ -48,6 +63,8 @@ struct Slot {
     n: UnsafeCell<i32>,
     /// Thread index + 1 of the virtual thread mounted on the sampled carrier, 0 if none.
     vthread: UnsafeCell<u32>,
+    /// `JavaThreadState` when the walk failed, -1 if unknown.
+    state: UnsafeCell<i32>,
     frames: UnsafeCell<[ASGCT_CallFrame; MAX_FRAMES]>,
 }
 
@@ -72,6 +89,7 @@ impl Ring {
                 time: UnsafeCell::new(0),
                 n: UnsafeCell::new(0),
                 vthread: UnsafeCell::new(0),
+                state: UnsafeCell::new(-1),
                 frames: UnsafeCell::new(
                     [ASGCT_CallFrame { lineno: 0, method_id: std::ptr::null_mut() }; MAX_FRAMES],
                 ),
@@ -105,7 +123,7 @@ impl Ring {
     }
 
     /// Single consumer: pops one committed sample.
-    fn pop(&self, out: &mut Vec<ASGCT_CallFrame>) -> Option<(i32, i64, i32, u32)> {
+    fn pop(&self, out: &mut Vec<ASGCT_CallFrame>) -> Option<Popped> {
         let pos = self.tail.load(Ordering::Relaxed);
         let slot = &self.slots[pos % RING_SIZE];
         if slot.seq.load(Ordering::Acquire) != pos + 1 {
@@ -120,12 +138,27 @@ impl Ring {
                 let frames = &*slot.frames.get();
                 out.extend_from_slice(&frames[..n as usize]);
             }
-            (*slot.tid.get(), *slot.time.get(), n, *slot.vthread.get())
+            Popped {
+                tid: *slot.tid.get(),
+                time: *slot.time.get(),
+                n,
+                vthread: *slot.vthread.get(),
+                state: *slot.state.get(),
+            }
         };
         slot.seq.store(pos + RING_SIZE, Ordering::Release);
         self.tail.store(pos + 1, Ordering::Relaxed);
         Some(r)
     }
+}
+
+/// A sample taken off the ring; the frames go to the caller's buffer.
+struct Popped {
+    tid: i32,
+    time: i64,
+    n: i32,
+    vthread: u32,
+    state: i32,
 }
 
 static RING: OnceLock<Ring> = OnceLock::new();
@@ -143,11 +176,15 @@ static RECOVER: AtomicBool = AtomicBool::new(false);
 /// unknown.
 static ENV_TO_SP: AtomicIsize = AtomicIsize::new(0);
 static ENV_TO_PC: AtomicIsize = AtomicIsize::new(0);
+/// Offset from a thread's `JNIEnv*` to its `JavaThread::_thread_state`; 0 when unknown.
+static ENV_TO_STATE: AtomicIsize = AtomicIsize::new(0);
 static PID: AtomicI32 = AtomicI32::new(0);
 static CODE_CACHE: OnceLock<crate::vmstructs::CodeCache> = OnceLock::new();
 /// Samples repaired by unwinding a stub frame / by making the anchor walkable.
 static RECOVERED_STUB: AtomicU64 = AtomicU64::new(0);
 static RECOVERED_ANCHOR: AtomicU64 = AtomicU64::new(0);
+/// Samples repaired by following native frames back into the code cache.
+static RECOVERED_NATIVE: AtomicU64 = AtomicU64::new(0);
 
 /// Virtual thread mounted on each carrier as `tid << 32 | (thread index + 1)`. Slots are found by
 /// probing from `tid % MOUNT_SLOTS`; a carrier writes only its own entry (mount callbacks run on
@@ -229,15 +266,22 @@ fn sample(uc: *mut c_void) {
     unsafe {
         let asgct: AsyncGetCallTraceFn = std::mem::transmute(f);
         let mut trace = ASGCT_CallTrace { env, num_frames: 0, frames: (*slot.frames.get()).as_mut_ptr() };
+        let mut state = -1;
         if env.is_null() {
-            trace.num_frames = ASGCT_UNKNOWN_NOT_JAVA;
+            trace.num_frames = NOT_A_JAVA_THREAD;
         } else {
             asgct(&mut trace, MAX_FRAMES as jint, uc);
             if trace.num_frames < 0 && RECOVER.load(Ordering::Relaxed) {
                 recover(asgct, &mut trace, uc);
             }
+            let to_state = ENV_TO_STATE.load(Ordering::Relaxed);
+            if trace.num_frames < 0 && to_state != 0 {
+                // A field of the current thread's JavaThread (offset from VMStructs).
+                state = std::ptr::read_volatile((env as isize + to_state) as *const i32);
+            }
         }
         *slot.n.get() = trace.num_frames;
+        *slot.state.get() = state;
         *slot.tid.get() = tid;
         *slot.time.get() = realtime_nanos();
         *slot.vthread.get() = mounted(tid);
@@ -304,13 +348,9 @@ unsafe fn recover(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTrace, uc: *
                 trace.num_frames = code;
             }
         }
-        ASGCT_UNKNOWN_JAVA | ASGCT_NOT_WALKABLE_JAVA => {
-            // SAFETY: forwarded from the caller.
-            if unsafe { unwind_and_retry(asgct, trace, uc) } {
-                RECOVERED_STUB.fetch_add(1, Ordering::Relaxed);
-            } else {
-                trace.num_frames = code;
-            }
+        // SAFETY: forwarded from the caller.
+        ASGCT_UNKNOWN_JAVA | ASGCT_NOT_WALKABLE_JAVA if !unsafe { unwind_and_retry(asgct, trace, uc) } => {
+            trace.num_frames = code;
         }
         _ => {}
     }
@@ -328,10 +368,10 @@ fn safe_read(addr: usize) -> Option<usize> {
 }
 
 /// The frame record `(saved fp, return address)` at `fp`, if `fp` plausibly points into the
-/// stack above `sp`.
+/// stack at or above `sp` (equal right after a stub's `enter`, when its callees are frameless).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn frame_record(sp: usize, fp: usize) -> Option<(usize, usize)> {
-    if fp <= sp || fp - sp > MAX_FRAME_SPAN || !fp.is_multiple_of(size_of::<usize>()) {
+    if fp < sp || fp - sp > MAX_FRAME_SPAN || !fp.is_multiple_of(size_of::<usize>()) {
         return None;
     }
     Some((safe_read(fp)?, safe_read(fp + size_of::<usize>())?))
@@ -347,11 +387,20 @@ fn frame_record(sp: usize, fp: usize) -> Option<(usize, usize)> {
 unsafe fn unwind_and_retry(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTrace, uc: *mut c_void) -> bool {
     // SAFETY: `uc` points to the kernel-provided ucontext_t; a bitwise copy is a valid context.
     let mut ctx: libc::ucontext_t = unsafe { std::ptr::read(uc as *const libc::ucontext_t) };
-    let mut candidates: [Option<(usize, usize, usize)>; 3] = [None; 3];
+    #[cfg(target_arch = "x86_64")]
+    let (sp, fp) = {
+        let g = &ctx.uc_mcontext.gregs;
+        (g[libc::REG_RSP as usize] as usize, g[libc::REG_RBP as usize] as usize)
+    };
+    #[cfg(target_arch = "aarch64")]
+    let (sp, fp) = (ctx.uc_mcontext.sp as usize, ctx.uc_mcontext.regs[29] as usize);
+    let mut candidates: [Option<(usize, usize, usize)>; 4] = [None; 4];
+    #[cfg(target_arch = "x86_64")]
+    let (pc, lr) = (ctx.uc_mcontext.gregs[libc::REG_RIP as usize] as usize, 0);
+    #[cfg(target_arch = "aarch64")]
+    let (pc, lr) = (ctx.uc_mcontext.pc as usize, ctx.uc_mcontext.regs[30] as usize);
     #[cfg(target_arch = "x86_64")]
     {
-        let g = &ctx.uc_mcontext.gregs;
-        let (sp, fp) = (g[libc::REG_RSP as usize] as usize, g[libc::REG_RBP as usize] as usize);
         // Frameless stub or prologue/epilogue: the return address is on top of the stack.
         // SAFETY: SP of the interrupted code points into this thread's mapped stack.
         let ret = unsafe { *(sp as *const usize) };
@@ -361,8 +410,6 @@ unsafe fn unwind_and_retry(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTra
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let m = &ctx.uc_mcontext;
-        let (sp, fp, lr) = (m.sp as usize, m.regs[29] as usize, m.regs[30] as usize);
         let record = frame_record(sp, fp);
         match record {
             // Stub that pushed a frame record (`enter`) and has not called anything since.
@@ -377,31 +424,88 @@ unsafe fn unwind_and_retry(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTra
             }
         }
     }
-    for (pc, sp, fp) in candidates.into_iter().flatten() {
-        if pc == 0 {
+    // Compiled method between pushing its frame and `frame_complete_offset` (nmethod entry
+    // barrier, stack banging) or in its epilogue, where HotSpot does not consider the frame
+    // walkable: the blob's frame size gives the caller's SP, with the frame record just below.
+    if let Some(cc) = CODE_CACHE.get()
+        && let Some(blob) = cc.find_blob(pc)
+    {
+        // SAFETY: `blob` comes from `find_blob`.
+        let (_, words) = unsafe { cc.frame_info(blob) };
+        // The blob may be freed concurrently: no arithmetic on the raw size.
+        let size = usize::try_from(words).ok().and_then(|w| w.checked_mul(size_of::<usize>()));
+        if let Some(size) = size.filter(|&s| s >= 2 * size_of::<usize>() && s <= MAX_FRAME_SPAN) {
+            let caller_sp = sp + size;
+            candidates[2] = safe_read(caller_sp - 8)
+                .zip(safe_read(caller_sp - 16))
+                .map(|(ret, saved)| (ret, caller_sp, saved));
+            // aarch64: frame allocated but the record not stored yet, or already reloaded.
+            if lr != 0 {
+                candidates[3] = Some((lr, caller_sp, fp));
+            }
+        }
+    }
+    for (cpc, csp, cfp) in candidates.into_iter().flatten() {
+        if cpc == 0 {
             continue;
         }
-        #[cfg(target_arch = "x86_64")]
-        {
-            let g = &mut ctx.uc_mcontext.gregs;
-            g[libc::REG_RIP as usize] = pc as i64;
-            g[libc::REG_RSP as usize] = sp as i64;
-            g[libc::REG_RBP as usize] = fp as i64;
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            let m = &mut ctx.uc_mcontext;
-            m.pc = pc as u64;
-            m.sp = sp as u64;
-            m.regs[29] = fp as u64;
-        }
         // SAFETY: a valid context for the current thread with adjusted registers.
-        unsafe { asgct(trace, MAX_FRAMES as jint, &mut ctx as *mut libc::ucontext_t as *mut c_void) };
-        if trace.num_frames > 0 {
+        if unsafe { retry_at(asgct, trace, &mut ctx, cpc, csp, cfp) } {
+            RECOVERED_STUB.fetch_add(1, Ordering::Relaxed);
             return true;
         }
     }
+    // VM or libc code called from compiled code without setting the anchor (runtime leaf calls,
+    // math and crypto intrinsics, GC barriers): follow frame records until a return address is
+    // in the code cache, i.e. back in Java code.
+    let Some(cc) = CODE_CACHE.get() else { return false };
+    let (mut sp, mut fp) = (sp, fp);
+    for _ in 0..MAX_NATIVE_FRAMES {
+        let Some((saved, ret)) = frame_record(sp, fp) else { break };
+        let caller_sp = fp + 2 * size_of::<usize>();
+        if cc.find_blob(ret).is_some() {
+            // SAFETY: as above.
+            if unsafe { retry_at(asgct, trace, &mut ctx, ret, caller_sp, saved) } {
+                RECOVERED_NATIVE.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            break;
+        }
+        (sp, fp) = (caller_sp, saved);
+    }
     false
+}
+
+/// Calls `AsyncGetCallTrace` on `ctx` with PC, SP and FP replaced; true if the walk succeeded.
+///
+/// # Safety
+/// Signal-handler context; `ctx` is a copy of the handler's `ucontext_t`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unsafe fn retry_at(
+    asgct: AsyncGetCallTraceFn,
+    trace: &mut ASGCT_CallTrace,
+    ctx: &mut libc::ucontext_t,
+    pc: usize,
+    sp: usize,
+    fp: usize,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let g = &mut ctx.uc_mcontext.gregs;
+        g[libc::REG_RIP as usize] = pc as i64;
+        g[libc::REG_RSP as usize] = sp as i64;
+        g[libc::REG_RBP as usize] = fp as i64;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let m = &mut ctx.uc_mcontext;
+        m.pc = pc as u64;
+        m.sp = sp as u64;
+        m.regs[29] = fp as u64;
+    }
+    // SAFETY: a valid context for the current thread with adjusted registers.
+    unsafe { asgct(trace, MAX_FRAMES as jint, ctx as *mut libc::ucontext_t as *mut c_void) };
+    trace.num_frames > 0
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -501,17 +605,32 @@ pub fn start(a: &'static Agent, jni: *mut JNIEnv) {
     }
 }
 
-/// Finds a thread's last-Java-frame anchor relative to its `JNIEnv*`: `java.lang.Thread.eetop`
-/// holds the current `JavaThread*`, VMStructs the anchor's field offsets.
+/// Finds a thread's last-Java-frame anchor and thread state relative to its `JNIEnv*`:
+/// `java.lang.Thread.eetop` holds the current `JavaThread*`, VMStructs the field offsets.
 fn init_anchor_offsets(jni: *mut JNIEnv) {
     match crate::vmstructs::CodeCache::load() {
         Some(c) => {
             let _ = CODE_CACHE.set(c);
         }
-        None => crate::debug("VMStructs: code cache layout unknown; runtime-stub recovery disabled"),
+        None => crate::debug(
+            "VMStructs: code cache layout unknown; runtime-stub and native-frame recovery disabled",
+        ),
     }
     let v = crate::vmstructs::VmStructs::load(&["JavaThread", "JavaFrameAnchor"]);
     let get = |t: &str, n: &str| v.offset(t, n).map(|o| o as isize);
+    let Some(thread) = current_java_thread(jni) else {
+        crate::debug("cannot read Thread.eetop; anchor recovery disabled");
+        return;
+    };
+    let env = jni as isize - thread as isize;
+    if !(1..1 << 16).contains(&env) {
+        crate::debug(&format!("implausible JavaThread layout (env {env}); anchor recovery disabled"));
+        return;
+    }
+    match get("JavaThread", "_thread_state") {
+        Some(state) if (0..1 << 16).contains(&state) => ENV_TO_STATE.store(state - env, Ordering::SeqCst),
+        _ => crate::debug("VMStructs: no JavaThread::_thread_state; failed walks not labelled by state"),
+    }
     let (Some(anchor), Some(sp), Some(pc)) = (
         get("JavaThread", "_anchor"),
         get("JavaFrameAnchor", "_last_Java_sp"),
@@ -520,18 +639,9 @@ fn init_anchor_offsets(jni: *mut JNIEnv) {
         crate::debug("VMStructs: no JavaFrameAnchor offsets; anchor recovery disabled");
         return;
     };
-    let Some(thread) = current_java_thread(jni) else {
-        crate::debug("cannot read Thread.eetop; anchor recovery disabled");
-        return;
-    };
-    let env = jni as isize - thread as isize;
-    if !(1..1 << 16).contains(&env)
-        || !(0..1 << 16).contains(&anchor)
-        || !(0..64).contains(&sp)
-        || !(0..64).contains(&pc)
-    {
+    if !(0..1 << 16).contains(&anchor) || !(0..64).contains(&sp) || !(0..64).contains(&pc) {
         crate::debug(&format!(
-            "implausible JavaThread layout (env {env}, anchor {anchor}); anchor recovery disabled"
+            "implausible JavaFrameAnchor layout (anchor {anchor}); anchor recovery disabled"
         ));
         return;
     }
@@ -566,8 +676,13 @@ fn old_handler_is_foreign() -> bool {
     PREV.get().is_some_and(|p| p.0.sa_sigaction != libc::SIG_DFL && p.0.sa_sigaction != libc::SIG_IGN)
 }
 
+/// Arms a CPU-time timer for `tid` unless it has one or is the agent's own. The timer map stays
+/// locked throughout, so the drainer's rescan and `ThreadStart` cannot arm a thread twice, and
+/// `register_own_thread` (which disarms after recording the tid) cannot be overtaken.
 fn arm(tid: i32) {
-    if OWN_TIDS.lock().as_ref().is_some_and(|s| s.contains(&tid)) {
+    let mut timers = TIMERS.lock();
+    let timers = timers.get_or_insert_with(HashMap::new);
+    if timers.contains_key(&tid) || OWN_TIDS.lock().as_ref().is_some_and(|s| s.contains(&tid)) {
         return;
     }
     let interval = INTERVAL_NS.load(Ordering::Relaxed) as i64;
@@ -594,7 +709,33 @@ fn arm(tid: i32) {
             libc::timer_delete(timer);
             return;
         }
-        TIMERS.lock().get_or_insert_with(HashMap::new).insert(tid, timer as usize);
+        timers.insert(tid, timer as usize);
+    }
+}
+
+/// Arms threads started since the last scan that `ThreadStart` does not report (GC workers the VM
+/// adds on demand, threads of native libraries) and drops the timers of threads that are gone.
+fn rescan() {
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return };
+    let live: HashSet<i32> =
+        dir.flatten().filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok())).collect();
+    let (gone, new): (Vec<i32>, Vec<i32>) = {
+        let timers = TIMERS.lock();
+        let armed = |t: &i32| timers.as_ref().is_some_and(|m| m.contains_key(t));
+        let gone =
+            timers.as_ref().map_or(vec![], |m| m.keys().copied().filter(|t| !live.contains(t)).collect());
+        (gone, live.iter().copied().filter(|t| !armed(t)).collect())
+    };
+    for tid in gone {
+        disarm(tid);
+    }
+    let own = OWN_TIDS.lock().clone().unwrap_or_default();
+    for tid in new {
+        // The agent's native threads mark themselves as their first action; skip any caught
+        // before that.
+        if !own.contains(&tid) && !comm(tid).to_ascii_lowercase().starts_with("openprofiler") {
+            arm(tid);
+        }
     }
 }
 
@@ -640,8 +781,8 @@ fn comm(tid: i32) -> String {
         .unwrap_or_default()
 }
 
-/// Label for a sample without Java frames, by what the thread does.
-fn role_label(thread_name: &str, code: i32) -> &'static str {
+/// What a thread without Java frames does, by its name.
+fn role(thread_name: &str) -> Option<&'static str> {
     // JDK 21 calls the non-generational ZGC threads X*.
     const GC: &[&str] = &[
         "GC Thread",
@@ -663,7 +804,16 @@ fn role_label(thread_name: &str, code: i32) -> &'static str {
         "XUncommitter",
         "Shenandoah",
     ];
-    if thread_name.contains("CompilerThre") || thread_name.starts_with("JVMCI") {
+    // Java threads that run VM-internal work (comm names are truncated to 15 bytes).
+    const SERVICE: &[&str] = &[
+        "Service Thread",
+        "Monitor Deflati",
+        "Notification Th",
+        "Signal Dispatch",
+        "Attach Listener",
+        "Sweeper thread",
+    ];
+    Some(if thread_name.contains("CompilerThre") || thread_name.starts_with("JVMCI") {
         "[JIT compiler]"
     } else if GC.iter().any(|p| thread_name.starts_with(p)) {
         "[GC]"
@@ -671,10 +821,42 @@ fn role_label(thread_name: &str, code: i32) -> &'static str {
         "[VM operation]"
     } else if thread_name.starts_with("VM Periodic") {
         "[VM periodic task]"
-    } else if code == ASGCT_UNKNOWN_NOT_JAVA {
-        "[non-Java thread]"
+    } else if thread_name.starts_with("JFR ") {
+        "[JFR]"
+    } else if SERVICE.iter().any(|p| thread_name.starts_with(p)) {
+        "[VM service]"
     } else {
-        "[no Java frames]"
+        return None;
+    })
+}
+
+/// Label for a sample of a thread the VM does not know as a Java thread: its role, or its name
+/// with the instance number dropped (`pool-3-worker-12` becomes `[native: pool-worker]`), so that
+/// threads of one pool share a frame.
+fn native_thread_label(thread_name: &str) -> String {
+    if let Some(r) = role(thread_name) {
+        return r.to_string();
+    }
+    let mut out = String::new();
+    for part in thread_name.split(['-', '_', ' ', '#']) {
+        let part = part.trim_end_matches(|c: char| c.is_ascii_digit());
+        if !part.is_empty() {
+            if !out.is_empty() {
+                out.push('-');
+            }
+            out.push_str(part);
+        }
+    }
+    if out.is_empty() { "[native thread]".to_string() } else { format!("[native: {out}]") }
+}
+
+/// Label for a Java thread's failed walk, by its `JavaThreadState`.
+fn state_label(state: i32) -> &'static str {
+    match state & !1 {
+        THREAD_IN_NATIVE => "[in native code]",
+        THREAD_IN_VM => "[in VM]",
+        THREAD_BLOCKED => "[blocked in VM]",
+        _ => "[unknown, not Java]",
     }
 }
 
@@ -698,6 +880,7 @@ fn drain_loop(a: &'static Agent) {
     let ring = RING.get().unwrap();
     let mut frames = Vec::with_capacity(MAX_FRAMES);
     let mut ids = Vec::with_capacity(MAX_FRAMES);
+    let mut last_scan = std::time::Instant::now();
     while !a.shutting_down.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(10));
         if jni!(jni, PushLocalFrame, 256) != 0 {
@@ -707,7 +890,11 @@ fn drain_loop(a: &'static Agent) {
         let weight = INTERVAL_NS.load(Ordering::Relaxed);
         let mut guard = a.collector.lock();
         let c = &mut *guard;
-        while let Some((tid, time, n, vthread)) = ring.pop(&mut frames) {
+        if last_scan.elapsed() >= RESCAN_INTERVAL {
+            rescan();
+            last_scan = std::time::Instant::now();
+        }
+        while let Some(Popped { tid, time, n, vthread, state }) = ring.pop(&mut frames) {
             let thread = match c.thread_by_os_id(tid as u64) {
                 Some(i) => i,
                 None => {
@@ -736,13 +923,16 @@ fn drain_loop(a: &'static Agent) {
                     ids.push(c.resolver.frame(a.jvmti, &mut c.symbols, f.method_id, bci, kind));
                 }
             } else {
+                let name = c.threads.get(thread as usize).map_or("", |t| t.name.as_str());
                 let label = match n {
-                    NO_JAVA_FRAMES | ASGCT_NO_JAVA_FRAME | ASGCT_UNKNOWN_NOT_JAVA => {
-                        role_label(c.threads.get(thread as usize).map_or("", |t| t.name.as_str()), n)
+                    NOT_A_JAVA_THREAD => native_thread_label(name),
+                    NO_JAVA_FRAMES | ASGCT_NO_JAVA_FRAME => {
+                        role(name).unwrap_or("[no Java frames]").to_string()
                     }
-                    _ => error_label(n),
+                    ASGCT_UNKNOWN_NOT_JAVA => role(name).unwrap_or_else(|| state_label(state)).to_string(),
+                    _ => error_label(n).to_string(),
                 };
-                ids.push(c.synthetic_frame(label));
+                ids.push(c.synthetic_frame(&label));
             }
             // CPU used while a virtual thread is mounted belongs to the virtual thread.
             let thread = if vthread > 0 { vthread - 1 } else { thread };
@@ -759,10 +949,36 @@ fn drain_loop(a: &'static Agent) {
         jni!(jni, PopLocalFrame, std::ptr::null_mut());
     }
     crate::debug(&format!(
-        "async sampler: {} dropped, {} repaired by stub unwinding, {} by anchor recovery",
+        "async sampler: {} dropped, {} repaired by stub unwinding, {} by native-frame unwinding, {} by anchor recovery",
         DROPPED.load(Ordering::Relaxed),
         RECOVERED_STUB.load(Ordering::Relaxed),
+        RECOVERED_NATIVE.load(Ordering::Relaxed),
         RECOVERED_ANCHOR.load(Ordering::Relaxed)
     ));
     a.vm.detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_threads_are_labelled_by_role_or_name() {
+        assert_eq!(native_thread_label("GC Thread#3"), "[GC]");
+        assert_eq!(native_thread_label("G1 Conc#1"), "[GC]");
+        assert_eq!(native_thread_label("VM Thread"), "[VM operation]");
+        assert_eq!(native_thread_label("C2 CompilerThre"), "[JIT compiler]");
+        assert_eq!(native_thread_label("pool-3-worker-12"), "[native: pool-worker]");
+        assert_eq!(native_thread_label("grpc_epoll#2"), "[native: grpc-epoll]");
+        assert_eq!(native_thread_label("12"), "[native thread]");
+        assert_eq!(role("worker"), None);
+    }
+
+    #[test]
+    fn failed_walks_are_labelled_by_thread_state() {
+        assert_eq!(state_label(THREAD_IN_NATIVE), "[in native code]");
+        assert_eq!(state_label(THREAD_IN_VM + 1), "[in VM]");
+        assert_eq!(state_label(THREAD_BLOCKED), "[blocked in VM]");
+        assert_eq!(state_label(-1), "[unknown, not Java]");
+    }
 }

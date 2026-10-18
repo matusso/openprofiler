@@ -511,22 +511,39 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
   that consumed CPU. The handler calls `AsyncGetCallTrace` and copies frames into a lock-free
   ring buffer. A drainer thread resolves the frames. Foreign `SIGPROF` signals are chained to the
   previous handler. ClassLoad/ClassPrepare events are enabled so `jmethodID`s exist. The agent's
-  own threads are never armed.
+  own threads are never armed. `ThreadStart` arms new Java threads; the drainer rescans
+  `/proc/self/task` every second to arm threads the VM starts outside it (GC workers added on
+  demand, threads of native libraries) and to drop the timers of threads that are gone.
   - `AsyncGetCallTrace` fails in two common situations, which the handler repairs and retries
     (`recover=0` turns this off). (1) The PC is in a frameless stub (array zeroing/copying,
-    itable/vtable stubs) or a method prologue/epilogue (`[unknown Java]`): the handler unwinds one
-    frame on a copy of the signal context (x86-64 and AArch64), reading memory with
-    `process_vm_readv` so a bad guess cannot fault. (2) The thread is in the VM, called through a
+    itable/vtable stubs), a stub called from another stub, a compiled method's prologue/epilogue,
+    or VM/libc code reached by a leaf call that does not set the anchor (`[unknown Java]`). On a
+    copy of the signal context (x86-64 and AArch64) the handler tries, in order: the return
+    address on top of the stack or in LR; the frame record at FP; for a PC inside a compiled
+    method, the caller's SP from the blob's `CodeBlob::_frame_size`; and finally the frame-pointer
+    chain, up to 16 native frames, until a return address lands in the code cache. Memory is read
+    with `process_vm_readv` so a bad guess cannot fault, and `AsyncGetCallTrace` validates every
+    guess. (2) The thread is in the VM, called through a
     path that left its last-Java-frame anchor without a PC, or the anchor points into a C2 runtime
     stub that HotSpot marks as never walkable (`[not walkable, in VM]`): the handler fills in the
     anchor's PC the way `JavaFrameAnchor::make_walkable()` does, and marks the stub's frame as
     complete. Both use VMStructs offsets (`JavaThread::_anchor`, `CodeHeap`, `CodeBlob`); without
     them the repair is skipped. In tests on JDK 21 this cut failed walks from 31% to 0% of samples
-    on an allocation-heavy workload, and from 79% to 3–8% on a stress test.
+    on an allocation-heavy workload, and from 79% to 3–8% on a stress test. On
+    `java/testapp/StackWorkload.java` (array stubs, megamorphic interface calls, math intrinsics,
+    allocation on a small heap) failed walks drop on AArch64 (JDK 21) from about 42% without repair,
+    and 3.5% with the single-frame repair alone, to under 0.2%; the `async_sampler_walks_stacks`
+    test fails above 5%.
   - Samples without Java frames are labelled by thread role: `[JIT compiler]`, `[GC]`,
-    `[VM operation]`, `[VM periodic task]`, otherwise `[no Java frames]` / `[non-Java thread]`.
-    Remaining failures keep a synthetic frame (`[unknown Java]`, `[GC active]`, `[deoptimization]`,
-    …).
+    `[VM operation]`, `[VM periodic task]`, `[JFR]`, `[VM service]` (service, notification,
+    monitor-deflation, signal-dispatcher and attach-listener threads), otherwise
+    `[no Java frames]`. Threads the VM does not know as Java threads and that have no known role
+    get `[native: <name>]`, their name with instance numbers dropped (`pool-3-worker-12` becomes
+    `[native: pool-worker]`), so one pool shares a frame.
+  - A Java thread whose walk still fails outside Java code is labelled by its
+    `JavaThread::_thread_state` (VMStructs): `[in native code]`, `[in VM]`, `[blocked in VM]`,
+    otherwise `[unknown, not Java]`. Other failures keep a synthetic frame (`[unknown Java]`,
+    `[GC active]`, `[deoptimization]`, …).
   - A sample's return address can only be mapped to the nearest debug-info scope, so time in a
     stub called from inlined code may land on a neighbouring inlined method.
 - **Sync (macOS, fallback):** `GetThreadListStackTraces` on all threads each tick. RUNNABLE
