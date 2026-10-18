@@ -12,6 +12,9 @@ prost.workspace = true
 zstd.workspace = true
 xxhash-rust.workspace = true
 memmap2.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+arrow-ipc.workspace = true
 
 [build-dependencies]
 prost-build = "0.14"

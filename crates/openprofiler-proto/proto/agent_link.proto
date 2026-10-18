@@ -106,6 +106,9 @@ message Watermark {
   uint64 probe_calls = 15;
   uint64 probe_events = 16;
   uint64 probe_controls = 17;
+  uint64 call_trace = 18;
+  uint64 call_sites = 19;
+  uint64 complexity = 20;
 }
 
 message SymbolDelta {
@@ -276,6 +279,40 @@ message ControlEvent {
   uint32 stack = 7;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Instrumented method analysis (see agent-link.md, "Call tracer, outliers and complexity").
+// Frames are frame ids of the symbol table; stacks are global stack ids.
+// ---------------------------------------------------------------------------------------------
+
+// Call tracer: entries and exits of instrumented methods in order, per thread, columnar.
+message CallTraceBatch {
+  repeated int64 time = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 frame = 3;
+  // false entry, true exit.
+  repeated bool exit = 4;
+}
+
+// Per call site (the stack of an instrumented call), calls since the thread's previous flush:
+// count, summed inclusive time and the slowest call. Columnar.
+message CallSiteBatch {
+  repeated int64 time = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 stack = 3;
+  repeated uint32 count = 4;
+  repeated int64 total = 5;
+  repeated int64 max = 6;
+}
+
+// Complexity analysis: (argument-derived size, duration) of calls of configured methods. Columnar.
+message ComplexityBatch {
+  repeated int64 time = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 frame = 3;
+  repeated uint64 size = 4;
+  repeated int64 duration = 5;
+}
+
 // One flush of everything that changed between `from` and `to`. Order of application:
 // symbols, stacks, threads, then the rest.
 message DataBatch {
@@ -298,6 +335,9 @@ message DataBatch {
   ProbeCallBatch probe_calls = 15;
   repeated ProbeEvent probe_events = 16;
   repeated ControlEvent probe_controls = 17;
+  CallTraceBatch call_trace = 18;
+  CallSiteBatch call_sites = 19;
+  ComplexityBatch complexity = 20;
 }
 
 // Daemon -> agent: everything up to `watermark` has been applied. In live mode the agent may
@@ -318,14 +358,23 @@ message HeapDumpRequest {
   bool live_only = 2;
   // If set and the daemon shares the filesystem, the agent writes here and sends no blob.
   string local_path = 3;
+  // "hotspot" (default: HotSpotDiagnosticMXBean.dumpHeap) or "native" (JVMTI heap walk in the
+  // agent; reachable objects only, so live_only is implied). Both write HPROF.
+  string dumper = 4;
+  // Only the objects recorded by allocation recording, their referrer chains from the GC roots
+  // and all classes. Uses the native dumper.
+  bool recorded_only = 5;
 }
 
 message SetRecording {
   // "cpu", "alloc", "monitor", "telemetry", "thread_states", "calls" (instrumented call counts),
-  // "probes".
+  // "probes", "trace" (call tracer).
   string kind = 1;
   bool enabled = 2;
   uint32 interval_us = 3;
+  // "trace": stop after this long (0 = 10 s) or this many events (0 = 1,000,000).
+  uint32 duration_ms = 4;
+  uint32 max_events = 5;
 }
 
 message UpdateConfig {
@@ -384,6 +433,9 @@ message HeapDumpAction {
   // count) are substituted.
   string path = 1;
   bool live_only = 2;
+  // As in HeapDumpRequest.
+  string dumper = 3;
+  bool recorded_only = 4;
 }
 
 message TriggerAction {
@@ -621,6 +673,10 @@ message SetInstrumentation {
   repeated string exclude = 2;
   // Enabled probe ids; empty = all. `none` disables every probe.
   repeated string probes = 3;
+  // Methods whose calls record (size, duration) for complexity analysis:
+  // `class.method[#arg]`, class with `*` wildcards; `arg` is a parameter index or `this`, by
+  // default the first argument with a size (collection, map, array, string, number).
+  repeated string complexity = 4;
 }
 
 // Answers Instrumentation with the current settings and statistics.
@@ -635,6 +691,10 @@ message InstrumentationInfo {
   uint32 instrumented_methods = 6;
   // Methods removed by auto-tuning (hot and trivial), as `class.method`.
   repeated string disabled_methods = 7;
+  repeated string complexity = 8;
+  // Call tracer state: running, events recorded by the current (or last) trace.
+  bool trace_active = 9;
+  uint64 trace_events = 10;
 }
 
 message Request {

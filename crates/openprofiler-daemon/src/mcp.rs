@@ -62,7 +62,7 @@ pub fn tools() -> Vec<Value> {
         tool("status", "List open sessions with their state and capabilities.", json!({}), &[]),
         tool(
             "load_snapshot",
-            "Open a profiling file (.jfr, .hprof, .hprof.gz, .opsnap), or code for the decompiler: an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war, .ear, .jmod, .class). Optionally open a baseline for comparison.",
+            "Open a profiling file (.jfr, .hprof, .hprof.gz, .phd, .opsnap), or code for the decompiler: an Android app (.apk, .dex, .xapk, .apks, .aab) or JVM bytecode (.jar, .war, .ear, .jmod, .class). Optionally open a baseline for comparison.",
             json!({ "path": { "type": "string" }, "baseline": { "type": "string" } }),
             &["path"],
         ),
@@ -84,8 +84,10 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "heap_dump",
-            "Trigger a heap dump in a live session; returns the new heap session id.",
-            json!({ "session": session }),
+            "Trigger a heap dump in a live session; returns the new heap session id. dumper=native walks the heap in the agent (JVMTI) instead of HotSpot's dumpHeap; recorded_only dumps only the objects recorded by allocation recording and their paths from the GC roots.",
+            json!({ "session": session,
+                    "dumper": { "type": "string", "enum": ["hotspot", "native"], "default": "hotspot" },
+                    "recorded_only": { "type": "boolean", "default": false } }),
             &["session"],
         ),
         tool(
@@ -118,7 +120,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "set_triggers",
-            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit, method {class, method}) and actions (heap_dump {path}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor|calls|probes, run_gc), plus optional cooldown and max_fires.",
+            "Replace a live agent's triggers. Each trigger has an id, one condition (timer {delay, period}, threshold {metric, above|below, for}, out_of_memory, jvm_start, jvm_exit, method {class, method}) and actions (heap_dump {path, dumper: hotspot|native, recorded_only}, thread_dump, save_snapshot <path>, bookmark <label>, start_recording/stop_recording cpu|alloc|monitor|calls|probes|trace, run_gc), plus optional cooldown and max_fires.",
             json!({ "session": session, "triggers": { "type": "array", "items": { "type": "object" } } }),
             &["session", "triggers"],
         ),
@@ -203,7 +205,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "probes",
-            "Probe data (JDBC SQL, HTTP server/client URLs, JPA, Kafka, gRPC, exceptions, files, sockets, custom probes). view=list (probes with totals; start here), hotspots (payloads by total time for one probe), events (individual calls with detail, error and request context), controls (connections/files/sockets with leak flags), timeline, telemetry. For the code paths behind a payload use hotspots with kind=probe and payload=<payload>.",
+            "Probe data (JDBC SQL, HTTP server/client URLs, JPA, Kafka, gRPC, MongoDB, Cassandra CQL, JMS, RMI, SOAP web services, AI/LLM calls with tokens, exceptions, files, sockets, custom probes). view=list (probes with totals; start here), hotspots (payloads by total time for one probe), events (individual calls with detail, error and request context), controls (connections/files/sockets with leak flags), timeline, telemetry. For the code paths behind a payload use hotspots with kind=probe and payload=<payload>.",
             json!({ "session": session, "probe": { "type": "string", "description": "Probe id from view=list, e.g. jdbc" },
                     "view": { "type": "string", "enum": ["list", "hotspots", "events", "controls", "timeline", "telemetry"], "default": "list" },
                     "search": { "type": "string", "description": "Only payloads containing this text" },
@@ -213,11 +215,32 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "instrumentation",
-            "Read or change a live agent's bytecode instrumentation: include/exclude class patterns (e.g. com.acme.*) get exact call counts (kind=calls trees), probes lists the enabled probe ids (empty = all, [\"none\"] = none). Without arguments returns the current settings.",
+            "Read or change a live agent's bytecode instrumentation: include/exclude class patterns (e.g. com.acme.*) get exact call counts (kind=calls trees), probes lists the enabled probe ids (empty = all, [\"none\"] = none), complexity lists methods for complexity analysis (`com.acme.Sorter.sort#0`: class.method, optional #argument index or #this; by default the first argument with a size). Without arguments returns the current settings.",
             json!({ "session": session,
                     "include": { "type": "array", "items": { "type": "string" } },
                     "exclude": { "type": "array", "items": { "type": "string" } },
-                    "probes": { "type": "array", "items": { "type": "string" } } }),
+                    "probes": { "type": "array", "items": { "type": "string" } },
+                    "complexity": { "type": "array", "items": { "type": "string" } } }),
+            &["session"],
+        ),
+        tool(
+            "call_trace",
+            "Start (or with enabled=false stop) a live agent's call tracer: an ordered trace of every call of instrumented methods (the include patterns of instrumentation) per thread, for duration_ms (default 10000) or max_events (default 1,000,000). Read it with call_analysis view=trace.",
+            json!({ "session": session, "enabled": { "type": "boolean", "default": true },
+                    "duration_ms": { "type": "integer" }, "max_events": { "type": "integer" } }),
+            &["session"],
+        ),
+        tool(
+            "call_analysis",
+            "Instrumented method analysis. view=outliers (call sites of instrumented methods whose slowest call is far above their mean, sorted by max/mean), trace (the call tracer's calls of one thread in order, with depth and durations; `threads` lists traced threads), complexity (methods configured for complexity analysis with their best-fitting growth model; with frame, the (size, nanos) points and all fits).",
+            json!({ "session": session,
+                    "view": { "type": "string", "enum": ["outliers", "trace", "complexity"], "default": "outliers" },
+                    "thread": { "type": "integer", "description": "trace: thread index from `threads`" },
+                    "frame": { "type": "integer", "description": "complexity: frame id from `methods`" },
+                    "search": { "type": "string", "description": "outliers: methods containing this text" },
+                    "min_calls": { "type": "integer", "default": 10 },
+                    "offset": { "type": "integer" },
+                    "limit": { "type": "integer", "default": 50 } }),
             &["session"],
         ),
     ]
@@ -537,6 +560,21 @@ impl McpServer {
                 let mut req: crate::probes::ProbesRequest = serde_json::from_value(args.clone())?;
                 req.limit = req.limit.or(Some(50));
                 crate::probes::probes(&s, &req)
+            }
+            "call_analysis" => {
+                let s = self.session(args, "session")?;
+                let mut req: crate::calls::CallsRequest = serde_json::from_value(args.clone())?;
+                req.limit = req.limit.or(Some(50));
+                crate::calls::calls(&s, &req)
+            }
+            "call_trace" => {
+                let s = self.session(args, "session")?;
+                let engine = self.engine.clone();
+                let mut req = args.clone();
+                req["kind"] = json!("trace");
+                req["enabled"] = json!(args["enabled"].as_bool().unwrap_or(true));
+                tokio::runtime::Handle::current()
+                    .block_on(async move { crate::live::control(&engine, &s, "recording", req).await })
             }
             "heap_dump"
             | "instrumentation"

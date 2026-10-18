@@ -8,9 +8,12 @@
 //! The HotSpot attach protocol: create `.attach_pid<pid>`, send `SIGQUIT`, wait for the target to
 //! open the `.java_pid<pid>` UNIX socket in its temp directory, then send
 //! `1\0<cmd>\0<arg1>\0<arg2>\0<arg3>\0` and read `<status>\n<output>`. In containers the target's
-//! namespace PID (`NSpid`) and its root (`/proc/<pid>/root`) are used.
+//! namespace PID (`NSpid`) and its root (`/proc/<pid>/root`) are used. On Windows the command
+//! goes through a thread injected into the JVM instead (see `windows`).
 
 pub mod hsperf;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(unix)]
 use anyhow::anyhow;
@@ -65,17 +68,23 @@ fn process_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    windows::process_alive(pid)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_pid: u32) -> bool {
     false
 }
 
 /// Candidate directories holding `hsperfdata_<user>` directories.
 fn perf_roots() -> Vec<PathBuf> {
+    #[allow(unused_mut)]
     let mut v = vec![std::env::temp_dir()];
-    let tmp = PathBuf::from("/tmp");
-    if !v.contains(&tmp) {
-        v.push(tmp);
+    #[cfg(unix)]
+    if !v.contains(&PathBuf::from("/tmp")) {
+        v.push(PathBuf::from("/tmp"));
     }
     v
 }
@@ -252,8 +261,13 @@ pub fn attach_command(pid: u32, cmd: &str, args: &[&str]) -> Result<(i32, String
     Ok((code, rest.to_string()))
 }
 
-/// HotSpot attach on Windows goes through remote thread injection, which is not implemented.
-#[cfg(not(unix))]
+/// Sends one attach-protocol command and returns `(status, output)`.
+#[cfg(windows)]
+pub fn attach_command(pid: u32, cmd: &str, args: &[&str]) -> Result<(i32, String)> {
+    windows::attach_command(pid, cmd, args)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn attach_command(_pid: u32, _cmd: &str, _args: &[&str]) -> Result<(i32, String)> {
     bail!("attaching to local JVMs is not supported on this platform")
 }
@@ -292,6 +306,8 @@ fn agent_path_for(t: &Target, agent: &Path) -> Result<(PathBuf, String)> {
         None => {
             let abs = std::fs::canonicalize(agent).with_context(|| format!("agent {}", agent.display()))?;
             let s = abs.display().to_string();
+            #[cfg(windows)]
+            let s = windows::plain_path(&s).to_string();
             Ok((abs, s))
         }
         Some(_) => {

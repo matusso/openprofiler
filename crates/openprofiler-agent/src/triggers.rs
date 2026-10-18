@@ -352,8 +352,8 @@ fn run_job(a: &Agent, jni: *mut jvmti_sys::JNIEnv, j: Job) {
                     {
                         let _ = std::fs::create_dir_all(dir);
                     }
-                    helpers
-                        .dump_heap(jni, &path, h.live_only)
+                    let p = std::path::Path::new(&path);
+                    crate::heapdump::dump_with(a, helpers, jni, p, &h.dumper, h.recorded_only, h.live_only)
                         .map(|()| Some(format!("heap dump written to {path}")))
                         .map_err(|e| format!("heap dump {path}: {e}"))
                 }

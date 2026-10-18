@@ -656,6 +656,14 @@ export function HeapView() {
             {formatBytes(sm.total_shallow)} · {formatCount(sm.gc_roots)} GC roots
           </span>
         )}
+        {sm?.format === "phd" && (
+          <span
+            className="badge"
+            title="IBM Portable Heap Dump: references and sizes only. Fields are unnamed, there are no primitive values or strings, GC roots are inferred and inspections are unavailable."
+          >
+            PHD
+          </span>
+        )}
         {sm && sm.analysis_state !== "ready" && (
           <span className="badge accent">computing {sm.analysis_state}…</span>
         )}

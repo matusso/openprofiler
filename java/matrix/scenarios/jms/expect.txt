@@ -1,0 +1,10 @@
+# Sends by destination, also from a request handler.
+count   | jms | send orders- | 50
+event   | jms | send orders- | context~GET /owners/{id}
+stack   | jms | send orders- | Main.main
+# Receives by the destination of the message; the one that timed out is idle waiting.
+count   | jms | receive orders- | 50
+nocall  | jms | receive [unknown]
+# A listener's processing is a request: what it does has it as context.
+count   | jms | process events- | 10
+every   | jms | send audit- | context~JMS events-

@@ -93,7 +93,7 @@ interface Share { token: string; session: string; created: number; expires?: num
 A share token works wherever the API token does, but only for reads of its session: `GET
 /sessions` lists just that session, the events WebSocket only carries its events, and the session's
 views (`summary`, `tree`, `hotspots`, `flame`, `callgraph`, `histogram`, `telemetry`, threads,
-monitors, probes, events, insights, `export`, `heap/*` except `histogram-diff`, `code/*`) answer.
+monitors, probes, calls, events, insights, `export`, `heap/*` except `histogram-diff`, `code/*`) answer.
 Everything else is `403`: attach, open, discovery, file browsing, compare, closing, recording
 control, dumps, snapshots, bookmarks, GC, triggers, MBeans, instrumentation and managing shares.
 In web mode `path` (`/?token=…`) opens the UI read-only on that session. Shares live in memory: a
@@ -104,7 +104,7 @@ type SessionKind = "hprof" | "jfr" | "snapshot" | "live" | "dex";
 type Capability = "cpu" | "wall" | "alloc" | "monitor" | "wait" | "io" | "exception"
                 | "calls" | "probe"
                 | "telemetry" | "threads" | "heap" | "gc" | "thread_dumps" | "recording"
-                | "decompile" | "mbeans" | "probes" | "instrument";
+                | "decompile" | "mbeans" | "probes" | "instrument" | "call_analysis";
 interface Session {
   id: string; kind: SessionKind; name: string; path?: string;
   state: "loading" | "ready" | "live" | "detached" | "failed";
@@ -252,6 +252,34 @@ interface ProbesRequest {
 `context` is the request the call was made for (`GET /owners/{id}`), also across threads.
 `leaked` control objects were garbage collected without being closed.
 
+## Method analysis
+
+`POST /api/v1/sessions/{id}/calls` (live sessions and snapshots with the `call_analysis`
+capability; it needs instrumented methods, see `instrumentation` below):
+
+```ts
+interface CallsRequest {
+  view: "outliers" | "trace" | "complexity";  // default outliers
+  range?: [number, number];
+  thread?: number;     // trace: thread index (default: the thread with the most events)
+  offset?: number;     // trace: paging
+  limit?: number;      // trace default 5000, outliers 500, complexity points 2000
+  min_calls?: number;  // outliers: default 10
+  search?: string;     // outliers: methods containing this (case-insensitive)
+  frame?: number;      // complexity: method frame id (default: the method with the most points)
+}
+```
+
+| view | response |
+|---|---|
+| `outliers` | `{ total, min_calls, sites: { stack, method, caller?, calls, total, mean, max, ratio, threads }[] }`, call sites by `max / mean` |
+| `trace` | `{ events, threads: { thread, name, events, start, end }[], thread, total, offset, calls: { thread, depth, frame, method, start, end? }[] }`; `end` is absent for calls still running when the trace ended |
+| `complexity` | `{ methods: { frame, method, points, sizes, max_size, best? }[], method?: { summary, fits: { model, a, b, r2 }[], best?, points: [size, nanos][] } }` |
+
+Complexity fits are least squares of `t = a + b·f(n)` with `b ≥ 0` for `O(1)`, `O(log n)`, `O(n)`,
+`O(n log n)` and `O(n^2)`; `best` is the simplest model within 0.01 of the highest R², or `O(1)`
+when no model reaches R² 0.3 or there are fewer than 3 distinct sizes.
+
 ## Heap
 
 Available when the session has the `heap` capability. Object sets are referenced by id; set `0`
@@ -370,7 +398,8 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 
 ## Live control (live sessions)
 
-- `POST .../recording` `{ kind: "cpu"|"alloc"|"monitor"|"telemetry"|"calls"|"probes", enabled: boolean, interval_ms? }`
+- `POST .../recording` `{ kind: "cpu"|"alloc"|"monitor"|"telemetry"|"calls"|"probes"|"trace", enabled: boolean, interval_ms?, duration_ms?, max_events? }`;
+  `trace` starts the call tracer for `duration_ms` (default 10 000) or `max_events`.
 - `POST .../heap-dump` → creates a new `hprof` session from a dump streamed back by the agent.
 - `POST .../snapshot` `{ path }` → writes a `.opsnap` file.
 - `POST .../bookmark` `{ label }`
@@ -378,11 +407,13 @@ memory, threads and heap (e.g. "Duplicate strings waste 120 MB", "GC overhead 23
 - `POST .../triggers` `{ triggers: Trigger[] }` → replaces the agent's triggers (format in
   [agent-link.md](agent-link.md#triggers)); returns `{ installed }`.
 - `GET .../instrumentation` → the agent's instrumentation settings; `POST` with
-  `{ include?: string[], exclude?: string[], probes?: string[] }` replaces them (class patterns
-  such as `com.acme.*` get exact call counts; `probes` empty = all, `["none"]` = none) and
-  retransforms affected classes. Both return `{ include, exclude, available_probes: { id, name,
+  `{ include?: string[], exclude?: string[], probes?: string[], complexity?: string[] }` replaces
+  the given fields (class patterns such as `com.acme.*` get exact call counts; `probes` empty =
+  all, `["none"]` = none; `complexity` specs such as `com.acme.Sorter.sort#0`) and retransforms
+  affected classes. Both return `{ include, exclude, available_probes: { id, name,
   payload_label, control_label? }[], enabled_probes, instrumented_classes, instrumented_methods,
-  disabled_methods }` (`disabled_methods`: removed by auto-tuning). Needs the `instrument`
+  disabled_methods, complexity, trace_active, trace_events }` (`disabled_methods`: removed by
+  auto-tuning). Needs the `instrument`
   capability.
 
 ## MBeans (live sessions with the `mbeans` capability)
@@ -434,7 +465,7 @@ returns like any other series; `enabled: false` stops sampling. `unit` defaults 
 
 ## Export
 
-`POST /api/v1/sessions/{id}/export` `{ view: "calltree"|"hotspots"|"flame"|"classes"|"biggest"|"telemetry"|"threads",
+`POST /api/v1/sessions/{id}/export` `{ view: "calltree"|"hotspots"|"flame"|"classes"|"biggest"|"telemetry"|"threads"|"outliers"|"complexity"|"trace",
 format: "csv"|"json"|"html"|"svg"|"collapsed", request: <view request> }` → file body with the
 matching `Content-Type`.
 

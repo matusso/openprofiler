@@ -203,6 +203,38 @@ message Probes {
   repeated ControlEvent controls = 4;
 }
 
+// Section kind 16: instrumented method analysis, columnar (times delta-coded). Frames are frame
+// ids, stacks stack ids.
+message CallTrace {
+  repeated sint64 time_delta = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 frame = 3;
+  repeated bool exit = 4;
+}
+
+message CallSites {
+  repeated sint64 time_delta = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 stack = 3;
+  repeated uint32 count = 4;
+  repeated sint64 total = 5;
+  repeated sint64 max = 6;
+}
+
+message Complexity {
+  repeated sint64 time_delta = 1;
+  repeated uint32 thread = 2;
+  repeated uint32 frame = 3;
+  repeated uint64 size = 4;
+  repeated sint64 duration = 5;
+}
+
+message Calls {
+  CallTrace trace = 1;
+  CallSites sites = 2;
+  Complexity complexity = 3;
+}
+
 // Index (written after the last section).
 message SectionEntry {
   uint32 kind = 1;

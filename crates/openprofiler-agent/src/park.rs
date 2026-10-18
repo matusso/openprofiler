@@ -124,7 +124,7 @@ unsafe extern "system" fn park_hook(env: *mut JNIEnv, unsafe_: jobject, absolute
 /// through the class: `Klass*` from the mirror's `klass` field (read with `Unsafe.getLong`, which
 /// is GC-safe), then `InstanceKlass::_methods`, matching name and signature through the constant
 /// pool. All of it is metaspace, which GC does not move; offsets come from VMStructs.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn native_function(jni: *mut JNIEnv, cls: jclass, name: &str, sig: &str) -> Option<usize> {
     let v = crate::vmstructs::VmStructs::load(&[
         "java_lang_Class",
@@ -190,7 +190,7 @@ fn native_function(jni: *mut JNIEnv, cls: jclass, name: &str, sig: &str) -> Opti
     None
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn native_function(_: *mut JNIEnv, _: jclass, _: &str, _: &str) -> Option<usize> {
     None
 }
@@ -206,7 +206,32 @@ fn in_libjvm(f: usize) -> bool {
         && unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }.to_string_lossy().contains("libjvm")
 }
 
+/// Whether `f` points into jvm.dll (a sanity check on everything read above).
+#[cfg(windows)]
+fn in_libjvm(f: usize) -> bool {
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let mut module = std::ptr::null_mut();
+    let mut name = [0u16; 1024];
+    // SAFETY: GetModuleHandleExW accepts any address with FROM_ADDRESS; the name buffer is local.
+    let n = unsafe {
+        if GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            f as *const u16,
+            &mut module,
+        ) == 0
+        {
+            return false;
+        }
+        GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) as usize
+    };
+    String::from_utf16_lossy(&name[..n.min(name.len())]).to_ascii_lowercase().ends_with("\\jvm.dll")
+}
+
 /// `theUnsafe.getLong(object, offset)` on the given Unsafe class.
+#[cfg(any(unix, windows))]
 fn unsafe_get_long(jni: *mut JNIEnv, unsafe_class: jclass, offset: jlong) -> Option<jlong> {
     // The field's type is the class itself: `Ljdk/internal/misc/Unsafe;` or `Lsun/misc/Unsafe;`.
     let sig = std::ffi::CString::new(agent()?.jvmti.class_signature(unsafe_class).ok()?).ok()?;

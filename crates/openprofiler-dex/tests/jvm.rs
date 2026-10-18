@@ -136,7 +136,8 @@ fn recompiles_and_behaves_identically() {
         eprintln!("no JDK on PATH; skipping");
         return;
     }
-    let expected = std::fs::read_to_string(data("expected.txt")).unwrap();
+    // Line endings vary by platform (git autocrlf, println), but a text block always prints a bare \n.
+    let expected = std::fs::read_to_string(data("expected.txt")).unwrap().replace("\r\n", "\n");
     for f in FIXTURES {
         let dir = std::env::temp_dir().join(format!("op-jvm-corpus-{}-{f}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -162,10 +163,10 @@ fn recompiles_and_behaves_identically() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{f}: harness: {}", String::from_utf8_lossy(&out.stderr));
-        let cp = format!("{}:{}", classes.display(), harness.display());
+        let cp = std::env::join_paths([&classes, &harness]).unwrap();
         let run = Command::new("java").arg("-cp").arg(cp).arg("Check").output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
             expected,
             "{f}: behaviour differs; stderr:\n{}",
             String::from_utf8_lossy(&run.stderr)

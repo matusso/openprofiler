@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 openprofiler-hprof.workspace = true
+openprofiler-phd.workspace = true
 openprofiler-model.workspace = true
 memmap2.workspace = true
 rayon.workspace = true

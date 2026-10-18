@@ -45,6 +45,10 @@ pub(crate) struct Meta {
     pub unknown_class: u32,
     pub addr_min: u64,
     pub addr_shift: u32,
+    /// Converted from an IBM Portable Heap Dump: sizes come from the records, and there are no
+    /// field values or primitive array data.
+    #[serde(default)]
+    pub phd: bool,
 }
 
 /// Address → dense object id lookup: a bucket table over the sorted address array.
@@ -224,6 +228,10 @@ pub(crate) fn build(
     let id_size = h.id_size();
     progress(Phase::Scanning, 0.0);
     let top = h.scan()?;
+    let phd = h.string(&top, 1).starts_with(openprofiler_phd::HPROF_MARKER);
+    // Converted PHDs carry each object's size (in 4-byte units) in its stack trace serial.
+    let sized =
+        |serial: u32, computed: u32| if phd && serial != 0 { serial.saturating_mul(4) } else { computed };
 
     // ---- Pass A: locate objects, class dumps and roots (parallel per segment) ----
     // A1 counts objects and collects the (few) class dumps and roots; A2 writes `(address,
@@ -311,7 +319,11 @@ pub(crate) fn build(
             prev_array = s.last_array;
         }
     }
-    let compressed_detected = compressed_detected && id_size == 8;
+    let compressed_detected = match h.hint(&top, "compressedRefs").as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        _ => compressed_detected,
+    } && id_size == 8;
     let mut pair_buf = Big::<[u64; 2]>::zeroed(n_objs);
     pair_buf[0] = [0, BOOT_LOADER_OFFSET];
     {
@@ -538,7 +550,7 @@ pub(crate) fn build(
                 }
                 None => (unknown_class, sizes.pointer + sizes.ref_size),
             },
-            Some(SubRecord::Instance { class_id, data, .. }) => {
+            Some(SubRecord::Instance { class_id, data, stack_serial, .. }) => {
                 let ci = class_by_addr.get(&class_id).copied().unwrap_or(unknown_class);
                 let l = &layouts[ci as usize];
                 for &o in &l.ref_offsets {
@@ -559,9 +571,9 @@ pub(crate) fn build(
                 {
                     flags |= F_REFERENT_LAST;
                 }
-                (ci, l.shallow)
+                (ci, sized(stack_serial, l.shallow))
             }
-            Some(SubRecord::ObjArray { class_id, len, elems, .. }) => {
+            Some(SubRecord::ObjArray { class_id, len, elems, stack_serial, .. }) => {
                 let ci = class_by_addr.get(&class_id).copied().unwrap_or(object_array);
                 for i in 0..len as usize {
                     push(out, read_id(elems, i * id_size as usize, id_size));
@@ -570,15 +582,15 @@ pub(crate) fn build(
                 if m != u32::MAX {
                     out.targets.push(m);
                 }
-                (ci, sizes.object_array(len))
+                (ci, sized(stack_serial, sizes.object_array(len)))
             }
-            Some(SubRecord::PrimArray { ty: t, len, .. }) => {
+            Some(SubRecord::PrimArray { ty: t, len, stack_serial, .. }) => {
                 let ci = prim.get(t as usize).copied().filter(|&c| c != u32::MAX).unwrap_or(unknown_class);
                 let m = class_mirror[ci as usize];
                 if m != u32::MAX {
                     out.targets.push(m);
                 }
-                (ci, sizes.primitive_array(len, type_size(t, 8)))
+                (ci, sized(stack_serial, sizes.primitive_array(len, type_size(t, 8))))
             }
             Some(SubRecord::Class(c)) => {
                 // Same edges as MAT: <class>, <super>, <classloader> (0 = boot loader pseudo
@@ -598,7 +610,8 @@ pub(crate) fn build(
                         push(out, s.value);
                     }
                 }
-                (java_lang_class, sizes.class_object(c.statics.iter().map(|s| s.ty)))
+                let computed = if phd { 0 } else { sizes.class_object(c.statics.iter().map(|s| s.ty)) };
+                (java_lang_class, sized(c.stack_serial, computed))
             }
             _ => (unknown_class, 0),
         };
@@ -834,6 +847,7 @@ pub(crate) fn build(
         unknown_class,
         addr_min,
         addr_shift,
+        phd,
     };
     std::fs::write(path(dir, "meta.json"), serde_json::to_vec_pretty(&meta)?)?;
     progress(Phase::Finishing, 1.0);

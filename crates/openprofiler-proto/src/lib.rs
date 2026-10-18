@@ -15,7 +15,8 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/openprofiler.link.v1.rs"));
 }
 
-pub const PROTOCOL_SEMVER: &str = "1.0.0";
+/// 1.1: call tracer, call-site and complexity batches; `SetRecording` trace limits.
+pub const PROTOCOL_SEMVER: &str = "1.1.0";
 pub const HEADER_LEN: usize = 7;
 pub const FLAG_ZSTD: u8 = 1;
 /// Upper bound for a single frame payload (compressed or not).

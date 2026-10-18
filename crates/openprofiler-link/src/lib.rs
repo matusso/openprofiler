@@ -109,6 +109,16 @@ pub enum LinkState {
     Closed(String),
 }
 
+/// How the agent takes a heap dump.
+#[derive(Debug, Clone, Default)]
+pub struct HeapDumpOptions {
+    pub live_only: bool,
+    /// `"hotspot"` (or empty: `HotSpotDiagnosticMXBean.dumpHeap`) or `"native"` (JVMTI heap walk).
+    pub dumper: String,
+    /// Only objects recorded by allocation recording and their paths from the GC roots.
+    pub recorded_only: bool,
+}
+
 /// What a heap dump request produced.
 #[derive(Debug, Clone)]
 pub struct HeapDumpOutcome {
@@ -308,11 +318,24 @@ impl LinkClient {
         live_only: bool,
         agent_writes_locally: bool,
     ) -> Result<HeapDumpOutcome> {
+        let opts = HeapDumpOptions { live_only, ..Default::default() };
+        self.heap_dump_with(path, &opts, agent_writes_locally).await
+    }
+
+    /// Like [`Self::heap_dump`], with a choice of dumper.
+    pub async fn heap_dump_with(
+        &self,
+        path: &Path,
+        opts: &HeapDumpOptions,
+        agent_writes_locally: bool,
+    ) -> Result<HeapDumpOutcome> {
         let abs = std::path::absolute(path)?;
         let req = v1::HeapDumpRequest {
             format: "hprof".into(),
-            live_only,
+            live_only: opts.live_only,
             local_path: if agent_writes_locally { abs.display().to_string() } else { String::new() },
+            dumper: opts.dumper.clone(),
+            recorded_only: opts.recorded_only,
         };
         let r = self
             .request(v1::request::Kind::HeapDump(req), (!agent_writes_locally).then(|| abs.clone()))
@@ -327,7 +350,14 @@ impl LinkClient {
     }
 
     pub async fn set_recording(&self, kind: &str, enabled: bool, interval_us: u32) -> Result<()> {
-        let k = v1::SetRecording { kind: kind.into(), enabled, interval_us };
+        let k = v1::SetRecording { kind: kind.into(), enabled, interval_us, ..Default::default() };
+        self.request(v1::request::Kind::SetRecording(k), None).await.map(|_| ())
+    }
+
+    /// Starts the call tracer for `duration_ms` (0 = 10 s) or `max_events` (0 = the agent's
+    /// default), or stops it.
+    pub async fn call_trace(&self, enabled: bool, duration_ms: u32, max_events: u32) -> Result<()> {
+        let k = v1::SetRecording { kind: "trace".into(), enabled, interval_us: 0, duration_ms, max_events };
         self.request(v1::request::Kind::SetRecording(k), None).await.map(|_| ())
     }
 
@@ -345,15 +375,22 @@ impl LinkClient {
         self.request(v1::request::Kind::SetTriggers(v1::SetTriggers { triggers }), None).await.map(|_| ())
     }
 
-    /// Replaces the instrumentation settings (call-count patterns, enabled probes); the agent
-    /// retransforms the affected classes. Empty `probes` enables all, `["none"]` disables all.
+    /// Replaces the instrumentation settings (call-count patterns, enabled probes, complexity
+    /// methods); the agent retransforms the affected classes. Empty `probes` enables all,
+    /// `["none"]` disables all.
     pub async fn set_instrumentation(
         &self,
         include: Vec<String>,
         exclude: Vec<String>,
         probes: Vec<String>,
+        complexity: Vec<String>,
     ) -> Result<v1::InstrumentationInfo> {
-        let kind = v1::request::Kind::SetInstrumentation(v1::SetInstrumentation { include, exclude, probes });
+        let kind = v1::request::Kind::SetInstrumentation(v1::SetInstrumentation {
+            include,
+            exclude,
+            probes,
+            complexity,
+        });
         match self.request(kind, None).await?.response.result {
             Some(v1::response::Result::Instrumentation(i)) => Ok(i),
             _ => bail!("unexpected instrumentation response"),

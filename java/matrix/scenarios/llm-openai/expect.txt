@@ -1,0 +1,6 @@
+# Operation and model, tokens as detail; async calls timed until their future completes.
+count   | llm | chat.completions gpt-4o-mini | 20
+every   | llm | chat.completions gpt-4o-mini | detail~tokens 12 in, 3 out
+event   | llm | chat.completions gpt-4o-mini | context~GET /owners/{id}
+stack   | llm | chat.completions gpt-4o-mini | Main.main
+call    | llm | embeddings text-embedding-3-small

@@ -180,15 +180,23 @@ fn run(a: &'static Agent) {
 
 fn serve(a: &'static Agent, jni: *mut jvmti_sys::JNIEnv, tcp: TcpStream) -> io::Result<()> {
     tcp.set_nodelay(true)?;
-    tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
     match &a.tls {
         Some(t) => {
-            let conn = rustls::ServerConnection::new(t.config.clone()).map_err(io::Error::other)?;
+            let mut tcp = tcp;
+            let mut conn = rustls::ServerConnection::new(t.config.clone()).map_err(io::Error::other)?;
+            // Finish the TLS handshake before switching to the short polling timeout: a read
+            // timeout mid-handshake fails the session (Windows reports it as TimedOut).
+            tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+            while conn.is_handshaking() {
+                conn.complete_io(&mut tcp)?;
+            }
+            tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
             let mut s = rustls::StreamOwned::new(conn, tcp);
             session(a, jni, &mut s)
         }
         None => {
+            tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
             let mut s = tcp;
             session(a, jni, &mut s)
         }
@@ -369,7 +377,7 @@ fn handle_request<S: Write>(
                         req.id
                     ))
                 };
-                match h.dump_heap(jni, &path.display().to_string(), r.live_only) {
+                match crate::heapdump::dump_with(a, h, jni, &path, &r.dumper, r.recorded_only, r.live_only) {
                     Ok(()) => {
                         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                         let blob_id = if local { 0 } else { req.id.max(1) };
@@ -388,6 +396,9 @@ fn handle_request<S: Write>(
             }
             None => fail(&mut resp, "heap dumps unavailable (no boot classes)"),
         },
+        Some(Kind::SetRecording(r)) if r.kind == "trace" => {
+            crate::events::set_trace(a, r.enabled, r.duration_ms, r.max_events)
+        }
         Some(Kind::SetRecording(r)) => crate::events::set_recording(a, &r.kind, r.enabled, r.interval_us),
         Some(Kind::UpdateConfig(u)) => {
             if let Some(c) = u.config {
@@ -422,7 +433,7 @@ fn handle_request<S: Write>(
                 [n] if n == "none" => Some(vec![]),
                 _ => Some(r.probes),
             };
-            crate::instrument::configure(r.include, r.exclude, probes);
+            crate::instrument::configure(r.include, r.exclude, probes, r.complexity);
             resp.result = Some(v1::response::Result::Instrumentation(instrumentation_info(a)));
         }
         Some(Kind::Instrumentation(_)) if crate::events::has_cap(a, "instrument") => {
@@ -445,6 +456,7 @@ fn handle_request<S: Write>(
 
 fn instrumentation_info(a: &Agent) -> v1::InstrumentationInfo {
     let i = crate::instrument::info();
+    let trace = crate::instrument::calls::trace_status();
     let probes = a.collector.lock().probe_infos().to_vec();
     v1::InstrumentationInfo {
         include: i.include,
@@ -454,6 +466,9 @@ fn instrumentation_info(a: &Agent) -> v1::InstrumentationInfo {
         instrumented_classes: i.classes as u32,
         instrumented_methods: i.methods as u32,
         disabled_methods: i.disabled,
+        complexity: i.complexity,
+        trace_active: trace.0,
+        trace_events: trace.1,
     }
 }
 

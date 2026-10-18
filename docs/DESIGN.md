@@ -23,8 +23,7 @@ formats are specified separately:
 - **Secure by default.** The agent port uses TLS with a pinned fingerprint and a mandatory token.
 - Licence: Apache-2.0; the native agent is MPL-2.0.
 
-**Non-goals for v1:** Java < 11, IBM PHD import (later), a Windows agent (v1.x), Eclipse and
-NetBeans plugins.
+**Non-goals for v1:** Java < 11, Eclipse and NetBeans plugins.
 
 ## 2. Technology choices
 
@@ -86,6 +85,7 @@ crates/
   openprofiler-model/      symbols, stack trie, samples; call tree, hot spots, flame, call graph, diff
   openprofiler-snapshot/   .opsnap container read/write
   openprofiler-hprof/      zero-copy HPROF parser (1.0.1/1.0.2, gzip)
+  openprofiler-phd/        IBM Portable Heap Dump (OpenJ9) parser and PHD → HPROF conversion
   openprofiler-jfr/        metadata-driven JFR parser → openprofiler-model
   openprofiler-heap/       object index, CSR graphs, dominators, retained sizes, inspections, paths
   openprofiler-attach/     hsperfdata discovery, HotSpot attach, container NSpid handling
@@ -110,6 +110,12 @@ the `OPENPROFILER_AGENT_OPTIONS` env var, or the attach argument. With `port=0` 
 ephemeral port and publishes `{pid, port, token, fingerprint}` in `$TMPDIR/openprofiler-<pid>.json`
 (mode 0600).
 
+**Platforms.** Linux (glibc and musl), macOS and Windows (`openprofiler_agent.dll`). On Windows
+the agent uses the sync sampler, finds VMStructs through `jvm.dll`'s exports, and writes the info
+file to `%TEMP%` without Unix permission bits (the user's profile directory is private). The
+Windows port was written and cross-compiled on macOS; CI builds it and runs the workspace tests
+(live agent and attach included) on `windows-2025`, which is its first real run.
+
 **Capabilities** are requested in groups, and the agent records which ones were granted, so it
 degrades gracefully when the JVM refuses one group.
 
@@ -117,8 +123,8 @@ degrades gracefully when the JVM refuses one group.
 1. **Async (default on Linux):** per-thread CPU timers deliver a signal; the handler calls
    `AsyncGetCallTrace` and copies frames into a lock-free ring buffer. A drainer thread aggregates
    samples into the call tree. VMStructs are used only for robustness checks and stack-walk repair.
-2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS and when async
-   sampling is unavailable.
+2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS, Windows and
+   when async sampling is unavailable.
 3. **JFR mode (planned):** stream JFR `ExecutionSample` events for locked-down environments.
 4. **Virtual threads:** mount and unmount extension events, aggregated per carrier.
 
@@ -130,8 +136,32 @@ through `LockSupport.park` hooks, with lock owners. Events above the threshold a
 (within a per-second budget), shorter contention is sampled by blocked time, and stacks are
 resolved off the application thread, so heavy contention is not made worse.
 
-**Heap dumps:** `HotSpotDiagnosticMXBean.dumpHeap` (HPROF), streamed back to the daemon. A native
-dumper that writes directly into a snapshot is planned.
+**Heap dumps:** `HotSpotDiagnosticMXBean.dumpHeap` (HPROF) by default, streamed back to the
+daemon. The agent also has a native dumper (`dumper=native`, `heapdump.rs`): a JVMTI
+`FollowReferences` walk in a private JVMTI environment (its tags never meet the agent's) that writes
+HPROF 1.0.2, the format the heap engine and `.opsnap` heap sections already read, so retained sizes
+are computed the same way as for HotSpot's dumps. Object ids are synthetic: an object's tag is its
+id, assigned on discovery from a running sum of `GetObjectSize`, so ids look like a densely packed
+heap; compressed references are detected from object array sizes and written to a hint record
+(`compressedRefs=…`, UTF8 id all ones), which the engine prefers over its address heuristic.
+HotSpot reports all references and primitive values of an object in one burst while visiting it,
+so each instance is written as soon as the next object starts and the walk keeps no per-object
+state. Classes are collected up front for instance layouts and JVMTI field indices (interface
+fields first, then `Object`'s down to the class's own, statics included); statics, super, loader,
+signers and protection domain come from the walk. Constant-pool references go into a synthetic
+`<resolved_references>` `Object[]` per class, as in HotSpot's dumps. Stack and JNI locals carry
+their thread's serial, so they become references from the thread object. Only reachable objects
+are dumped. On JDK 27 the native dump of a test app has the same instances, field values and
+retained sizes for application structures as HotSpot's; reachable objects are within 1% and their
+shallow size within 3% (HotSpot's dumps hold more `java.lang.invoke` objects and `int[]`; the
+synthetic arrays also hold resolved classes, which some hidden classes are reachable through only).
+
+*Recorded objects:* while allocation recording is on, every sampled allocation is tagged in another
+private JVMTI environment (tags die with their objects; switching recording on starts a new set).
+A recorded-only dump (`recorded_only`) walks the heap once remembering each object's first
+referrer (4 bytes per object), keeps the live recorded objects and their referrer chains up to the
+GC roots, and walks again writing only those (references to other objects are written as null)
+plus all classes.
 
 **Telemetry:** a once-per-second sampler in the boot classes (MXBeans and GC notifications) pushes
 compact records into a native time-series ring.
@@ -151,6 +181,15 @@ alone. What gets injected:
   overhead (at least 50,000 calls in 5 s, mean self time under 400 ns).
 - *Probe interceptions* (`Hooks.enter/exit/exitThrow` with `this`, boxed arguments and the return
   value), *custom probes* (`@Probe` methods) and *method triggers* (`Hooks.trigger`).
+- *Complexity sites* for `complexity=` methods (`class.method[#arg]`): probe-style sites whose
+  calls report an argument-derived size (collection/map size, array/string length, a number) and
+  their duration, at most `complexity_rate` points per method and second.
+
+The call trie also keeps, per call site (path of instrumented frames), the inclusive time and the
+slowest call, flushed with the counts for **outlier detection** (max against mean per call site).
+The **call tracer** (`SetRecording trace`, `trace=` option or a trigger) records every entry and
+exit of instrumented methods per thread, in order, for a bounded time and event count; off, the
+hooks check one flag.
 
 Interceptions match one class or every subtype of a class or interface (the type included). The
 hook sees supertypes only by name, and a class loads before its supertypes, so subtype masks are
@@ -186,20 +225,25 @@ that serves live sessions.
 - Probes: JDBC (SQL, bind parameters, physical and pooled connections), JPA (javax and Jakarta),
   HTTP server (Servlet, also asynchronous; JDK `HttpServer`; Netty handlers; Reactor Netty, so
   WebFlux; Vert.x, so Quarkus) and client (JDK `HttpClient`, `HttpURLConnection`, OkHttp, Apache
-  HttpClient 4/5), Kafka, gRPC, exceptions, files, sockets. Threads aggregate their calls per
+  HttpClient 4/5), Kafka, gRPC, MongoDB (sync and reactive), Cassandra (DataStax 3.x/4.x), JMS
+  (javax and Jakarta), RMI, SOAP web services (JAX-WS: Metro, CXF), AI/LLM clients (OpenAI and
+  Anthropic SDKs, LangChain4j, Spring AI; model and tokens), exceptions, files, sockets.
+  Asynchronous calls (Cassandra, MongoDB reactive, async LLM clients) are timed until their future
+  or reply completes. Threads aggregate their calls per
   second, payload and stack, and the native side keeps individual events within a per-probe budget
   (slow calls always). Stacks of probe calls are sampled per (probe, request, payload) at most every
   10 ms (events always get their own), since walking deep stacks on every call would dominate the
   cost of the probes.
-- **Request labels and async context.** HTTP and gRPC server probes set the thread's request label
-  (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
+- **Request labels and async context.** HTTP, gRPC, RMI and SOAP server probes and JMS message
+  listeners set the thread's request label (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
   stacks (call trees split by request) and the context of its probe events. An internal probe
   carries the label across `FutureTask`, `ForkJoinTask` (`CompletableFuture`, parallel streams),
   `ThreadPoolExecutor.execute`, `Thread.start` (also virtual threads), Kotlin coroutine dispatch
   and JBoss Threads' `EnhancedQueueExecutor`. Asynchronous servers are labelled while they
   dispatch a request and record it when its response completes.
 - **Version matrix** (`java/matrix/`): every probe runs against real libraries and versions
-  (PostgreSQL, MySQL and Kafka in containers) and the recordings are checked for payloads, events,
+  (PostgreSQL, MySQL, Kafka, MongoDB, Cassandra and ActiveMQ Artemis in containers; LLM clients
+  against a local fake API) and the recordings are checked for payloads, events,
   control objects, request context and call-tree links. The demo benchmark (`java/bench/`) measures
   the overhead on Spring Petclinic and the Quarkus Hibernate ORM quickstart.
 
@@ -224,10 +268,17 @@ compare and export. The UI subscribes per visible view and the daemon pushes inv
 
 ### 3.6 Snapshot format (`.opsnap`)
 
-See [spec/snapshot-format.md](spec/snapshot-format.md). A header, independently zstd-compressed
+See [spec/snapshot-format.md](spec/snapshot-format.md). A header, independently compressed
 sections (symbols, stacks, samples, threads, telemetry, monitors, bookmarks, thread dumps,
-embedded HPROF), an index with xxh3 checksums, and a trailer. The heap analysis index lives next to
-the file in `<file>.openprofiler-idx/`.
+embedded HPROF), an index with xxh3 checksums, and a trailer. Since format 1.1 the columnar event
+and telemetry tables (samples, thread states, telemetry, GC, monitors, probe calls, events and
+control events) are Arrow IPC files with zstd-compressed buffers, 64-byte aligned in the file, so
+pyarrow, Polars or DuckDB can read a section in place; strings are deduplicated string views.
+Symbols, stacks, threads and the rest stay protobuf. `openprofiler arrow` lists the Arrow sections
+with their offsets, or exports every table (plus threads, stacks, frames and probes to resolve
+ids) as standalone `.arrow` files with plain strings for readers without view support, such as
+DuckDB's `read_arrow`. 1.0 files are still read. The heap analysis index lives next to the file
+in `<file>.openprofiler-idx/`.
 
 ### 3.7 Heap analysis engine (`openprofiler-heap`)
 
@@ -247,6 +298,27 @@ Correctness is checked against Eclipse MAT, which is used as an oracle for retai
 (`crates/openprofiler-heap/tests/mat_parity.rs`). The memory budget is about 32 bytes per object
 across all indexes, on disk and mmap'd.
 
+**IBM Portable Heap Dumps** (`.phd`, optionally gzipped; OpenJ9 / IBM Semeru) are converted to an
+HPROF file in the index directory first (`openprofiler-phd`), then indexed like any other dump. A
+PHD records classes, object addresses, non-null references, array lengths and (from version 6)
+object sizes, but no field names or values, no primitive data and no GC roots. The conversion
+therefore:
+- names references `ref0`, `ref1`, ... (instance fields per class, statics for class objects);
+- writes primitive arrays with their length and a sparse run of zeros as data;
+- carries each object's size from the dump (class instance size, PHD array size) in the record's
+  stack trace serial, which the engine uses instead of the HotSpot layout rules;
+- infers GC roots: classes are sticky-class roots, objects nothing references are unknown roots,
+  and so is one object of each cycle still unreachable (OpenJ9 collects garbage before it writes a
+  heap dump, so everything in it is live);
+- marks the file with an `openprofiler:phd` string record, so a snapshot that embeds it reopens
+  as a PHD.
+
+Histogram, dominators, retained sizes, biggest objects, references and paths to roots work; string
+values, primitive array contents and the inspections (which read field values) do not, and the UI
+marks the session as PHD. The conversion holds the object graph in memory (about 60 bytes per
+object and 8 per reference). Fixtures from OpenJ9 21 with and without compressed references are
+in `crates/openprofiler-phd/tests/data` (`regenerate.sh` rebuilds them in Docker).
+
 ### 3.8 CPU and tree engine (`openprofiler-model`)
 
 - Interned frames: method, line and frame type (interpreted, JIT, inlined, native, kernel).
@@ -258,7 +330,10 @@ across all indexes, on disk and mmap'd.
 
 - **Local discovery:** hsperfdata and `/proc`: JVM name, arguments, version, whether an agent is
   already loaded.
-- **Attach:** HotSpot dynamic attach (`.attach_pid`, SIGQUIT, `.java_pid` socket). In containers:
+- **Attach:** HotSpot dynamic attach (`.attach_pid`, SIGQUIT, `.java_pid` socket). On Windows
+  (x86-64 only) a named pipe is created and a small stub is injected into the JVM with
+  `CreateRemoteThread`; it calls `jvm.dll`'s `JVM_EnqueueOperation`, and the JVM writes the reply
+  to the pipe (the JDK's own mechanism). In containers:
   NSpid translation, `/proc/<pid>/root`, and copying the agent into the target's mount namespace.
 - **`openprofiler-relay`** (static musl, about 1 MB) runs on the remote host or in the container:
   `relay <port>` (stdio ↔ TCP with a READY handshake), `list`, `attach`, `dump`, `pty-exec`.
@@ -278,7 +353,7 @@ across all indexes, on disk and mmap'd.
 
 ### 3.10 UI
 
-- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Probes, Events, MBeans, Code, Compare), a top
+- A left navigation (Overview, CPU, Memory, Heap, Threads, Locks, Probes, Methods, Events, MBeans, Code, Compare), a top
   session bar with recording controls and a timeline scrubber, and an inspector panel.
 - The Code view (decompiler sessions only): a lazy package tree and search on the left, a
   virtualized code viewer with syntax highlighting, clickable references, find in file, Java and
@@ -291,6 +366,10 @@ across all indexes, on disk and mmap'd.
   per probe, control objects with leak flags, and probe telemetry (calls per second, mean time).
   Live sessions edit the instrumentation (call-count patterns, enabled probes) there. Exact call
   counts appear as the `Calls` kind of the CPU views.
+- The Methods view (method analysis of instrumented code): call-site outliers sorted by max/mean,
+  the call tracer (per-thread timeline of nested calls and an ordered call list; live sessions
+  start a trace of 1–60 s), and complexity analysis (time against size scatter with the best of
+  constant, logarithmic, linear, n log n and quadratic fits; live sessions edit the methods).
 - The MBeans view (live sessions): a server picker (the platform MBean server, other MBean servers
   in the JVM, remote JMX servers the JVM connects to), the beans as a domain tree, attribute values
   (auto-refreshed, writable ones editable), operations with typed argument fields, notifications of
@@ -310,7 +389,7 @@ across all indexes, on disk and mmap'd.
   `compare`, `thread_dump` and the MBean tools (`list_mbean_servers`, `connect_jmx`,
   `list_mbeans`, `get_mbean`, `invoke_mbean`, `track_mbean`, `subscribe_mbean`,
   `mbean_notifications`), `probes` (list, hot spots, events, control objects, timeline, telemetry)
-  and `instrumentation`; `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
+  `instrumentation`, `call_trace` and `call_analysis` (outliers, trace, complexity); `decompile`, `search_code` and `find_usages` read decompiled apps. Responses carry stable node IDs and `suggested_next` hints.
 - CI gate: `openprofiler compare base.opsnap head.opsnap --fail-if "cpu.total > +10%"`.
 
 ### 3.12 IDE bridge
@@ -437,7 +516,7 @@ same calls.
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
 | 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU overhead open (#38) |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, remote attach in UI/CLI/MCP, x86_64/aarch64/armhf bundle, web mode, read-only share links, CI gate | Done |
-| 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections | Partial |
+| 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, outliers and complexity analysis, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections, MongoDB/Cassandra/JMS/RMI/web service/LLM client probes | Done; Windows agent not yet run on Windows (#23) |
 
 Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/issues).
 

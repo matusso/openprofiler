@@ -423,6 +423,55 @@ pub struct ProbeData {
     pub controls: Vec<ControlEvent>,
 }
 
+/// One entry or exit of an instrumented method recorded by the call tracer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TraceEvent {
+    pub time: Nanos,
+    pub thread: u32,
+    /// Frame id of the method.
+    pub frame: u32,
+    pub exit: bool,
+}
+
+/// Calls of one call site (the stack of an instrumented call) on one thread since the previous
+/// flush: count, summed inclusive time and the slowest call.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CallSiteStat {
+    pub time: Nanos,
+    pub thread: u32,
+    pub stack: StackId,
+    pub count: u32,
+    pub total: Nanos,
+    pub max: Nanos,
+}
+
+/// One call of a method configured for complexity analysis: its argument-derived size and
+/// duration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ComplexityPoint {
+    pub time: Nanos,
+    pub thread: u32,
+    /// Frame id of the method.
+    pub frame: u32,
+    pub size: u64,
+    pub duration: Nanos,
+}
+
+/// Instrumented method analysis: call tracer, per-call-site outlier statistics and complexity
+/// points.
+#[derive(Debug, Clone, Default)]
+pub struct CallData {
+    pub trace: Vec<TraceEvent>,
+    pub sites: Vec<CallSiteStat>,
+    pub complexity: Vec<ComplexityPoint>,
+}
+
+impl CallData {
+    pub fn is_empty(&self) -> bool {
+        self.trace.is_empty() && self.sites.is_empty() && self.complexity.is_empty()
+    }
+}
+
 /// Everything known about one profiled JVM over a time window.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
@@ -438,6 +487,7 @@ pub struct Profile {
     pub bookmarks: Vec<Bookmark>,
     pub thread_dumps: Vec<ThreadDump>,
     pub probes: ProbeData,
+    pub calls: CallData,
 }
 
 impl Profile {

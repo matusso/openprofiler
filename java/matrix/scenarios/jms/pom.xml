@@ -1,0 +1,18 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>matrix</groupId>
+  <artifactId>jms</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>${jms.group}</groupId>
+      <artifactId>${jms.artifact}</artifactId>
+      <version>${jms.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+  </dependencies>
+</project>

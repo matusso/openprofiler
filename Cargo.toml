@@ -14,6 +14,7 @@ openprofiler-model = { path = "crates/openprofiler-model" }
 openprofiler-proto = { path = "crates/openprofiler-proto" }
 openprofiler-snapshot = { path = "crates/openprofiler-snapshot" }
 openprofiler-hprof = { path = "crates/openprofiler-hprof" }
+openprofiler-phd = { path = "crates/openprofiler-phd" }
 openprofiler-heap = { path = "crates/openprofiler-heap" }
 openprofiler-jfr = { path = "crates/openprofiler-jfr" }
 openprofiler-attach = { path = "crates/openprofiler-attach" }
@@ -46,6 +47,10 @@ sha2 = "0.10"
 hex = "0.4"
 rand = "0.9"
 parking_lot = "0.12"
+# Arrow 58 is the newest line whose MSRV (1.85) matches the workspace.
+arrow-array = { version = "58", default-features = false }
+arrow-schema = { version = "58", default-features = false }
+arrow-ipc = { version = "58", default-features = false, features = ["zstd"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

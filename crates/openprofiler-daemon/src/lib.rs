@@ -7,6 +7,7 @@
 //! - [`decompile`] serves Java source decompiled from `.apk`/`.dex`/`.jar`/`.class` files by
 //!   `openprofiler-dex`.
 
+pub mod calls;
 pub mod decompile;
 pub mod demo;
 pub mod engine;

@@ -61,6 +61,9 @@ fn mb(b: u64) -> String {
 impl HeapAnalysis {
     /// Runs (or loads) every inspection and returns their headline findings.
     pub fn inspections(&self) -> Vec<Insight> {
+        if self.is_phd() {
+            return vec![];
+        }
         KINDS.iter().filter_map(|k| self.inspection_full(k).ok()).map(|r| r.insight.clone()).collect()
     }
 
@@ -75,6 +78,7 @@ impl HeapAnalysis {
 
     fn inspection_full(&self, kind: &str) -> Result<Arc<InspectionResult>> {
         anyhow::ensure!(KINDS.contains(&kind), "unknown inspection {kind}");
+        anyhow::ensure!(!self.is_phd(), "inspections need field values, which PHD heap dumps do not contain");
         if let Some(r) = self.inspection_cache.lock().unwrap().get(kind) {
             return Ok(r.clone());
         }

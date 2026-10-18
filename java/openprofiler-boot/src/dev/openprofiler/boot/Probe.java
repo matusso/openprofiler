@@ -110,6 +110,52 @@ public abstract class Probe {
         }
     }
 
+    /**
+     * Records {@code call} when {@code stage} (a {@code CompletionStage} the call returned)
+     * completes, with the time from the call's start to completion and the request label the
+     * calling thread had; {@code detail} turns the result into the event's detail. Returns false
+     * (nothing recorded) if {@code stage} is not a {@code CompletionStage}.
+     */
+    protected final boolean recordOnCompletion(Call call, Object stage,
+                                               java.util.function.Function<Object, String> detail) {
+        if (!(stage instanceof java.util.concurrent.CompletionStage) || call.payload == null) {
+            return false;
+        }
+        String payload = call.payload;
+        long startEpochNanos = call.startEpochNanos;
+        ProbeThread t = ProbeThread.current();
+        String label = t == null ? null : t.context;
+        ((java.util.concurrent.CompletionStage<?>) stage).whenComplete((result, error) -> {
+            long duration = Probes.epochNanos() - startEpochNanos;
+            String err = null;
+            Throwable e = error instanceof java.util.concurrent.CompletionException && error.getCause() != null
+                ? error.getCause() : error;
+            if (e != null) {
+                err = Reflect.cut(e.getClass().getName() + (e.getMessage() == null ? "" : ": " + e.getMessage()), 500);
+            }
+            String d = null;
+            if (result != null && detail != null) {
+                ProbeThread pt = ProbeThread.current();
+                boolean busy = pt != null && pt.busy;
+                if (pt != null) {
+                    pt.busy = true;
+                }
+                try {
+                    d = detail.apply(result);
+                } catch (Throwable ignored) {
+                    // no detail
+                } finally {
+                    if (pt != null) {
+                        pt.busy = busy;
+                    }
+                }
+            }
+            recordFor(label, payload, startEpochNanos, duration, err, d);
+        });
+        call.ignore();
+        return true;
+    }
+
     // ---- helpers for subclasses ----------------------------------------------------------------
 
     /** Sets the current thread's request label until the call exits. */

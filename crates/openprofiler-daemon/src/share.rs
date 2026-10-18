@@ -101,7 +101,7 @@ pub fn allowed(session: &str, method: &axum::http::Method, path: &str) -> bool {
     match action {
         "summary" | "threads" | "insights" | "thread-dumps" => get,
         "telemetry" | "tree" | "hotspots" | "flame" | "callgraph" | "histogram" | "thread-states"
-        | "monitors" | "probes" | "events" | "export" => method == Method::POST,
+        | "monitors" | "probes" | "calls" | "events" | "export" => method == Method::POST,
         // The heap diff reads a second session.
         "heap" => sub != "histogram-diff",
         "code" => true,

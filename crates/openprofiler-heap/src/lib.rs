@@ -1,7 +1,7 @@
 //! Out-of-core heap dump analysis.
 //!
-//! [`HeapAnalysis::open`] indexes an HPROF file (or reuses a persisted index) and answers the
-//! Heap queries of the Query API. All query methods take `&self`; the type is `Send + Sync`.
+//! [`HeapAnalysis::open`] indexes an HPROF file or an IBM Portable Heap Dump (or reuses a
+//! persisted index) and answers the Heap queries of the Query API. All query methods take `&self`; the type is `Send + Sync`.
 //!
 //! Public API:
 //!
@@ -25,6 +25,10 @@
 //!
 //! Sizes, references, GC roots and reachability follow Eclipse MAT's HPROF model, so object
 //! counts, shallow and retained sizes match MAT exactly (see `scripts/mat-parity.sh`).
+//!
+//! PHD files (OpenJ9 / IBM Semeru) are converted to HPROF first (`openprofiler-phd`). They hold
+//! the object graph and sizes only: fields are unnamed (`ref0`, ...), there are no primitive
+//! values (strings have no text) and GC roots are inferred, so the inspections are unavailable.
 
 mod build;
 pub mod classes;
@@ -52,6 +56,8 @@ use store::Arr;
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Decompressing,
+    /// Rewriting an IBM Portable Heap Dump as HPROF.
+    Converting,
     Scanning,
     Indexing,
     Graph,
@@ -194,7 +200,8 @@ fn hex(a: u64) -> String {
 }
 
 impl HeapAnalysis {
-    /// Opens (indexing on first use) an HPROF heap dump, optionally gzip-compressed.
+    /// Opens (indexing on first use) an HPROF heap dump or an IBM Portable Heap Dump, either
+    /// optionally gzip-compressed.
     pub fn open(path: &Path, opts: &OpenOptions, progress: impl Fn(Phase, f64) + Sync) -> Result<Self> {
         let dir = resolve_cache_dir(path, opts)?;
         let key = cache_key(path, opts)?;
@@ -208,7 +215,19 @@ impl HeapAnalysis {
                 m
             }
             _ => {
-                let src = if openprofiler_hprof::is_gzip(path)? {
+                let src = if openprofiler_phd::sniff(path)? {
+                    progress(Phase::Converting, 0.0);
+                    let out = dir.join("dump.hprof");
+                    let mtime = std::fs::metadata(path)?
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    openprofiler_phd::to_hprof(path, &out, mtime, &|f| progress(Phase::Converting, f))
+                        .with_context(|| format!("converting {}", path.display()))?;
+                    out
+                } else if openprofiler_hprof::is_gzip(path)? {
                     progress(Phase::Decompressing, 0.0);
                     let out = dir.join("dump.hprof");
                     openprofiler_hprof::decompress_gz(path, &out)?;
@@ -303,7 +322,19 @@ impl HeapAnalysis {
             reachable_objects: self.meta.reachable_objects,
             reachable_shallow: self.meta.reachable_shallow,
             edges: self.meta.edges,
+            format: if self.meta.phd { "phd" } else { "hprof" }.into(),
         }
+    }
+
+    /// True for dumps converted from an IBM Portable Heap Dump (no field values or primitive
+    /// data; inferred GC roots).
+    pub fn is_phd(&self) -> bool {
+        self.meta.phd
+    }
+
+    /// The HPROF file the index reads: the dump itself, or its decompressed or converted copy.
+    pub fn hprof_path(&self) -> &Path {
+        &self.meta.hprof_path
     }
 
     // ---------------------------------------------------------------- object basics
@@ -437,7 +468,7 @@ impl HeapAnalysis {
 
     /// The text of a `java.lang.String` (JDK 9+ compact strings and older `char[]` strings).
     pub fn string_value(&self, obj: u32) -> Option<String> {
-        if self.class_name(self.class[obj as usize]) != "java.lang.String" {
+        if self.meta.phd || self.class_name(self.class[obj as usize]) != "java.lang.String" {
             return None;
         }
         let value = self.field_ref(obj, "value")?;
@@ -1001,6 +1032,7 @@ impl HeapAnalysis {
                         .collect(),
                 );
             }
+            Some(SubRecord::PrimArray { len, .. }) if self.meta.phd => array_length = Some(len),
             Some(SubRecord::PrimArray { ty: t, len, data, .. }) => {
                 array_length = Some(len);
                 let sz = type_size(t, id) as usize;

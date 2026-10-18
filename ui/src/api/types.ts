@@ -22,7 +22,9 @@ export type Capability =
   | "thread_dumps"
   | "recording"
   | "decompile"
-  | "mbeans";
+  | "mbeans"
+  /** Call tracer, call-site outliers or complexity data exist, or the live agent can record them. */
+  | "call_analysis";
 
 export type SessionState = "loading" | "ready" | "live" | "detached" | "failed";
 
@@ -133,6 +135,8 @@ export interface HeapSummary {
   id_size: number;
   dump_time?: number;
   analysis_state: "indexing" | "dominators" | "ready";
+  /** `phd`: an IBM Portable Heap Dump (no field values or primitive data, inferred GC roots). */
+  format?: "hprof" | "phd";
 }
 
 export interface Summary {
@@ -824,4 +828,96 @@ export interface InstrumentationInfo {
   instrumented_classes: number;
   instrumented_methods: number;
   disabled_methods: string[];
+  /** Complexity-analysis specs (`com.acme.Sorter.sort#0`). */
+  complexity: string[];
+  trace_active: boolean;
+  trace_events: number;
+}
+
+// ---------- instrumented method analysis ----------
+
+export type CallsView = "outliers" | "trace" | "complexity";
+
+export interface CallsRequest {
+  view: CallsView;
+  range?: [number, number];
+  thread?: number;
+  offset?: number;
+  limit?: number;
+  min_calls?: number;
+  search?: string;
+  frame?: number;
+}
+
+export interface OutlierSite {
+  stack: number;
+  method: string;
+  caller: string | null;
+  calls: number;
+  total: number;
+  mean: number;
+  max: number;
+  ratio: number;
+  threads: number;
+}
+
+export interface OutliersResponse {
+  sites: OutlierSite[];
+  total: number;
+  min_calls: number;
+}
+
+export interface TracedThread {
+  thread: number;
+  name: string;
+  events: number;
+  start: number;
+  end: number;
+}
+
+export interface TracedCall {
+  thread: number;
+  depth: number;
+  frame: number;
+  method: string;
+  start: number;
+  end: number | null;
+}
+
+export interface TraceResponse {
+  events: number;
+  threads: TracedThread[];
+  thread: number | null;
+  total: number;
+  offset: number;
+  calls: TracedCall[];
+}
+
+export type ComplexityModel = "O(1)" | "O(log n)" | "O(n)" | "O(n log n)" | "O(n^2)";
+
+export interface ComplexityFit {
+  model: ComplexityModel;
+  a: number;
+  b: number;
+  r2: number;
+}
+
+export interface ComplexityMethod {
+  frame: number;
+  method: string;
+  points: number;
+  sizes: number;
+  max_size: number;
+  best: ComplexityModel | null;
+}
+
+export interface ComplexityResponse {
+  methods: ComplexityMethod[];
+  method?: {
+    summary: ComplexityMethod;
+    fits: ComplexityFit[];
+    best: ComplexityFit | null;
+    /** `[size, nanos]`, thinned for drawing. */
+    points: [number, number][];
+  };
 }

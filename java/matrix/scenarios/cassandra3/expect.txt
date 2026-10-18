@@ -1,0 +1,9 @@
+# Statements by CQL: simple, bound (the prepared CQL), asynchronous (until completion), batches
+# (by their first statement, so the inserts count 21).
+count   | cassandra | INSERT INTO matrix.orders3 (id, owner, total) VALUES (?, ?, ?) | 21
+event   | cassandra | SELECT * FROM matrix.orders3 WHERE id = ? | context~GET /owners/{id}
+event   | cassandra | SELECT * FROM matrix.orders3 WHERE id = ? | detail~rows
+stack   | cassandra | INSERT INTO matrix.orders3 | Main.main
+count   | cassandra | UPDATE matrix.orders3 SET total = ? WHERE id = ? | 10
+call    | cassandra | BATCH 2: INSERT INTO matrix.orders3
+call    | cassandra | CREATE TABLE IF NOT EXISTS matrix.orders3

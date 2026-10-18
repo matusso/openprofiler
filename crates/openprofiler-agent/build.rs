@@ -9,7 +9,7 @@ use std::process::Command;
 
 fn java_tool(name: &str) -> PathBuf {
     match std::env::var_os("JAVA_HOME") {
-        Some(home) => Path::new(&home).join("bin").join(name),
+        Some(home) => Path::new(&home).join("bin").join(format!("{name}{}", std::env::consts::EXE_SUFFIX)),
         None => PathBuf::from(name),
     }
 }

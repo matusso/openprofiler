@@ -55,7 +55,9 @@ impl Loader for DefaultLoader {
                 session.set_profile(Arc::new(RwLock::new(profile)));
                 Ok(())
             }
-            FileFormat::Hprof | FileFormat::HprofGz => crate::heap::load_hprof(path, session),
+            FileFormat::Hprof | FileFormat::HprofGz | FileFormat::Phd => {
+                crate::heap::load_hprof(path, session)
+            }
             FileFormat::Recording => {
                 let profile = openprofiler_link::replay_recording(path)?;
                 session.set_profile(Arc::new(RwLock::new(profile)));
