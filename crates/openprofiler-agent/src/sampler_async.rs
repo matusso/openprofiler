@@ -10,8 +10,9 @@
 //! - The thread is in Java code but the PC is in a frameless stub (array zeroing/copying,
 //!   itable/vtable stubs), in a method prologue/epilogue, or in VM/libc code reached by a leaf
 //!   call that does not set the anchor (`ticks_unknown_Java`). The handler unwinds one frame on a
-//!   copy of the signal context and calls it again; failing that, it follows the frame-pointer
-//!   chain until a return address lands in the code cache (bounds from `gHotSpotVMStructs`).
+//!   copy of the signal context and calls it again; failing that, it scans the stack of a stub
+//!   whose SP is not where its frame size says, or follows the frame-pointer chain until a return
+//!   address lands in the code cache (bounds from `gHotSpotVMStructs`).
 //! - The thread is in the VM, called from Java through a path that leaves the last-Java-frame
 //!   anchor without a PC (`ticks_unknown_not_Java`). Like HotSpot's own `make_walkable()`, the
 //!   handler fills in the PC from the anchor's SP for the duration of the call (offsets come from
@@ -50,6 +51,9 @@ const THREAD_BLOCKED: i32 = 10;
 /// How many native frames the code-cache-guided unwinding follows.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const MAX_NATIVE_FRAMES: usize = 16;
+/// How many stack words above SP are scanned for a return address out of a stub.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const MAX_SCAN_WORDS: usize = 32;
 /// How often `/proc/self/task` is rescanned for threads to arm.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// Upper bound for the distance between SP and a frame pointer worth following.
@@ -427,8 +431,9 @@ unsafe fn unwind_and_retry(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTra
     // Compiled method between pushing its frame and `frame_complete_offset` (nmethod entry
     // barrier, stack banging) or in its epilogue, where HotSpot does not consider the frame
     // walkable: the blob's frame size gives the caller's SP, with the frame record just below.
+    let blob = CODE_CACHE.get().and_then(|cc| cc.find_blob(pc));
     if let Some(cc) = CODE_CACHE.get()
-        && let Some(blob) = cc.find_blob(pc)
+        && let Some(blob) = blob
     {
         // SAFETY: `blob` comes from `find_blob`.
         let (_, words) = unsafe { cc.frame_info(blob) };
@@ -453,6 +458,24 @@ unsafe fn unwind_and_retry(asgct: AsyncGetCallTraceFn, trace: &mut ASGCT_CallTra
         if unsafe { retry_at(asgct, trace, &mut ctx, cpc, csp, cfp) } {
             RECOVERED_STUB.fetch_add(1, Ordering::Relaxed);
             return true;
+        }
+    }
+    // Stub that moves SP past its declared frame (Graal's copies of the libm intrinsics reserve
+    // scratch space with `sub rsp`): the first word above SP that points into another blob is
+    // taken as the return address.
+    if let Some(cc) = CODE_CACHE.get()
+        && let Some(blob) = blob
+    {
+        for slot in (1..MAX_SCAN_WORDS).map(|i| sp + i * size_of::<usize>()) {
+            let Some(ret) = safe_read(slot) else { break };
+            if cc.find_blob(ret).is_some_and(|b| b != blob) {
+                // SAFETY: as above.
+                if unsafe { retry_at(asgct, trace, &mut ctx, ret, slot + size_of::<usize>(), fp) } {
+                    RECOVERED_STUB.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                break;
+            }
         }
     }
     // VM or libc code called from compiled code without setting the anchor (runtime leaf calls,
