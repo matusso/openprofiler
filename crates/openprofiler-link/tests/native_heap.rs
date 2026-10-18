@@ -66,8 +66,13 @@ fn java() -> Option<PathBuf> {
 fn agent_lib() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
-    let name =
-        if cfg!(target_os = "macos") { "libopenprofiler_agent.dylib" } else { "libopenprofiler_agent.so" };
+    let name = if cfg!(windows) {
+        "openprofiler_agent.dll"
+    } else if cfg!(target_os = "macos") {
+        "libopenprofiler_agent.dylib"
+    } else {
+        "libopenprofiler_agent.so"
+    };
     let lib = profile_dir.join(name);
     let status = Command::new(env!("CARGO"))
         .args(["build", "-p", "openprofiler-agent"])
