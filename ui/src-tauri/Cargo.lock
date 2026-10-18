@@ -2515,7 +2515,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openprofiler-attach"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -2523,11 +2523,12 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "openprofiler-daemon"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2539,6 +2540,7 @@ dependencies = [
  "openprofiler-jfr",
  "openprofiler-link",
  "openprofiler-model",
+ "openprofiler-phd",
  "openprofiler-proto",
  "openprofiler-remote",
  "openprofiler-snapshot",
@@ -2553,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-desktop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "openprofiler-daemon",
@@ -2565,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-dex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2579,13 +2581,14 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-heap"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytemuck",
  "memmap2",
  "openprofiler-hprof",
  "openprofiler-model",
+ "openprofiler-phd",
  "rayon",
  "rustc-hash",
  "serde",
@@ -2595,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-hprof"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "memmap2",
@@ -2605,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-jfr"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -2616,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-link"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2634,15 +2637,25 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-model"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rustc-hash",
  "serde",
 ]
 
 [[package]]
+name = "openprofiler-phd"
+version = "0.5.0"
+dependencies = [
+ "flate2",
+ "openprofiler-hprof",
+ "rustc-hash",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "openprofiler-proto"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -2653,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-remote"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2666,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-snapshot"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow-array",
