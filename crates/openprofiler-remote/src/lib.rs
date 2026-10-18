@@ -337,8 +337,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 pub async fn upload(target: &Target, local: &Path, remote: &str, executable: bool) -> Result<()> {
     let want = sha256_file(local)?;
     let q = shell_quote(remote);
+    // Hash via stdin: GNU sha256sum prefixes its output with `\` when the filename contains a backslash.
     let hash_cmd = format!(
-        "if command -v sha256sum >/dev/null 2>&1; then sha256sum {q}; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 {q}; fi 2>/dev/null | cut -d' ' -f1"
+        "if command -v sha256sum >/dev/null 2>&1; then sha256sum < {q}; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < {q}; fi 2>/dev/null | cut -d' ' -f1"
     );
     let have = target.sh(&format!("[ -f {q} ] && {{ {hash_cmd}; }} || true")).await?;
     if have.trim() == want {
