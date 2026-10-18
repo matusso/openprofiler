@@ -857,7 +857,10 @@ mod tests {
         // Second upload is a no-op (hash matches).
         upload(&t, &src, dest.to_str().unwrap(), true).await.unwrap();
         let p = t.platform().await.unwrap();
-        assert!(p.triple().is_ok());
+        // Windows hosts (MSYS/MinGW `uname`) are not a remote bundle platform.
+        if !cfg!(windows) {
+            assert!(p.triple().is_ok());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
