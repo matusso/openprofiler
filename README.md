@@ -327,7 +327,7 @@ OpenProfiler is in early development. The offline analyzer, the live agent, prob
 instrumentation, and most of remote attach work today. The probes are tested against 49 library
 and version combinations (`java/matrix`). On Spring Petclinic the agent with probes costs about
 1% throughput and no measurable CPU per request; on the Quarkus quickstart about 3% throughput and
-24% CPU per request (its requests take 0.1 ms; see the
+19% CPU per request (12 µs on requests of 0.06 ms; see the
 [benchmark](docs/DESIGN.md#4-roadmap)).
 
 | Phase | State |
@@ -335,7 +335,7 @@ and version combinations (`java/matrix`). On Spring Petclinic the agent with pro
 | Foundations | Done |
 | Offline analyzer (HPROF, JFR, UI, CLI, MCP) | Done |
 | Live agent (sampling, allocations, locks, telemetry, dumps, triggers) | Done |
-| Probes and instrumentation | Done (Quarkus CPU overhead open) |
+| Probes and instrumentation | Done (Quarkus CPU per request above the target) |
 | Remote and cloud | Mostly done |
 | Polish and ecosystem | Partial |
 

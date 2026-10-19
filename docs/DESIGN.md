@@ -237,8 +237,11 @@ that serves live sessions.
   or reply completes. Threads aggregate their calls per
   second, payload and stack, and the native side keeps individual events within a per-probe budget
   (slow calls always). Stacks of probe calls are sampled per (probe, request, payload) at most every
-  10 ms (events always get their own), since walking deep stacks on every call would dominate the
-  cost of the probes.
+  10 ms and refreshed at most 100 times a second per probe (events always get their own), since
+  walking deep stacks on every call would dominate the cost of the probes. Payloads and request
+  labels cross JNI as ids the boot classes look up once per string, so recording a call or
+  switching labels converts and hashes no strings; only calls with a payload read the clock, once
+  at entry and once at exit.
 - **Request labels and async context.** HTTP, gRPC, RMI and SOAP server probes and JMS message
   listeners set the thread's request label (`GET /owners/{id}`), which becomes the root frame of that thread's sampled and instrumented
   stacks (call trees split by request) and the context of its probe events. An internal probe
@@ -520,7 +523,7 @@ same calls.
 | 0 Foundations | Workspace, CI, JVMTI bindings, protobuf specs, `.opsnap` spec | Done |
 | 1 Offline analyzer | HPROF/heap engine, JFR import, Query API, UI, CLI, MCP | Done |
 | 2 Live agent | Sampling, allocation and monitor events, `j.u.c` locks, virtual threads, telemetry, dumps, triggers, TLS link, local attach, offline recording | Done |
-| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU overhead open (#38) |
+| 3 Probes and instrumentation | Bytecode instrumentation, exact call counts, probe SPI, JDBC/HTTP/JPA/Kafka/gRPC probes, async context propagation, custom probes, version matrix against real libraries | Done; Quarkus CPU per request above the target |
 | 4 Remote and cloud | Relay, ssh/docker/kubectl, debug containers, verified upload, remote attach in UI/CLI/MCP, x86_64/aarch64/armhf bundle, web mode, read-only share links, CI gate | Done |
 | 5 Polish and ecosystem | Native classfile rewriter (done in phase 3), native heap dumper, call tracer, outliers and complexity analysis, MBean browser, IntelliJ plugin, Android and JVM decompiler, Windows agent, PHD import, Arrow IPC sections, MongoDB/Cassandra/JMS/RMI/web service/LLM client probes | Done; Windows agent not yet run on Windows (#23) |
 
@@ -544,7 +547,7 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
     synthetic 1, 10 and 50 GB dumps (`gen_hprof`), with the phase 1 limits gated at 10 GB.
 - Phase 3: Spring Boot Petclinic and Quarkus demos show SQL and URL hot spots linked to call trees,
   at under 5% overhead. *(hot spots met; overhead met for throughput and latency, CPU per request
-  met on Petclinic, not yet on Quarkus.)* `java/bench/linux.sh`, 8 closed-loop clients, 60 s,
+  met on Petclinic, not on Quarkus: see below.)* `java/bench/linux.sh`, 8 closed-loop clients, 60 s,
   median of 3 rounds, Linux arm64 container on 18 cores, JDK 21, agent defaults ("probes") and
   with `instrument=` on the application packages:
 
@@ -556,7 +559,22 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
   | | + `instrument=` | −2.4% | +3.2% | +25% |
 
   A Quarkus request costs about 0.1 ms of CPU, so the probes' fixed cost per request (HTTP,
-  connection checkout, JPA, SQL, worker hand-off) shows: about 23 µs.
+  connection checkout, JPA, SQL, worker hand-off) shows. The host has performance and efficiency
+  cores, which makes CPU per request vary by 10% and more between runs; pinned to the six
+  performance cores (`CPUSET=0-5`), with configurations alternating over 5 rounds (medians), the
+  Quarkus quickstart's request takes 0.063 ms of CPU, and the agent with probes adds:
+
+  | agent | req/s | CPU per request |
+  |---|---|---|
+  | 0.6.0 | −5.1% | +27% (17 µs) |
+  | payload and label ids, fewer clock readings and stack walks | −3.2% | +19% (12 µs) |
+
+  Of the remaining 12 µs, about 2.5 µs is the agent without probes (`probes=none`: sampling and
+  monitor events, mostly stack walks of parks above `monitor_threshold`), about 2 µs the injected
+  code itself (hooks that return at once), and the rest the probes' work per request: hook calls,
+  native calls and weak identity map operations for context propagation, SQL statements and
+  connections. Under 5% (3 µs) on requests this short would need a cheaper design for those, not
+  more tuning.
 - Phase 4: attach to a JVM in a distroless pod on a remote cluster in three clicks or fewer, without
   exposing ports. *(met: Attach → Kubernetes → double-click the pod; `scripts/e2e-remote.sh`
   attaches to a non-root distroless pod in kind through a debug container.)*

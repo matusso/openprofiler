@@ -2,7 +2,10 @@
 # Runs the overhead benchmark (run.sh) on Linux in a container, where the agent uses its async
 # sampler: builds the Linux agent with a Rust container, runs the apps and the load generator in
 # an eclipse-temurin container, then checks the recordings on the host. Arguments and WARMUP,
-# MEASURE, ROUNDS, THREADS are passed on. Results go to target/bench-linux/.
+# MEASURE, ROUNDS, THREADS are passed on. Results go to target/bench-linux/. CPUSET (e.g. 0-5) pins
+# the benchmark container to those CPUs: on hosts with performance and efficiency cores (Apple
+# silicon) CPU per request otherwise varies by 10% and more between runs, depending on where the
+# VM's CPUs are scheduled.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 JDK_IMAGE="${JDK_IMAGE:-eclipse-temurin:21-jdk}"
@@ -11,7 +14,7 @@ docker run --rm -v openprofiler-cargo:/usr/local/cargo/registry -v "$ROOT:/repo"
 "$ROOT/java/build.sh" >/dev/null
 # Builds the apps (and starts PostgreSQL) on the host side, where Docker is.
 BUILD_ONLY=1 OUT="$ROOT/target/bench-linux" AGENT=none "$ROOT/java/bench/run.sh" "$@"
-docker run --rm -v "$ROOT:/repo" -w /repo --add-host=host.docker.internal:host-gateway \
+docker run --rm ${CPUSET:+--cpuset-cpus="$CPUSET"} -v "$ROOT:/repo" -w /repo --add-host=host.docker.internal:host-gateway \
   -e AGENT=/repo/target/linux/release/libopenprofiler_agent.so \
   -e AGENT_EXTRA=bootjar=/repo/java/openprofiler-boot/build/openprofiler-boot.jar \
   -e OUT=/repo/target/bench-linux -e PG_HOST=host.docker.internal -e SKIP_CHECK=1 \

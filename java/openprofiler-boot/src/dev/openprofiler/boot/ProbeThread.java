@@ -65,6 +65,6 @@ final class ProbeThread {
             return;
         }
         context = label;
-        Hooks.setContext0(label);
+        Hooks.setContext0(Probes.labelId(label));
     }
 }

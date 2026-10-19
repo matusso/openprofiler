@@ -27,6 +27,8 @@ public final class Call {
     Probe probe;
     Object self;
     long start;
+    /** {@link #start} and {@link #startEpochNanos} were read. */
+    boolean timed;
     /** Request label to restore at exit (probes that set one). */
     String previousContext;
     boolean setContext;
@@ -41,6 +43,7 @@ public final class Call {
         nested = false;
         previousContext = null;
         setContext = false;
+        timed = false;
         probe = null;
         self = null;
     }

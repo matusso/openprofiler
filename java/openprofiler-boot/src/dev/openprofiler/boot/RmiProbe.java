@@ -16,6 +16,12 @@ final class RmiProbe extends Probe {
         super("rmi", "RMI", "Method", null);
     }
 
+    /** Dispatch calls get their payload from {@code logCall}. */
+    @Override
+    boolean alwaysTimed() {
+        return true;
+    }
+
     @Override
     protected Interception[] interceptions() {
         return new Interception[] {

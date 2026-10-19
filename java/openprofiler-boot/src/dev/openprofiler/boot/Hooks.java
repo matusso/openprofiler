@@ -43,17 +43,24 @@ public final class Hooks {
     /** Payload template of a custom probe site. */
     static native String siteTemplate0(int site);
 
-    static native void probeCall0(int probe, String payload, long startEpochNanos, long durationNanos,
+    /** The agent's id of a payload ({@link #probeCall0}), -1 if the agent is not recording. */
+    static native int payloadId0(String payload);
+
+    /** The agent's frame of a request label ({@link #setContext0}), -1 if unavailable. */
+    static native int labelId0(String label);
+
+    /** A probe call; {@code payload} is a {@link #payloadId0} id. */
+    static native void probeCall0(int probe, int payload, long startEpochNanos, long durationNanos,
                                   String error, long control, String detail);
 
-    /** {@link #probeCall0} for a call of request {@code label} recorded on another thread. */
-    static native void probeCallLabelled0(int probe, String payload, long startEpochNanos, long durationNanos,
-                                          String error, long control, String detail, String label);
+    /** {@link #probeCall0} for a call of request {@code label} (a {@link #labelId0} frame) recorded on another thread. */
+    static native void probeCallLabelled0(int probe, int payload, long startEpochNanos, long durationNanos,
+                                          String error, long control, String detail, int label);
 
     static native void control0(int probe, long id, boolean open, String description);
 
-    /** Sets (null: clears) the current thread's request label. */
-    static native void setContext0(String label);
+    /** Sets (-1: clears) the current thread's request label, a {@link #labelId0} frame. */
+    static native void setContext0(int label);
 
     /** A call of a complexity-analysis site took {@code nanos} for an argument of size {@code size}. */
     static native void complexity0(int site, long size, long nanos);
