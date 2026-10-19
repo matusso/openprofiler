@@ -41,7 +41,7 @@ public class Workload {
             fs.add(pool.submit(() -> {
                 List<byte[]> keep = new ArrayList<>();
                 while (System.nanoTime() < end) {
-                    sink += hotLoop(2_000_000);
+                    sink += hotLoop(20_000_000);
                     keep.add(allocate(64 * 1024));
                     if (keep.size() > 200) keep.clear();
                     if (id % 2 == 0) contend();
