@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "jvmti-sys"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "jni-sys 0.3.1",
 ]
@@ -1197,7 +1197,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openprofiler-agent"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-attach"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-cli"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-daemon"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-dex"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-heap"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-hprof"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "flate2",
  "memmap2",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-jfr"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-link"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-model"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-phd"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "flate2",
  "openprofiler-hprof",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-proto"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-relay"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "libc",
@@ -1400,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-remote"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "openprofiler-snapshot"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
