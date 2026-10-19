@@ -280,10 +280,18 @@ cargo test --workspace                                                   # incl.
 MAT_HOME=/path/to/mat cargo test -p openprofiler-heap --test mat_parity  # retained sizes vs Eclipse MAT (Docker)
 java/matrix/run.sh                    # probes against real libraries and versions (Docker, JDK 17+)
 java/bench/run.sh                     # agent overhead on Spring Petclinic and Quarkus (java/bench/linux.sh: on Linux)
+java/bench/suites.sh                  # agent overhead at 100 Hz async sampling on Renaissance and DaCapo (Linux; else in Docker)
+java/bench/soak.sh                    # 24 h soak under load: resident memory, open files, crashes (SOAK_HOURS=0.25 for a quick one)
+crates/openprofiler-heap/scripts/bench.sh 1 10 50   # heap engine on synthetic 1, 10 and 50 GB dumps
 scripts/smoke-bundle.sh               # run the bundle's relays and agents under emulation (Docker)
 scripts/e2e-remote.sh                 # attach over ssh, docker exec and to a distroless pod in kind
 (cd ui && npm run lint && npm run typecheck && npm test)
 ```
+
+The overhead, soak and heap benchmarks run weekly in the `Benchmarks` workflow, which tracks the
+results in the `gh-pages` branch (`bench/`). Hosted runners soak for 5 h and index a 1 GB dump;
+for the full 24 h soak and the 10 and 50 GB dumps, run the workflow by hand on a self-hosted
+runner (`runner`, `soak_hours`, `heap_sizes` inputs).
 
 **Releases**
 

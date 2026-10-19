@@ -250,7 +250,8 @@ that serves live sessions.
   (PostgreSQL, MySQL, Kafka, MongoDB, Cassandra and ActiveMQ Artemis in containers; LLM clients
   against a local fake API) and the recordings are checked for payloads, events,
   control objects, request context and call-tree links. The demo benchmark (`java/bench/`) measures
-  the overhead on Spring Petclinic and the Quarkus Hibernate ORM quickstart.
+  the overhead on Spring Petclinic and the Quarkus Hibernate ORM quickstart; `java/bench/suites.sh`
+  on Renaissance and DaCapo, and `java/bench/soak.sh` runs the agent under load for 24 h.
 
 ### 3.4 Agent-link protocol
 
@@ -529,7 +530,18 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 - Phase 1: a 10 GB HPROF opens in under 3 min cold and under 5 s warm; retained sizes match MAT
   exactly on a reference corpus. *(met)*
 - Phase 2: at most 2% overhead at 100 Hz async sampling on Renaissance/DaCapo; a 24 h soak without
-  leaks or crashes.
+  leaks or crashes. Measured by the `Benchmarks` workflow (weekly; 24 h on a self-hosted runner):
+  - `java/bench/suites.sh`: 10 Renaissance and 12 DaCapo benchmarks, each in its own JVM without
+    the agent and with CPU sampling only (`sampler=async,interval=10ms`, no allocation, monitor or
+    probe recording), 3 rounds alternating the two. A run's time is the median of the second half
+    of its iterations; the criterion is the geometric mean over a suite's benchmarks.
+  - `java/bench/soak.sh`: Spring Petclinic with the agent's defaults in live mode under constant
+    load, a client reconnecting every 5 min (receiving and acknowledging data, taking a thread
+    dump). With a fixed, pre-touched heap, resident memory may grow by at most 8 MB/h after the
+    first hour and open files by at most 50; the JVM must not crash and every client cycle must
+    succeed.
+  - `crates/openprofiler-heap/scripts/bench.sh`: cold and warm open times and peak memory on
+    synthetic 1, 10 and 50 GB dumps (`gen_hprof`), with the phase 1 limits gated at 10 GB.
 - Phase 3: Spring Boot Petclinic and Quarkus demos show SQL and URL hot spots linked to call trees,
   at under 5% overhead. *(hot spots met; overhead met for throughput and latency, CPU per request
   met on Petclinic, not yet on Quarkus.)* `java/bench/linux.sh`, 8 closed-loop clients, 60 s,
@@ -557,7 +569,7 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 | VMStructs fragility across JDK builds | Used only as an optional guard; feature-detected and disabled gracefully. JDK matrix in CI. |
 | Bytecode instrumentation correctness | Injected code keeps the types at existing frames, so frames are remapped, not recomputed; a corpus test rewrites javac output with every hook and runs it under the verifier; methods with `jsr`/`ret`, overflowing branches or over 64 KB are skipped. |
 | Probe breadth across library versions | Probe SPI, a version-matrix harness (`java/matrix/`, servers in containers), prioritise by usage. |
-| Memory on huge heap dumps | Out-of-core design, disk-backed CSR, benchmark gates. |
+| Memory on huge heap dumps | Out-of-core design, disk-backed CSR, benchmark gates (`crates/openprofiler-heap/scripts/bench.sh`, tracked weekly). |
 | Signal handler conflicts | Chain prior handlers, make the signal configurable, detect other profilers and warn. |
 | Restrictive containers (no ptrace, read-only /tmp, non-root) | Ephemeral debug containers, configurable writable dir, JFR-only mode. |
 | UI performance with millions of nodes | Server-side lazy trees, virtualized rendering, LTTB downsampling. |

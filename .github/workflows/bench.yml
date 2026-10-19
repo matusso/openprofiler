@@ -1,0 +1,171 @@
+name: Benchmarks
+
+# Performance validation (roadmap phase 2 exit criteria): agent overhead at 100 Hz async sampling
+# on Renaissance and DaCapo (java/bench/suites.sh), a soak test of the agent under load
+# (java/bench/soak.sh) and the heap engine on synthetic dumps
+# (crates/openprofiler-heap/scripts/bench.sh). Results are tracked over time in the `gh-pages`
+# branch (bench/) with github-action-benchmark, which comments on the commit when a value gets
+# worse by more than 50% (overhead: 3%).
+#
+# GitHub-hosted runners limit a job to 6 h and about 14 GB of disk, so the weekly run soaks for
+# 5 h and indexes a 1 GB dump. The full criteria (24 h, 1/10/50 GB) need a self-hosted runner:
+# run the workflow by hand with `runner` set to its label.
+
+on:
+  schedule:
+    - cron: "0 1 * * 6"
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label (a self-hosted runner for the 24 h soak and the large dumps)
+        default: ubuntu-24.04
+      soak_hours:
+        description: Soak duration in hours
+        default: "5"
+      heap_sizes:
+        description: Synthetic heap dump sizes in GB
+        default: "1"
+      max_overhead:
+        description: Maximum overhead of 100 Hz async sampling in percent (empty to only report)
+        default: "2"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: benchmarks
+  cancel-in-progress: false
+
+jobs:
+  overhead:
+    name: Overhead on Renaissance and DaCapo
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: target/bench-suites/cache
+          key: bench-suites-${{ hashFiles('java/bench/suites.sh') }}
+      - run: java/build.sh
+      - run: java/bench/suites.sh
+        env:
+          AGENT_EXTRA: bootjar=${{ github.workspace }}/java/openprofiler-boot/build/openprofiler-boot.jar
+          MAX_OVERHEAD: ${{ inputs.max_overhead == null && '2' || inputs.max_overhead }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: overhead
+          path: |
+            target/bench-suites/*.txt
+            target/bench-suites/bench.json
+            target/bench-suites/logs/
+
+  soak:
+    name: Soak (${{ inputs.soak_hours || '5' }} h)
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    # Hosted runners stop jobs after 6 h, self-hosted ones after 5 days.
+    timeout-minutes: 1560
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: bench-m2-${{ hashFiles('java/bench/apps.sh') }}
+          restore-keys: bench-m2-
+      - run: java/build.sh
+      - run: java/bench/soak.sh
+        env:
+          SOAK_HOURS: ${{ inputs.soak_hours || '5' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak
+          path: |
+            target/soak/
+            !target/soak/*.oplink
+
+  heap:
+    name: Heap engine (${{ inputs.heap_sizes || '1' }} GB)
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: crates/openprofiler-heap/scripts/bench.sh ${{ inputs.heap_sizes || '1' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heap
+          path: |
+            target/heap-bench/*.txt
+            target/heap-bench/*.json*
+
+  track:
+    name: Track results
+    needs: [overhead, soak, heap]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - name: Collect results
+        id: results
+        run: |
+          for name in overhead soak heap; do
+            [[ -f "results/$name/bench.json" ]] && echo "$name=true" >>"$GITHUB_OUTPUT" || true
+          done
+      - uses: benchmark-action/github-action-benchmark@v1
+        if: steps.results.outputs.overhead == 'true'
+        with:
+          name: Agent overhead
+          tool: customSmallerIsBetter
+          output-file-path: results/overhead/bench.json
+          benchmark-data-dir-path: bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          # Values are run times relative to the baseline.
+          alert-threshold: "103%"
+      - uses: benchmark-action/github-action-benchmark@v1
+        if: steps.results.outputs.soak == 'true'
+        with:
+          name: Soak
+          tool: customSmallerIsBetter
+          output-file-path: results/soak/bench.json
+          benchmark-data-dir-path: bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: "150%"
+      - uses: benchmark-action/github-action-benchmark@v1
+        if: steps.results.outputs.heap == 'true'
+        with:
+          name: Heap engine
+          tool: customSmallerIsBetter
+          output-file-path: results/heap/bench.json
+          benchmark-data-dir-path: bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: "150%"
