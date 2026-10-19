@@ -5,6 +5,7 @@
 //! bias is introduced. The `SIGPROF` handler calls HotSpot's `AsyncGetCallTrace` and copies the
 //! raw frames into a lock-free bounded ring (Vyukov MPMC); a drainer thread resolves and
 //! aggregates them. Signals that are not ours are forwarded to the previously installed handler.
+//! On OpenJ9 the handler instead requests an inspection of the thread (see `sampler_j9`).
 //!
 //! `AsyncGetCallTrace` gives up on two common situations, which the handler repairs and retries:
 //! - The thread is in Java code but the PC is in a frameless stub (array zeroing/copying,
@@ -44,6 +45,14 @@ const TIMER_MAGIC: usize = 0x454d_4252;
 const NO_JAVA_FRAMES: i32 = -100;
 /// Sample code for a thread the VM does not know as a Java thread (no `JNIEnv`).
 const NOT_A_JAVA_THREAD: i32 = -101;
+/// Sample code for an OpenJ9 thread whose stack the inspector takes (see `sampler_j9`).
+const INSPECT: i32 = -102;
+/// Sample code for an OpenJ9 carrier running a virtual thread, whose stack the walker takes.
+const WALK: i32 = -103;
+/// Sample code for a virtual thread that unmounted before the walker took its stack.
+const UNMOUNTED: i32 = -104;
+/// Walks queued for the walker at most.
+const MAX_WALKS: usize = 1024;
 /// `JavaThreadState` values (stable since JDK 8); the `_trans` variants are one higher.
 const THREAD_IN_NATIVE: i32 = 4;
 const THREAD_IN_VM: i32 = 6;
@@ -69,6 +78,8 @@ struct Slot {
     vthread: UnsafeCell<u32>,
     /// `JavaThreadState` when the walk failed, -1 if unknown.
     state: UnsafeCell<i32>,
+    /// `JNIEnv*` of the thread, for an OpenJ9 inspection request.
+    env: UnsafeCell<usize>,
     frames: UnsafeCell<[ASGCT_CallFrame; MAX_FRAMES]>,
 }
 
@@ -94,6 +105,7 @@ impl Ring {
                 n: UnsafeCell::new(0),
                 vthread: UnsafeCell::new(0),
                 state: UnsafeCell::new(-1),
+                env: UnsafeCell::new(0),
                 frames: UnsafeCell::new(
                     [ASGCT_CallFrame { lineno: 0, method_id: std::ptr::null_mut() }; MAX_FRAMES],
                 ),
@@ -126,7 +138,7 @@ impl Ring {
         slot.seq.store(pos + 1, Ordering::Release);
     }
 
-    /// Single consumer: pops one committed sample.
+    /// Single consumer: pops one committed sample, appending its frames to `out`.
     fn pop(&self, out: &mut Vec<ASGCT_CallFrame>) -> Option<Popped> {
         let pos = self.tail.load(Ordering::Relaxed);
         let slot = &self.slots[pos % RING_SIZE];
@@ -137,7 +149,7 @@ impl Ring {
         // is advanced below.
         let r = unsafe {
             let n = *slot.n.get();
-            out.clear();
+            let first = out.len();
             if n > 0 {
                 let frames = &*slot.frames.get();
                 out.extend_from_slice(&frames[..n as usize]);
@@ -148,6 +160,8 @@ impl Ring {
                 n,
                 vthread: *slot.vthread.get(),
                 state: *slot.state.get(),
+                env: *slot.env.get(),
+                first,
             }
         };
         slot.seq.store(pos + RING_SIZE, Ordering::Release);
@@ -156,14 +170,26 @@ impl Ring {
     }
 }
 
-/// A sample taken off the ring; the frames go to the caller's buffer.
+/// A sample taken off the ring; its `n` frames start at `first` in the caller's buffer.
 struct Popped {
     tid: i32,
     time: i64,
     n: i32,
     vthread: u32,
     state: i32,
+    env: usize,
+    first: usize,
 }
+
+/// Samples taken off the ring, with their frames.
+#[derive(Default)]
+struct Batch {
+    samples: Vec<Popped>,
+    frames: Vec<ASGCT_CallFrame>,
+}
+
+// SAFETY: the raw jmethodID pointers are opaque VM handles valid on any thread.
+unsafe impl Send for Batch {}
 
 static RING: OnceLock<Ring> = OnceLock::new();
 static ASGCT: AtomicUsize = AtomicUsize::new(0);
@@ -171,6 +197,16 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 static INTERVAL_NS: AtomicU64 = AtomicU64::new(10_000_000);
 static PREV: OnceLock<PrevHandler> = OnceLock::new();
+/// OpenJ9: samples whose stacks the inspector took, for the drainer to record.
+static INSPECTED: Mutex<Option<Batch>> = Mutex::new(None);
+static INSPECTOR: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+static INSPECTOR_STOP: AtomicBool = AtomicBool::new(false);
+static WALKER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+/// OpenJ9: whether the walker runs; carriers are otherwise inspected like other threads.
+static WALKER_ON: AtomicBool = AtomicBool::new(false);
+/// OpenJ9: samples of carriers waiting for the walker, and whether it should stop.
+static WALKS: Mutex<(Vec<Popped>, bool)> = Mutex::new((Vec::new(), false));
+static WALKS_CV: parking_lot::Condvar = parking_lot::Condvar::new();
 static TIMERS: Mutex<Option<HashMap<i32, usize>>> = Mutex::new(None);
 /// The agent's own threads: never armed.
 static OWN_TIDS: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
@@ -256,15 +292,45 @@ fn chain(sig: libc::c_int, info: *mut libc::siginfo_t, uc: *mut c_void) {
 fn sample(uc: *mut c_void) {
     let (Some(ring), Some(a)) = (RING.get(), agent()) else { return };
     let f = ASGCT.load(Ordering::Relaxed);
-    if f == 0 || !a.cpu_on.load(Ordering::Relaxed) {
+    let j9 = crate::sampler_j9::enabled();
+    if (f == 0 && !j9) || !a.cpu_on.load(Ordering::Relaxed) {
         return;
     }
+    // Counted from before a request can be made until it is committed.
+    let _in_flight = j9.then(crate::sampler_j9::InFlight::enter);
     let Some((slot, pos)) = ring.reserve() else {
         DROPPED.fetch_add(1, Ordering::Relaxed);
         return;
     };
     let env = a.vm.env().unwrap_or(std::ptr::null_mut());
     let tid = gettid();
+    if j9 {
+        let vthread = mounted(tid);
+        let n = if env.is_null() {
+            NOT_A_JAVA_THREAD
+        } else if vthread != 0 && WALKER_ON.load(Ordering::Relaxed) {
+            WALK
+        // SAFETY: `env` is the current thread's; we are in flight with the slot reserved.
+        } else if unsafe { crate::sampler_j9::request(env) } {
+            INSPECT
+        } else {
+            NO_JAVA_FRAMES
+        };
+        // SAFETY: the slot is reserved for us until commit.
+        unsafe {
+            *slot.n.get() = n;
+            *slot.state.get() = -1;
+            *slot.env.get() = env as usize;
+            *slot.tid.get() = tid;
+            *slot.time.get() = realtime_nanos();
+            *slot.vthread.get() = vthread;
+        }
+        Ring::commit(slot, pos);
+        if n == INSPECT || n == WALK {
+            crate::sampler_j9::wake();
+        }
+        return;
+    }
     // SAFETY: `f` is HotSpot's AsyncGetCallTrace resolved via dlsym; the slot is reserved for us
     // until commit; `uc` is the signal context.
     unsafe {
@@ -578,23 +644,34 @@ fn clear_mounted(tid: i32) {
 /// Starts the async sampler if possible; on failure the sync sampler keeps producing CPU samples.
 pub fn start(a: &'static Agent, jni: *mut JNIEnv) {
     if !a.async_possible() {
+        crate::sampler_j9::end_registration();
         return;
     }
-    // SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name.
-    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"AsyncGetCallTrace".as_ptr()) };
-    if sym.is_null() {
-        if a.opts.sampler == crate::SamplerChoice::Async {
-            log("AsyncGetCallTrace not found; using the sync sampler");
+    let j9 = match crate::sampler_j9::init(a, jni) {
+        crate::sampler_j9::Init::Ready => true,
+        crate::sampler_j9::Init::NotJ9 => false,
+        crate::sampler_j9::Init::Unsupported(why) => {
+            log(&format!("OpenJ9 stack sampling unavailable ({why}); using the sync sampler"));
+            return;
         }
-        return;
-    }
+    };
     PID.store(std::process::id() as i32, Ordering::SeqCst);
-    if a.opts.recover {
-        init_anchor_offsets(jni);
-        RECOVER.store(true, Ordering::SeqCst);
+    if !j9 {
+        // SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name.
+        let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"AsyncGetCallTrace".as_ptr()) };
+        if sym.is_null() {
+            if a.opts.sampler == crate::SamplerChoice::Async {
+                log("AsyncGetCallTrace not found; using the sync sampler");
+            }
+            return;
+        }
+        if a.opts.recover {
+            init_anchor_offsets(jni);
+            RECOVER.store(true, Ordering::SeqCst);
+        }
+        ASGCT.store(sym as usize, Ordering::SeqCst);
     }
     let _ = RING.set(Ring::new());
-    ASGCT.store(sym as usize, Ordering::SeqCst);
     INTERVAL_NS.store(a.interval_ns.load(Ordering::SeqCst), Ordering::SeqCst);
     // SAFETY: installs a SA_SIGINFO handler; the previous action is saved for chaining.
     unsafe {
@@ -611,6 +688,27 @@ pub fn start(a: &'static Agent, jni: *mut JNIEnv) {
     }
     if old_handler_is_foreign() {
         log("another SIGPROF handler was installed (another profiler?); chaining to it");
+    }
+    if j9 {
+        match std::thread::Builder::new()
+            .name("openprofiler-j9-inspector".into())
+            .spawn(move || inspect_loop(a))
+        {
+            Ok(h) => *INSPECTOR.lock() = Some(h),
+            Err(e) => {
+                log(&format!("cannot start the J9 stack inspector ({e}); using the sync sampler"));
+                return;
+            }
+        }
+        match std::thread::Builder::new().name("openprofiler-j9-walker".into()).spawn(move || walker_loop(a))
+        {
+            Ok(h) => *WALKER.lock() = Some(h),
+            Err(e) => {
+                log(&format!(
+                    "cannot start the J9 virtual thread walker ({e}); carriers show their own frames"
+                ));
+            }
+        }
     }
     ACTIVE.store(true, Ordering::SeqCst);
     a.async_active.store(true, Ordering::SeqCst);
@@ -778,21 +876,23 @@ pub fn register_own_thread() {
 
 /// ThreadStart runs on the new thread itself, so its tid is ours to read. `idx` is `None` for the
 /// agent's own Java threads, which are not sampled.
-pub fn on_thread_start(a: &Agent, idx: Option<u32>) {
+pub fn on_thread_start(a: &Agent, jni: *mut JNIEnv, thread: jthread, idx: Option<u32>) {
     let tid = gettid();
     let Some(i) = idx else {
         register_own_thread();
         return;
     };
     a.collector.lock().set_os_id(i, tid as u64);
+    crate::sampler_j9::register(jni, jni as usize, thread);
     if ACTIVE.load(Ordering::Relaxed) {
         arm(tid);
     }
 }
 
-pub fn on_thread_end() {
+pub fn on_thread_end(a: &Agent, jni: *mut JNIEnv, thread: jthread, idx: Option<u32>) {
     let tid = gettid();
     clear_mounted(tid);
+    crate::sampler_j9::thread_end(a, jni, thread, idx);
     if ACTIVE.load(Ordering::Relaxed) {
         disarm(tid);
     }
@@ -826,6 +926,8 @@ fn role(thread_name: &str) -> Option<&'static str> {
         "XUnmapper",
         "XUncommitter",
         "Shenandoah",
+        // OpenJ9 (`GC Worker` matches `GC `).
+        "Concurrent Mark",
     ];
     // Java threads that run VM-internal work (comm names are truncated to 15 bytes).
     const SERVICE: &[&str] = &[
@@ -836,7 +938,9 @@ fn role(thread_name: &str) -> Option<&'static str> {
         "Attach Listener",
         "Sweeper thread",
     ];
-    Some(if thread_name.contains("CompilerThre") || thread_name.starts_with("JVMCI") {
+    // OpenJ9: `JIT Compilation Thread-000`, `JIT-SamplerThread`, `JIT IProfiler`.
+    let jit = thread_name.starts_with("JVMCI") || thread_name.starts_with("JIT");
+    Some(if thread_name.contains("CompilerThre") || jit {
         "[JIT compiler]"
     } else if GC.iter().any(|p| thread_name.starts_with(p)) {
         "[GC]"
@@ -885,6 +989,7 @@ fn state_label(state: i32) -> &'static str {
 
 fn error_label(code: i32) -> &'static str {
     match code {
+        UNMOUNTED => "[virtual thread, unmounted when walked]",
         ASGCT_NO_CLASS_LOAD => "[no class load]",
         ASGCT_GC_ACTIVE => "[GC active]",
         ASGCT_NOT_WALKABLE_NOT_JAVA => "[not walkable, in VM]",
@@ -897,11 +1002,159 @@ fn error_label(code: i32) -> &'static str {
     }
 }
 
+/// Takes the committed samples off the ring into `batch`. The stacks of OpenJ9 inspection
+/// requests are taken now, which resumes the requesting threads; walks of virtual threads go to
+/// `walks`.
+fn take(a: &Agent, ring: &Ring, batch: &mut Batch, walks: &mut Vec<Popped>, buf: &mut [jvmtiFrameInfo]) {
+    while let Some(mut s) = ring.pop(&mut batch.frames) {
+        match s.n {
+            INSPECT => {
+                // The frames are the thread's own, also on a carrier that mounted a virtual
+                // thread since.
+                s.vthread = 0;
+                let r = crate::sampler_j9::inspect(a, s.env, buf);
+                s.n = add_frames(batch, &mut s, r, buf);
+            }
+            WALK => {
+                walks.push(s);
+                continue;
+            }
+            _ => {}
+        }
+        batch.samples.push(s);
+    }
+}
+
+/// Appends the frames of a stack taken with JVMTI to `batch` for sample `s`; its sample code.
+fn add_frames(
+    batch: &mut Batch,
+    s: &mut Popped,
+    r: Result<usize, jvmtiError>,
+    buf: &[jvmtiFrameInfo],
+) -> i32 {
+    s.first = batch.frames.len();
+    match r {
+        Ok(0) => NO_JAVA_FRAMES,
+        Ok(n) => {
+            let frames =
+                buf[..n].iter().map(|f| ASGCT_CallFrame { lineno: f.location as jint, method_id: f.method });
+            batch.frames.extend(frames);
+            n as i32
+        }
+        Err(JVMTI_ERROR_THREAD_NOT_ALIVE) => ASGCT_THREAD_EXIT,
+        Err(_) => ASGCT_UNKNOWN_STATE,
+    }
+}
+
+/// Hands samples with their stacks to the drainer.
+fn publish(batch: &mut Batch) {
+    if batch.samples.is_empty() {
+        return;
+    }
+    let mut out = INSPECTED.lock();
+    let out = out.get_or_insert_with(Batch::default);
+    let base = out.frames.len();
+    out.frames.append(&mut batch.frames);
+    out.samples.extend(batch.samples.drain(..).map(|s| Popped { first: s.first + base, ..s }));
+}
+
+/// OpenJ9: serves inspection requests as they come, holding no agent lock (see `sampler_j9`),
+/// passes walks of virtual threads to the walker and hands the samples to the drainer. Stopped by
+/// [`stop`] once no requests can be made, after serving the last ones.
+fn inspect_loop(a: &'static Agent) {
+    register_own_thread();
+    let Some(_jni) = a.vm.attach_daemon("OpenProfiler J9 Inspector") else {
+        log("cannot attach the J9 stack inspector; OpenJ9 samples have no stacks");
+        return;
+    };
+    crate::sampler_j9::accept();
+    let ring = RING.get().unwrap();
+    let mut buf = vec![jvmtiFrameInfo { method: std::ptr::null_mut(), location: 0 }; MAX_FRAMES];
+    let mut batch = Batch::default();
+    let mut walks = Vec::new();
+    loop {
+        let last = INSPECTOR_STOP.load(Ordering::SeqCst);
+        take(a, ring, &mut batch, &mut walks, &mut buf);
+        publish(&mut batch);
+        if !walks.is_empty() {
+            let mut q = WALKS.lock();
+            let room = MAX_WALKS.saturating_sub(q.0.len());
+            if walks.len() > room {
+                DROPPED.fetch_add((walks.len() - room) as u64, Ordering::Relaxed);
+                walks.truncate(room);
+            }
+            q.0.append(&mut walks);
+            WALKS_CV.notify_one();
+        }
+        if last {
+            break;
+        }
+        crate::sampler_j9::wait(10);
+    }
+    a.vm.detach();
+}
+
+/// OpenJ9: takes the stacks of the virtual threads that carriers ran when sampled (see
+/// `sampler_j9::walk_mounted`) and hands the samples to the drainer.
+fn walker_loop(a: &'static Agent) {
+    register_own_thread();
+    let Some(jni) = a.vm.attach_daemon("OpenProfiler J9 Walker") else {
+        log("cannot attach the J9 virtual thread walker; carriers show their own frames");
+        return;
+    };
+    WALKER_ON.store(true, Ordering::SeqCst);
+    let mut buf = vec![jvmtiFrameInfo { method: std::ptr::null_mut(), location: 0 }; MAX_FRAMES];
+    let mut batch = Batch::default();
+    loop {
+        let jobs = {
+            let mut q = WALKS.lock();
+            while q.0.is_empty() && !q.1 {
+                WALKS_CV.wait(&mut q);
+            }
+            if q.0.is_empty() {
+                break;
+            }
+            std::mem::take(&mut q.0)
+        };
+        for mut s in jobs {
+            let walked = crate::sampler_j9::walk_mounted(a, jni, s.env, s.vthread - 1, &mut buf);
+            s.n = match walked {
+                Some(n) => add_frames(&mut batch, &mut s, Ok(n), &buf),
+                None => UNMOUNTED,
+            };
+            batch.samples.push(s);
+        }
+        publish(&mut batch);
+    }
+    a.vm.detach();
+}
+
+/// Before the VM dies: on OpenJ9, stops inspection requests and waits until the inspector served
+/// the queued ones, while JVMTI still works; then stops the walker.
+pub fn stop() {
+    if !crate::sampler_j9::enabled() {
+        return;
+    }
+    crate::sampler_j9::stop_requests();
+    INSPECTOR_STOP.store(true, Ordering::SeqCst);
+    crate::sampler_j9::wake();
+    if let Some(h) = INSPECTOR.lock().take() {
+        let _ = h.join();
+    }
+    WALKER_ON.store(false, Ordering::SeqCst);
+    WALKS.lock().1 = true;
+    WALKS_CV.notify_one();
+    if let Some(h) = WALKER.lock().take() {
+        let _ = h.join();
+    }
+}
+
 fn drain_loop(a: &'static Agent) {
     register_own_thread();
     let Some(jni) = a.vm.attach_daemon("OpenProfiler Async Drainer") else { return };
     let ring = RING.get().unwrap();
-    let mut frames = Vec::with_capacity(MAX_FRAMES);
+    let j9 = crate::sampler_j9::enabled();
+    let mut batch = Batch::default();
     let mut ids = Vec::with_capacity(MAX_FRAMES);
     let mut last_scan = std::time::Instant::now();
     while !a.shutting_down.load(Ordering::Relaxed) {
@@ -910,6 +1163,13 @@ fn drain_loop(a: &'static Agent) {
             jni!(jni, ExceptionClear);
             continue;
         }
+        if j9 {
+            if let Some(b) = INSPECTED.lock().as_mut() {
+                std::mem::swap(b, &mut batch);
+            }
+        } else {
+            take(a, ring, &mut batch, &mut Vec::new(), &mut []);
+        }
         let weight = INTERVAL_NS.load(Ordering::Relaxed);
         let mut guard = a.collector.lock();
         let c = &mut *guard;
@@ -917,7 +1177,7 @@ fn drain_loop(a: &'static Agent) {
             rescan();
             last_scan = std::time::Instant::now();
         }
-        while let Some(Popped { tid, time, n, vthread, state }) = ring.pop(&mut frames) {
+        for &Popped { tid, time, n, vthread, state, first, .. } in &batch.samples {
             let thread = match c.thread_by_os_id(tid as u64) {
                 Some(i) => i,
                 None => {
@@ -940,7 +1200,7 @@ fn drain_loop(a: &'static Agent) {
             };
             ids.clear();
             if n > 0 {
-                for f in &frames {
+                for f in &batch.frames[first..first + n as usize] {
                     let kind = if f.lineno == -3 { FrameKind::Native } else { FrameKind::Unknown };
                     let bci = if f.lineno >= 0 { f.lineno as i64 } else { -1 };
                     ids.push(c.resolver.frame(a.jvmti, &mut c.symbols, f.method_id, bci, kind));
@@ -967,6 +1227,8 @@ fn drain_loop(a: &'static Agent) {
             let stack = c.stacks.intern_leaf_first(&ids);
             c.add_sample(time, SampleKind::Cpu, thread, ThreadState::Runnable, stack, weight, None);
         }
+        batch.samples.clear();
+        batch.frames.clear();
         c.dropped_samples = DROPPED.load(Ordering::Relaxed);
         drop(guard);
         jni!(jni, PopLocalFrame, std::ptr::null_mut());
@@ -991,6 +1253,9 @@ mod tests {
         assert_eq!(native_thread_label("G1 Conc#1"), "[GC]");
         assert_eq!(native_thread_label("VM Thread"), "[VM operation]");
         assert_eq!(native_thread_label("C2 CompilerThre"), "[JIT compiler]");
+        assert_eq!(role("JIT Compilation"), Some("[JIT compiler]"));
+        assert_eq!(role("GC Worker"), Some("[GC]"));
+        assert_eq!(role("Concurrent Mark Helper"), Some("[GC]"));
         assert_eq!(native_thread_label("pool-3-worker-12"), "[native: pool-worker]");
         assert_eq!(native_thread_label("grpc_epoll#2"), "[native: grpc-epoll]");
         assert_eq!(native_thread_label("12"), "[native thread]");

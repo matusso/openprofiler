@@ -546,6 +546,25 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
     `[GC active]`, `[deoptimization]`, …).
   - A sample's return address can only be mapped to the nearest debug-info scope, so time in a
     stub called from inlined code may land on a neighbouring inlined method.
+  - **OpenJ9** (detected by the `com.ibm.GetJ9vmThread` JVMTI extension) uses the same timers
+    but not `AsyncGetCallTrace`. J9's implementation repoints the sampled thread's stack roots at
+    a frame on the C stack while it walks, and the GC or JVMTI may read them meanwhile (a thread
+    in an event callback has no VM access), which corrupted the heap under allocation sampling.
+    Instead the handler sets `J9_PUBLIC_FLAGS_HALT_THREAD_INSPECTION` and the stack overflow mark
+    (`J9_EVENT_SOM_VALUE`) on the thread, queues the request and wakes an inspector thread through
+    an eventfd. The inspector calls `GetStackTrace`, which halts the thread at its next yield
+    point, walks it and resumes it, clearing the flag. Only threads registered with a global
+    reference (at `ThreadStart`, or at startup) are flagged, and a thread unregisters at
+    `ThreadEnd` before J9 can reuse its `J9VMThread`; at VM death requests stop and the queued
+    ones are served. The inspector takes no agent lock held across a VM entry. A carrier running
+    a virtual thread is not flagged: JVMTI shows only a carrier's own frames, and walking the
+    virtual thread waits for a mount or unmount in progress, which a pending request could hold
+    up. A walker thread instead calls `GetStackTrace` on the mounted virtual thread (a global
+    reference kept by the mount events; J9 halts the carrier for the walk) soon after the tick,
+    and keeps the stack only if the thread stayed mounted throughout, else the sample is
+    `[virtual thread, unmounted when walked]`. Neither thread waits for the other. The `J9VMThread`
+    offsets (64-bit) are checked on the starting thread; if they look wrong the sync sampler is
+    used. Failed walks are 0 on `StackWorkload.java` (the test allows 0.1%).
 - **Sync (macOS, fallback):** `GetThreadListStackTraces` on all threads each tick. RUNNABLE
   threads count as CPU only if their thread CPU time advanced.
 - Wall-clock samples and thread-state history always come from the sync sampler (default 20 Hz).

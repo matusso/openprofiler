@@ -771,12 +771,10 @@ async fn async_sampler_walks_stacks() {
             workload.map(|i| s.count[i] as usize).sum::<usize>()
         })
     };
-    // Walk quality is measured once the workload is compiled: OpenJ9's AsyncGetCallTrace cannot
-    // walk from the bytecode interpreter (it seeds the walk from the signal context only in JIT
-    // code, and the interpreter keeps its SP and PC in registers), nor from VM code that JIT code
-    // calls without recording its frame (allocation, array copies). The agent repairs the latter
-    // on HotSpot only, hence the separate bound.
-    let max_failed = if is_openj9(&java) { 0.10 } else { 0.05 };
+    // Walk quality is measured once the workload is compiled. On OpenJ9 the agent does not use
+    // AsyncGetCallTrace but has the VM halt the sampled thread and takes its stack with JVMTI,
+    // which does not fail for a live thread.
+    let max_failed = if is_openj9(&java) { 0.001 } else { 0.05 };
     wait_for(&client, "5,000 CPU samples of the workload threads", |p| workload_samples(p) >= 5_000).await;
     let (warm_total, warm_failures, _) = tally(&client.profile().read());
     // Java threads of the workload: every sample should end in a Java method.

@@ -124,7 +124,10 @@ degrades gracefully when the JVM refuses one group.
    `AsyncGetCallTrace` and copies frames into a lock-free ring buffer. A drainer thread aggregates
    samples into the call tree. VMStructs are used only for robustness checks and stack-walk repair
    (frame anchors, code-cache bounds and blob frame sizes, thread state); samples without Java
-   frames are attributed by thread role or name (see `spec/agent-link.md`).
+   frames are attributed by thread role or name (see `spec/agent-link.md`). On OpenJ9 the handler
+   does not walk: it has the VM halt the thread for inspection at its next yield point, and an
+   inspector thread takes the stack with `GetStackTrace` (J9's `AsyncGetCallTrace` is not safe to
+   use alongside the GC and JVMTI).
 2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS, Windows and
    when async sampling is unavailable.
 3. **JFR mode (planned):** stream JFR `ExecutionSample` events for locked-down environments.

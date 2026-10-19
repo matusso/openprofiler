@@ -167,7 +167,10 @@ unsafe extern "C" fn on_mount(_jvmti: *mut jvmtiEnv) {
     let Some((jni, vthread)) = current(a) else { return };
     let Some((idx, shared)) = row(a, jni, vthread) else { return };
     #[cfg(target_os = "linux")]
-    crate::sampler_async::set_mounted(Some(idx));
+    {
+        crate::sampler_async::set_mounted(Some(idx));
+        crate::sampler_j9::set_mounted(jni, Some((vthread, idx)));
+    }
     if shared {
         return;
     }
@@ -198,6 +201,8 @@ unsafe extern "C" fn on_unmount(_jvmti: *mut jvmtiEnv) {
         return;
     }
     let Some((jni, vthread)) = current(a) else { return };
+    #[cfg(target_os = "linux")]
+    crate::sampler_j9::set_mounted(jni, None);
     let tag = a.jvmti.get_tag(vthread);
     if tag <= 0 {
         return;
