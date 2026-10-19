@@ -1,8 +1,8 @@
 //! Synchronous sampler: walks all Java threads with `GetThreadListStackTraces`.
 //!
-//! Always provides wall-clock samples and thread-state history. When the async sampler is not
-//! active (macOS, `sampler=sync`, or async setup failed) it also produces CPU samples from the
-//! threads that are runnable at each tick.
+//! Always provides wall-clock samples and thread-state history. When neither the async nor the JFR
+//! sampler is active (macOS, `sampler=sync`, or their setup failed) it also produces CPU samples
+//! from the threads that are runnable at each tick.
 
 use crate::Agent;
 use crate::collector::now_nanos;
@@ -60,7 +60,9 @@ fn run(a: &'static Agent) {
     let mut next_wall = Instant::now();
     while !a.shutting_down.load(Ordering::Relaxed) {
         let cpu_interval = Duration::from_nanos(a.interval_ns.load(Ordering::Relaxed));
-        let sync_cpu = a.cpu_on.load(Ordering::Relaxed) && !a.async_active.load(Ordering::Relaxed);
+        let sync_cpu = a.cpu_on.load(Ordering::Relaxed)
+            && !a.async_active.load(Ordering::Relaxed)
+            && !a.jfr_active.load(Ordering::Relaxed);
         let now = Instant::now();
         let do_cpu = sync_cpu && now >= next_cpu;
         let do_wall = now >= next_wall;

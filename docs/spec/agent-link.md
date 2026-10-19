@@ -109,7 +109,8 @@ Sample kinds (`openprofiler_model::SampleKind`): `0 cpu`, `1 wall`, `2 alloc`, `
 
 Weights:
 - `cpu`: nanoseconds of CPU time (async sampler: the timer interval; sync sampler: the thread's
-  measured CPU-time delta, capped at 2× the interval).
+  measured CPU-time delta, capped at 2× the interval; JFR sampler: the event's sampling period,
+  else the interval).
 - `wall`: the wall-clock interval.
 - `alloc`: unbiased estimate of the allocated bytes a sample represents
   (`size / (1 - e^(-size/interval))`); `class_id` is the allocated class.
@@ -478,7 +479,8 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
 | `infofile` | `$TMPDIR/openprofiler-<pid>.json` | where to publish port/token |
 | `interval` | `10ms` | CPU sampling interval |
 | `wall` | `50ms` | wall-clock / thread-state sampling interval |
-| `sampler` | `auto` | `auto`, `async` (Linux), `sync` |
+| `sampler` | `auto` | `auto`, `async` (Linux), `sync`, `jfr` (see [Samplers](#samplers)) |
+| `jfr_event` | `auto` | JFR sampler event: `auto` (`cputime` where available, else `execution`), `execution` (`jdk.ExecutionSample`), `cputime` (`jdk.CPUTimeSample`, JDK 25+ on Linux) |
 | `cpu`, `alloc`, `monitors` | on | initial recording state |
 | `alloc_interval` | `512k` | mean bytes between allocation samples |
 | `monitor_threshold` | `100us` | longer monitor events and parks are sent individually; shorter monitor events are sampled, shorter parks not recorded |
@@ -567,6 +569,21 @@ format (see the snapshot spec) supersedes this as the long-term archive format.
     used. Failed walks are 0 on `StackWorkload.java` (the test allows 0.1%).
 - **Sync (macOS, fallback):** `GetThreadListStackTraces` on all threads each tick. RUNNABLE
   threads count as CPU only if their thread CPU time advanced.
+- **JFR streaming (`sampler=jfr`; on Linux also `auto` when the async sampler cannot start):** the
+  boot class `JfrSampler` opens a `jdk.jfr.consumer.RecordingStream` (JDK 14+, used reflectively)
+  on one thread, `OpenProfiler JFR`. It streams `jdk.CPUTimeSample` (JDK 25+ on Linux; `throttle`
+  set to the interval of CPU time) or `jdk.ExecutionSample` (`period` set to the interval, at least
+  1 ms). Each event's Java thread id, frames (method, line, frame type) and time go to the agent,
+  which interns the methods by name and records a `cpu` sample on the thread with that id; samples
+  of threads the agent has not registered yet are dropped. No signals, `AsyncGetCallTrace` or
+  VMStructs are involved, so it works where those are not allowed. Differences from the async
+  sampler: JFR flushes about once a second, so live views lag by that much; `jdk.ExecutionSample`
+  only sees threads running Java code (not native code, GC or JIT threads); JFR's stack depth
+  (64 frames by default, `-XX:FlightRecorderOptions:stackdepth=`) limits stacks before
+  `max_frames`. Switching CPU recording off or changing the interval closes the stream at its next
+  flush and reopens it as needed. If no stream can be opened (JDK 11–13, JFR disabled, `jdk.jfr`
+  missing from the image) or it dies, the sync sampler produces CPU samples. `Hello` reports the
+  capability `cpu_jfr` and `SessionConfig.sampler` is `jfr`.
 - Wall-clock samples and thread-state history always come from the sync sampler (default 20 Hz).
 
 ## Attach

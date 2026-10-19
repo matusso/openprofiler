@@ -101,6 +101,11 @@ final class HttpServerProbe extends Probe {
             }
             return;
         }
+        if (call.interception == REACTOR_STATE && args != null && args.length > 1
+                && !(args[1] instanceof Enum) && "[disconnecting]".equals(String.valueOf(args[1]))) {
+            reactorDone(args[0], null);
+            return;
+        }
         if (call.nested || args == null || args.length < 1) {
             return;
         }
@@ -309,7 +314,12 @@ final class HttpServerProbe extends Probe {
         recordFor(p.label, p.startEpochNanos, duration, error, detail);
     }
 
-    /** The response of a Reactor Netty request completed or failed. */
+    /**
+     * The response of a Reactor Netty request completed or failed. {@code onOutboundComplete} is
+     * skipped when the response's last write terminates the operations first (a response written
+     * from outside the event loop), so the {@code DISCONNECTING} state that termination reports
+     * completes the request too; whichever comes first records it.
+     */
     private void reactorDone(Object ops, Object[] args) {
         Pending p = pending.remove(ops);
         if (p == null) {

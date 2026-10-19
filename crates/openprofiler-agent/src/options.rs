@@ -20,6 +20,19 @@ pub enum SamplerChoice {
     Auto,
     Async,
     Sync,
+    /// Stream JFR execution samples (no signals, no `AsyncGetCallTrace`).
+    Jfr,
+}
+
+/// JFR event the `jfr` sampler streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JfrEvent {
+    /// `jdk.CPUTimeSample` where the JVM has it (JDK 25+ on Linux), else `jdk.ExecutionSample`.
+    Auto,
+    /// `jdk.ExecutionSample`: threads running Java code, at a fixed wall-clock period.
+    Execution,
+    /// `jdk.CPUTimeSample`: one sample per interval of CPU time a thread consumed.
+    CpuTime,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +49,7 @@ pub struct Options {
     pub wait: bool,
     pub tls: bool,
     pub sampler: SamplerChoice,
+    pub jfr_event: JfrEvent,
     /// Repair and retry failed `AsyncGetCallTrace` walks (Linux async sampler).
     pub recover: bool,
     pub cpu: bool,
@@ -95,6 +109,7 @@ impl Default for Options {
             wait: false,
             tls: false,
             sampler: SamplerChoice::Auto,
+            jfr_event: JfrEvent::Auto,
             recover: true,
             cpu: true,
             alloc: true,
@@ -236,6 +251,25 @@ impl Options {
                             o.sampler = SamplerChoice::Sync;
                             true
                         }
+                        "jfr" => {
+                            o.sampler = SamplerChoice::Jfr;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "jfr_event" => match v {
+                        "auto" => {
+                            o.jfr_event = JfrEvent::Auto;
+                            true
+                        }
+                        "execution" => {
+                            o.jfr_event = JfrEvent::Execution;
+                            true
+                        }
+                        "cputime" => {
+                            o.jfr_event = JfrEvent::CpuTime;
+                            true
+                        }
                         _ => false,
                     },
                     "recover" => {
@@ -366,5 +400,9 @@ mod tests {
         assert!(bad.is_empty(), "{bad:?}");
         assert_eq!(o.complexity, vec!["a.B.sort#0", "a.C.run"]);
         assert_eq!((o.trace, o.trace_events), (Some(Duration::from_secs(5)), 1000));
+        let (o, bad) = Options::parse("sampler=jfr,jfr_event=execution", None);
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!((o.sampler, o.jfr_event), (SamplerChoice::Jfr, JfrEvent::Execution));
+        assert_eq!(Options::parse("jfr_event=bogus", None).1.len(), 1);
     }
 }

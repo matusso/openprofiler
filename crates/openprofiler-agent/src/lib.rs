@@ -28,6 +28,7 @@ mod sampler;
 mod sampler_async;
 #[cfg(target_os = "linux")]
 mod sampler_j9;
+mod sampler_jfr;
 mod server;
 mod tls;
 mod triggers;
@@ -36,7 +37,7 @@ mod vmstructs;
 mod vthreads;
 
 pub use collector::Collector;
-pub use options::{Mode, Options, SamplerChoice};
+pub use options::{JfrEvent, Mode, Options, SamplerChoice};
 
 use jvm::{Jvmti, Vm};
 use jvmti_sys::*;
@@ -73,6 +74,8 @@ pub struct Agent {
     pub info_file: Mutex<Option<std::path::PathBuf>>,
     pub connected: (std::sync::Mutex<bool>, std::sync::Condvar),
     pub async_active: AtomicBool,
+    /// The JFR-streaming sampler produces the CPU samples.
+    pub jfr_active: AtomicBool,
 }
 
 static AGENT: OnceLock<Agent> = OnceLock::new();
@@ -224,6 +227,7 @@ unsafe fn init(vm: *mut JavaVM, options: *const c_char, attach: bool) -> jint {
         info_file: Mutex::new(None),
         connected: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
         async_active: AtomicBool::new(false),
+        jfr_active: AtomicBool::new(false),
     };
     if AGENT.set(agent).is_err() {
         return 0;
