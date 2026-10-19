@@ -32,7 +32,7 @@ message Hello {
   string protocol_semver = 1;
   string agent_version = 2;
   JvmInfo jvm = 3;
-  // Granted feature groups: "cpu", "cpu_async", "alloc", "monitor", "monitor_usage" (owners of
+  // Granted feature groups: "cpu", "cpu_async", "cpu_jfr", "alloc", "monitor", "monitor_usage" (owners of
   // contended monitors), "park" (j.u.c lock hooks), "threads", "telemetry", "heap_dump",
   // "thread_dump", "virtual_threads", "triggers", "mbeans", "instrument" (bytecode
   // instrumentation), "probes", ...
@@ -64,7 +64,7 @@ message SessionConfig {
   uint32 monitor_threshold_us = 6;
   bool telemetry = 7;
   bool thread_states = 8;
-  // "auto", "async" or "sync".
+  // The CPU sampler in use: "async", "jfr" or "sync".
   string sampler = 9;
 }
 

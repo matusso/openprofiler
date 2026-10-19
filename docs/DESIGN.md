@@ -130,7 +130,11 @@ degrades gracefully when the JVM refuses one group.
    use alongside the GC and JVMTI).
 2. **Sync fallback:** `GetThreadListStackTraces` from a sampler thread. Used on macOS, Windows and
    when async sampling is unavailable.
-3. **JFR mode (planned):** stream JFR `ExecutionSample` events for locked-down environments.
+3. **JFR streaming (`sampler=jfr`):** a boot class opens a `RecordingStream` (JDK 14+) on
+   `jdk.ExecutionSample`, or `jdk.CPUTimeSample` where the JVM has it (JDK 25+ on Linux), and passes
+   each sample's thread and frames to the agent. No signals, `AsyncGetCallTrace` or VMStructs, so
+   it suits locked-down environments; on Linux `sampler=auto` falls back to it when the async
+   sampler cannot start (e.g. `AsyncGetCallTrace` removed). See `spec/agent-link.md`.
 4. **Virtual threads:** mount and unmount extension events, aggregated per carrier.
 
 **Allocation:** `SampledObjectAlloc` with a configurable interval (default 512 KB), stack capture,
@@ -583,7 +587,7 @@ Open work is tracked in [GitHub issues](https://github.com/matusso/openprofiler/
 
 | Risk | Mitigation |
 |---|---|
-| `AsyncGetCallTrace` instability or removal | The sampler is abstracted; sync and JFR back ends exist or are planned. Track the JDK CPU-time JFR sampler (JDK 25+). |
+| `AsyncGetCallTrace` instability or removal | The sampler is abstracted; sync and JFR-streaming back ends exist, and `sampler=auto` falls back to JFR on Linux. The JFR back end uses the CPU-time sampler (`jdk.CPUTimeSample`) on JDK 25+. |
 | VMStructs fragility across JDK builds | Used only as an optional guard; feature-detected and disabled gracefully. JDK matrix in CI. |
 | Bytecode instrumentation correctness | Injected code keeps the types at existing frames, so frames are remapped, not recomputed; a corpus test rewrites javac output with every hook and runs it under the verifier; methods with `jsr`/`ret`, overflowing branches or over 64 KB are skipped. |
 | Probe breadth across library versions | Probe SPI, a version-matrix harness (`java/matrix/`, servers in containers), prioritise by usage. |

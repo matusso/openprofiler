@@ -132,6 +132,10 @@ without a daemon, use offline mode: `=mode=offline,file=app.oplink`. Options are
 `OPENPROFILER_AGENT_OPTIONS`. See [the agent-link spec](docs/spec/agent-link.md) for all options
 and the trigger file format.
 
+Where profiling signals are not allowed, `sampler=jfr` takes CPU samples from a JFR stream
+(JDK 14+; on JDK 25+ on Linux, JFR's CPU-time sampler) instead. On Linux the agent also switches
+to it when the async sampler cannot start.
+
 ### Probes and exact call counts
 
 Probes are on by default (`probes=jdbc:http_server` picks some, `probes=none` turns them off) and
