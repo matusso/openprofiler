@@ -401,7 +401,7 @@ fn stack_trace(a: &Agent, thread: jthread, frames: &mut [jvmtiFrameInfo]) -> Res
 }
 
 fn slot_of(env: usize) -> usize {
-    (env >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (usize::BITS - 12)
+    ((env as u64 >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 52) as usize
 }
 
 /// Async-signal-safe membership test.
