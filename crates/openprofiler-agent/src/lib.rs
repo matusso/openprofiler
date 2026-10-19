@@ -26,6 +26,8 @@ mod resolve;
 mod sampler;
 #[cfg(target_os = "linux")]
 mod sampler_async;
+#[cfg(target_os = "linux")]
+mod sampler_j9;
 mod server;
 mod tls;
 mod triggers;

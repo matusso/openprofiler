@@ -62,9 +62,14 @@ impl Drop for Jvm {
 }
 
 fn spawn(java: &Path, jvm_args: &[String]) -> (Jvm, u32) {
+    spawn_source(java, &workload(), jvm_args)
+}
+
+/// Runs the single-file Java program `source` for 60 seconds.
+fn spawn_source(java: &Path, source: &Path, jvm_args: &[String]) -> (Jvm, u32) {
     let mut child = Command::new(java)
         .args(jvm_args)
-        .arg(workload())
+        .arg(source)
         .arg("60")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -708,6 +713,96 @@ async fn probes_after_dynamic_attach() {
         return;
     }
     probe_session(&java, "", true).await;
+}
+
+/// Stack-walk quality of the async sampler on a workload that runs where `AsyncGetCallTrace` tends
+/// to fail (array stubs, itable dispatch, runtime calls, allocation slow paths). Linux only.
+#[tokio::test(flavor = "multi_thread")]
+async fn async_sampler_walks_stacks() {
+    let Some(java) = java() else {
+        eprintln!("skipping: java not found");
+        return;
+    };
+    let lib = agent_lib();
+    let dir = tempfile::tempdir().unwrap();
+    let info = dir.path().join("info.json");
+    let opts = format!("-agentpath:{}=port=0,infofile={},interval=1ms", lib.display(), info.display());
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../java/testapp/StackWorkload.java");
+    let (_jvm, _pid) = spawn_source(&java, &source, &[opts, "-Xmx64m".into()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !info.exists() {
+        assert!(Instant::now() < deadline, "agent did not publish its info file");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let client = LinkClient::connect(LinkOptions::from_info(&AgentInfo::read(&info).unwrap())).await.unwrap();
+    if !client.hello().capabilities.iter().any(|c| c == "cpu_async") {
+        eprintln!("skipping: no async sampler on this platform");
+        return;
+    }
+    let leaf = |p: &Profile, stack: u32, frames: &mut Vec<u32>| {
+        p.stacks.frames_root_first(stack, frames);
+        frames.last().map_or(String::new(), |&f| p.symbols.method_label(p.symbols.frame(f).method))
+    };
+    // Workload samples, failed walks among them by thread and label, and labels of other threads.
+    type Tally = (usize, std::collections::BTreeMap<String, usize>, Vec<(String, String)>);
+    let tally = |p: &Profile| -> Tally {
+        let set = &p.samples[&SampleKind::Cpu];
+        let mut frames = vec![];
+        let (mut java_total, mut failures, mut other) =
+            (0usize, std::collections::BTreeMap::new(), Vec::new());
+        for i in 0..set.len() {
+            let name = thread_name(p, Some(set.thread[i]));
+            let label = leaf(p, set.stack[i], &mut frames);
+            let n = set.count[i] as usize;
+            if name.starts_with("stack-") {
+                java_total += n;
+                if label.starts_with('[') {
+                    *failures.entry(format!("{name}: {label}")).or_default() += n;
+                }
+            } else if label.starts_with('[') && !other.contains(&(name.to_string(), label.clone())) {
+                other.push((name.to_string(), label));
+            }
+        }
+        (java_total, failures, other)
+    };
+    let workload_samples = |p: &Profile| {
+        p.samples.get(&SampleKind::Cpu).map_or(0, |s| {
+            let workload = (0..s.len()).filter(|&i| thread_name(p, Some(s.thread[i])).starts_with("stack-"));
+            workload.map(|i| s.count[i] as usize).sum::<usize>()
+        })
+    };
+    // Walk quality is measured once the workload is compiled. On OpenJ9 the agent does not use
+    // AsyncGetCallTrace but has the VM halt the sampled thread and takes its stack with JVMTI,
+    // which does not fail for a live thread.
+    let max_failed = if is_openj9(&java) { 0.001 } else { 0.05 };
+    wait_for(&client, "5,000 CPU samples of the workload threads", |p| workload_samples(p) >= 5_000).await;
+    let (warm_total, warm_failures, _) = tally(&client.profile().read());
+    // Java threads of the workload: every sample should end in a Java method.
+    wait_for(&client, "5,000 more CPU samples of the workload threads", |p| {
+        workload_samples(p) >= warm_total + 5_000
+    })
+    .await;
+    {
+        let (total, mut failures, other) = tally(&client.profile().read());
+        for (k, n) in &warm_failures {
+            *failures.get_mut(k).unwrap() -= n;
+        }
+        failures.retain(|_, n| *n > 0);
+        let java_total = total - warm_total;
+        let java_failed: usize = failures.values().sum();
+        let ratio = java_failed as f64 / java_total as f64;
+        eprintln!("failed walks: {java_failed} of {java_total} ({:.2}%): {failures:?}", ratio * 100.0);
+        eprintln!("threads without Java frames: {other:?}");
+        assert!(ratio < max_failed, "too many failed stack walks: {:.2}% {failures:?}", ratio * 100.0);
+        // Threads without Java frames are attributed by role, not lumped together.
+        let vm_thread = |n: &str| n.starts_with("GC Thread") || n.starts_with("G1 ") || n == "VM Thread";
+        assert!(
+            other.iter().filter(|(n, _)| vm_thread(n)).all(|(_, l)| l == "[GC]" || l == "[VM operation]"),
+            "GC and VM threads are labelled by role: {other:?}"
+        );
+        assert!(other.iter().any(|(_, l)| l == "[GC]"), "GC threads are sampled: {other:?}");
+    }
+    client.close().await;
 }
 
 #[test]

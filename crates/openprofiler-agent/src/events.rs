@@ -509,6 +509,8 @@ unsafe extern "C" fn vm_death(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv) {
     let Some(a) = agent() else { return };
     crate::triggers::on_exit(a, jni);
     a.shutting_down.store(true, Ordering::SeqCst);
+    #[cfg(target_os = "linux")]
+    crate::sampler_async::stop();
     if a.opts.mode == Mode::Offline {
         let path = a.opts.file.clone().unwrap_or_else(|| {
             std::path::PathBuf::from(format!("openprofiler-{}.oplink", std::process::id()))
@@ -535,7 +537,7 @@ unsafe extern "C" fn thread_start(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, threa
     }
     let idx = thread_index(a, jni, thread);
     #[cfg(target_os = "linux")]
-    crate::sampler_async::on_thread_start(a, idx);
+    crate::sampler_async::on_thread_start(a, jni, thread, idx);
     #[cfg(not(target_os = "linux"))]
     let _ = idx;
 }
@@ -543,9 +545,10 @@ unsafe extern "C" fn thread_start(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, threa
 unsafe extern "C" fn thread_end(_jvmti: *mut jvmtiEnv, jni: *mut JNIEnv, thread: jthread) {
     let Some(a) = agent() else { return };
     crate::instrument::calls::flush_current();
+    let idx = thread_index(a, jni, thread);
     #[cfg(target_os = "linux")]
-    crate::sampler_async::on_thread_end();
-    if let Some(idx) = thread_index(a, jni, thread) {
+    crate::sampler_async::on_thread_end(a, jni, thread, idx);
+    if let Some(idx) = idx {
         a.collector.lock().end_thread(idx, now_nanos());
     }
 }
