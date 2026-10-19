@@ -31,3 +31,9 @@ java/**/build/
 *.openprofiler-idx/
 .DS_Store
 dist/
+
+# OpenJ9 crash dumps from test JVMs
+core.*.dmp
+javacore.*.txt
+Snap.*.trc
+jitdump.*.dmp
