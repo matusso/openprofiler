@@ -805,6 +805,65 @@ async fn async_sampler_walks_stacks() {
     client.close().await;
 }
 
+/// `sampler=jfr`: CPU samples come from a JFR stream, follow the CPU toggle and interval changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn jfr_sampler_streams_cpu_samples() {
+    let Some(java) = java() else {
+        eprintln!("skipping: java not found");
+        return;
+    };
+    let lib = agent_lib();
+    let dir = tempfile::tempdir().unwrap();
+    let info = dir.path().join("info.json");
+    let opts =
+        format!("-agentpath:{}=port=0,infofile={},sampler=jfr,interval=10ms", lib.display(), info.display());
+    let (_jvm, _pid) = spawn(&java, &[opts]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !info.exists() {
+        assert!(Instant::now() < deadline, "agent did not publish its info file");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let client = LinkClient::connect(LinkOptions::from_info(&AgentInfo::read(&info).unwrap())).await.unwrap();
+    let caps = client.hello().capabilities;
+    if !caps.iter().any(|c| c == "cpu_jfr") {
+        eprintln!("skipping: no JFR streaming on this JVM ({caps:?})");
+        return;
+    }
+    assert!(!caps.iter().any(|c| c == "cpu_async"), "one CPU sampler at a time");
+    assert_eq!(client.config().sampler, "jfr");
+    let burner = |p: &Profile| {
+        p.samples.get(&SampleKind::Cpu).map_or(0, |s| {
+            (0..s.len())
+                .filter(|&i| thread_name(p, Some(s.thread[i])) == "burner")
+                .map(|i| s.count[i] as u64)
+                .sum()
+        })
+    };
+    wait_for(&client, "JFR CPU samples of the burner thread in Workload.burnCpu", |p| {
+        burner(p) >= 50 && has_frame_on(p, SampleKind::Cpu, "Workload.burnCpu", |t| t.name == "burner")
+    })
+    .await;
+    assert!(
+        client.profile().read().threads.iter().all(|t| !t.name.starts_with("OpenProfiler")),
+        "the agent's own threads are not recorded"
+    );
+
+    // Off: the stream closes at its next flush (about a second) and no samples follow.
+    client.set_recording("cpu", false, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let stopped = burner(&client.profile().read());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(burner(&client.profile().read()), stopped, "no CPU samples while CPU recording is off");
+
+    // On again with another interval: the stream reopens.
+    client.set_recording("cpu", true, 20_000).await.unwrap();
+    wait_for(&client, "JFR CPU samples after CPU recording was switched back on", |p| {
+        burner(p) >= stopped + 20
+    })
+    .await;
+    client.close().await;
+}
+
 #[test]
 fn offline_recording_replays() {
     let Some(java) = java() else {

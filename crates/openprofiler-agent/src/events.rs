@@ -113,7 +113,7 @@ pub fn install(a: &Agent) -> JResult<()> {
     j.enable_event(JVMTI_EVENT_VM_DEATH, true)?;
     j.enable_event(JVMTI_EVENT_THREAD_START, true)?;
     j.enable_event(JVMTI_EVENT_THREAD_END, true)?;
-    if cfg!(target_os = "linux") && a.opts.sampler != crate::SamplerChoice::Sync {
+    if a.async_possible() {
         // AsyncGetCallTrace needs jmethodIDs to exist before a method is sampled, and HotSpot's
         // implementation refuses to walk stacks (`ticks_no_class_load`) unless ClassLoad events
         // are enabled.
@@ -323,6 +323,7 @@ pub fn on_live(a: &'static Agent, jni: *mut JNIEnv) {
     }
     #[cfg(target_os = "linux")]
     crate::sampler_async::start(a, jni);
+    crate::sampler_jfr::start(a, jni);
     crate::sampler::start(a);
     crate::triggers::start(a);
     if let Some(d) = a.opts.trace {
@@ -372,7 +373,19 @@ fn load_methods(a: &Agent, klass: jclass) {
 
 impl Agent {
     pub fn async_possible(&self) -> bool {
-        cfg!(target_os = "linux") && self.opts.sampler != crate::SamplerChoice::Sync
+        cfg!(target_os = "linux")
+            && matches!(self.opts.sampler, crate::SamplerChoice::Auto | crate::SamplerChoice::Async)
+    }
+
+    /// The sampler that produces CPU samples: `async`, `jfr` or `sync`.
+    pub fn cpu_sampler(&self) -> &'static str {
+        if self.async_active.load(Ordering::SeqCst) {
+            "async"
+        } else if self.jfr_active.load(Ordering::SeqCst) {
+            "jfr"
+        } else {
+            "sync"
+        }
     }
 }
 

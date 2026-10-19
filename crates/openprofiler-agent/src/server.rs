@@ -88,8 +88,10 @@ pub fn hello(a: &Agent) -> v1::Hello {
         jvm: Some(a.jvm_info.lock().clone()),
         capabilities: {
             let mut c = a.caps.lock().clone();
-            if a.async_active.load(Ordering::SeqCst) {
-                c.push("cpu_async".into());
+            match a.cpu_sampler() {
+                "async" => c.push("cpu_async".into()),
+                "jfr" => c.push("cpu_jfr".into()),
+                _ => {}
             }
             c
         },
@@ -112,7 +114,7 @@ fn config(a: &Agent) -> v1::SessionConfig {
         monitor_threshold_us: a.opts.monitor_threshold.as_micros() as u32,
         telemetry: true,
         thread_states: true,
-        sampler: if a.async_active.load(Ordering::SeqCst) { "async".into() } else { "sync".into() },
+        sampler: a.cpu_sampler().into(),
     }
 }
 

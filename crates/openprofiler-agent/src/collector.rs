@@ -130,6 +130,7 @@ pub struct Collector {
     pub threads: Vec<AgentThread>,
     thread_updates: Vec<v1::ThreadUpdate>,
     os_threads: HashMap<u64, u32>,
+    java_threads: HashMap<u64, u32>,
     pending: HashMap<BucketKey, (u64, u32)>,
     samples: Table<SampleRow>,
     telemetry_series: Vec<(String, String, u32)>,
@@ -172,6 +173,7 @@ impl Collector {
             threads: vec![],
             thread_updates: vec![],
             os_threads: HashMap::new(),
+            java_threads: HashMap::new(),
             pending: HashMap::new(),
             samples: Table::default(),
             telemetry_series: vec![],
@@ -202,6 +204,9 @@ impl Collector {
         if t.os_id != 0 {
             self.os_threads.insert(t.os_id, idx);
         }
+        if t.java_id != 0 {
+            self.java_threads.insert(t.java_id, idx);
+        }
         self.threads.push(t);
         idx
     }
@@ -230,6 +235,11 @@ impl Collector {
 
     pub fn thread_by_os_id(&self, os_id: u64) -> Option<u32> {
         self.os_threads.get(&os_id).copied()
+    }
+
+    /// Thread with `Thread.getId()` `java_id` (ids are never reused within a JVM).
+    pub fn thread_by_java_id(&self, java_id: u64) -> Option<u32> {
+        self.java_threads.get(&java_id).copied()
     }
 
     /// Finds a thread whose name starts with `prefix` (Linux `comm` names are truncated to 15
