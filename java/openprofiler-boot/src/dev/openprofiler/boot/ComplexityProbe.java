@@ -34,6 +34,11 @@ final class ComplexityProbe extends Probe {
         return false;
     }
 
+    @Override
+    boolean alwaysTimed() {
+        return true;
+    }
+
     private static int argIndex(int site) {
         Integer i = ARGS.get(site);
         if (i == null) {

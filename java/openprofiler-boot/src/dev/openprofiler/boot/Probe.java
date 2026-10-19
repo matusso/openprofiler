@@ -41,6 +41,15 @@ public abstract class Probe {
         return interception >= 0 && interception < flags.length && (flags[interception] & Interception.EXIT_ONLY) != 0;
     }
 
+    /**
+     * Whether calls are timed even without a payload after {@link #onEnter} (one is set later, or
+     * the time is used otherwise). Other calls without a payload are not timed: reading the clock
+     * is a good part of a probe call's cost.
+     */
+    boolean alwaysTimed() {
+        return false;
+    }
+
     /** Probes that only propagate context are not shown. */
     boolean visible() {
         return true;
@@ -97,16 +106,18 @@ public abstract class Probe {
      */
     protected final void recordFor(String label, String payload, long startEpochNanos, long durationNanos,
                                    String error, String detail) {
-        if (index >= 0 && payload != null) {
-            Hooks.probeCallLabelled0(index, payload, startEpochNanos, durationNanos, error, 0, detail, label);
+        int id = index >= 0 && payload != null ? Probes.payloadId(payload) : -1;
+        if (id >= 0) {
+            Hooks.probeCallLabelled0(index, id, startEpochNanos, durationNanos, error, 0, detail, Probes.labelId(label));
         }
     }
 
     /** Records a call that was not intercepted (custom probes, programmatic API). */
     protected final void record(String payload, long startEpochNanos, long durationNanos, String error,
                                 String detail) {
-        if (index >= 0 && payload != null) {
-            Hooks.probeCall0(index, payload, startEpochNanos, durationNanos, error, 0, detail);
+        int id = index >= 0 && payload != null ? Probes.payloadId(payload) : -1;
+        if (id >= 0) {
+            Hooks.probeCall0(index, id, startEpochNanos, durationNanos, error, 0, detail);
         }
     }
 

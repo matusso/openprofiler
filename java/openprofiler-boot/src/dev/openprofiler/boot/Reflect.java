@@ -1,5 +1,6 @@
 package dev.openprofiler.boot;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -15,22 +16,28 @@ final class Reflect {
     private static final Object MISSING = new Object();
 
     /**
-     * Methods with no, one and two arguments and fields by name; plain names as keys, so a lookup
-     * allocates nothing.
+     * Per class: methods with no, one and two arguments, fields and {@link #isA} results by name;
+     * plain names as keys, so a lookup allocates nothing. One {@code ClassValue}, so lookups
+     * don't collide in the class's value cache.
      */
-    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS0 = cache();
-    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS1 = cache();
-    private static final ClassValue<ConcurrentHashMap<String, Object>> METHODS2 = cache();
-    private static final ClassValue<ConcurrentHashMap<String, Object>> FIELDS = cache();
+    private static final class Cache {
+        final ConcurrentHashMap<String, Object> methods0 = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<String, Object> methods1 = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<String, Object> methods2 = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<String, Object> fields = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<String, Boolean> isA = new ConcurrentHashMap<>();
 
-    private static ClassValue<ConcurrentHashMap<String, Object>> cache() {
-        return new ClassValue<ConcurrentHashMap<String, Object>>() {
-            @Override
-            protected ConcurrentHashMap<String, Object> computeValue(Class<?> type) {
-                return new ConcurrentHashMap<>();
-            }
-        };
+        ConcurrentHashMap<String, Object> methods(int argc) {
+            return argc == 0 ? methods0 : argc == 1 ? methods1 : methods2;
+        }
     }
+
+    private static final ClassValue<Cache> CACHE = new ClassValue<Cache>() {
+        @Override
+        protected Cache computeValue(Class<?> type) {
+            return new Cache();
+        }
+    };
 
     private Reflect() {}
 
@@ -54,7 +61,7 @@ final class Reflect {
         if (target == null) {
             return false;
         }
-        ConcurrentHashMap<String, Object> cache = METHODS1.get(target.getClass());
+        ConcurrentHashMap<String, Object> cache = CACHE.get(target.getClass()).methods1;
         Object m = cache.get(name);
         if (m == null) {
             m = find(target.getClass(), name, 1);
@@ -80,8 +87,7 @@ final class Reflect {
         if (target == null) {
             return null;
         }
-        ConcurrentHashMap<String, Object> cache =
-            (argc == 0 ? METHODS0 : argc == 1 ? METHODS1 : METHODS2).get(target.getClass());
+        ConcurrentHashMap<String, Object> cache = CACHE.get(target.getClass()).methods(argc);
         Object m = cache.get(name);
         if (m == null) {
             m = find(target.getClass(), name, argc);
@@ -102,7 +108,7 @@ final class Reflect {
         if (target == null) {
             return null;
         }
-        ConcurrentHashMap<String, Object> cache = FIELDS.get(target.getClass());
+        ConcurrentHashMap<String, Object> cache = CACHE.get(target.getClass()).fields;
         Object f = cache.get(name);
         if (f == null) {
             f = MISSING;
@@ -188,7 +194,7 @@ final class Reflect {
         if (o == null) {
             return false;
         }
-        ConcurrentHashMap<String, Boolean> known = IS_A.get(o.getClass());
+        ConcurrentHashMap<String, Boolean> known = CACHE.get(o.getClass()).isA;
         Boolean r = known.get(name);
         if (r == null) {
             r = false;
@@ -200,13 +206,40 @@ final class Reflect {
         return r;
     }
 
-    private static final ClassValue<ConcurrentHashMap<String, Boolean>> IS_A =
-        new ClassValue<ConcurrentHashMap<String, Boolean>>() {
-            @Override
-            protected ConcurrentHashMap<String, Boolean> computeValue(Class<?> type) {
-                return new ConcurrentHashMap<>();
+    /**
+     * {@link #isA} for one type name on a hot path: remembers the last class that matched and the
+     * last that did not (weakly, not to keep class loaders alive), which is most of the calls.
+     */
+    static final class TypeCheck {
+        private static final WeakReference<Class<?>> NONE = new WeakReference<>(null);
+        private final String name;
+        private volatile WeakReference<Class<?>> yes = NONE;
+        private volatile WeakReference<Class<?>> no = NONE;
+
+        TypeCheck(String name) {
+            this.name = name;
+        }
+
+        boolean test(Object o) {
+            if (o == null) {
+                return false;
             }
-        };
+            Class<?> c = o.getClass();
+            if (yes.get() == c) {
+                return true;
+            }
+            if (no.get() == c) {
+                return false;
+            }
+            boolean r = isA(o, name);
+            if (r) {
+                yes = new WeakReference<>(c);
+            } else {
+                no = new WeakReference<>(c);
+            }
+            return r;
+        }
+    }
 
     private static boolean implementsNamed(Class<?> c, String name) {
         for (Class<?> i : c.getInterfaces()) {

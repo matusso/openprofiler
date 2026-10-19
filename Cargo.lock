@@ -1208,6 +1208,7 @@ dependencies = [
  "openprofiler-proto",
  "parking_lot",
  "rcgen",
+ "rustc-hash",
  "rustls",
  "serde_json",
  "sha2",

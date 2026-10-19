@@ -23,7 +23,7 @@ final class JdbcProbe extends Probe {
     private final WeakIdentityMap<Object, String> sql = new WeakIdentityMap<>();
     private final WeakIdentityMap<Object, Object[]> params = new WeakIdentityMap<>();
     private final WeakIdentityMap<Object, Long> connectionOf = new WeakIdentityMap<>();
-    /** Data source → the URL its connections report (looked up once). */
+    /** Data source → description of its connections: the URL they report (looked up once). */
     private final WeakIdentityMap<Object, String> dataSourceUrl = new WeakIdentityMap<>();
 
     JdbcProbe() {
@@ -132,14 +132,14 @@ final class JdbcProbe extends Probe {
                 break;
             case GET_CONNECTION:
                 if (result != null) {
-                    String url = dataSourceUrl.get(self);
-                    if (url == null) {
+                    String description = dataSourceUrl.get(self);
+                    if (description == null) {
                         Object meta = Reflect.call(result, "getMetaData");
-                        url = meta == null ? null : Reflect.str(meta, "getURL");
-                        url = url != null ? url : self.getClass().getName();
-                        dataSourceUrl.put(self, url);
+                        String url = meta == null ? null : Reflect.str(meta, "getURL");
+                        description = (url != null ? url : self.getClass().getName()) + " (pooled)";
+                        dataSourceUrl.put(self, description);
                     }
-                    call.control = openControl(result, url + " (pooled)");
+                    call.control = openControl(result, description);
                 }
                 break;
             default:

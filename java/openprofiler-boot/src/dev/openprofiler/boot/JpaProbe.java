@@ -11,6 +11,13 @@ import java.util.List;
 final class JpaProbe extends Probe {
     private static final String[] OPS = {"persist", "merge", "remove", "find", "refresh", "flush"};
     private static final String[] QUERIES = {"getResultList", "getSingleResult", "executeUpdate", "getResultStream"};
+    /** Payloads by entity class and operation ({@code find Fruit}), so a call builds no string. */
+    private static final ClassValue<String[]> PAYLOADS = new ClassValue<String[]>() {
+        @Override
+        protected String[] computeValue(Class<?> type) {
+            return new String[OPS.length];
+        }
+    };
 
     JpaProbe() {
         super("jpa", "JPA / Hibernate", "Operation", null);
@@ -36,8 +43,18 @@ final class JpaProbe extends Probe {
         if (i < OPS.length) {
             String op = OPS[i];
             Object a = args != null && args.length > 0 ? args[0] : null;
-            String entity = a == null ? "" : a instanceof Class ? ((Class<?>) a).getSimpleName() : a.getClass().getSimpleName();
-            call.payload = entity.isEmpty() ? op : op + " " + entity;
+            if (a == null) {
+                call.payload = op;
+                return;
+            }
+            Class<?> type = a instanceof Class ? (Class<?>) a : a.getClass();
+            String[] payloads = PAYLOADS.get(type);
+            String payload = payloads[i];
+            if (payload == null) {
+                String entity = type.getSimpleName();
+                payload = payloads[i] = entity.isEmpty() ? op : op + " " + entity;
+            }
+            call.payload = payload;
         } else {
             String q = Reflect.str(self, "getQueryString");
             if (q == null) {

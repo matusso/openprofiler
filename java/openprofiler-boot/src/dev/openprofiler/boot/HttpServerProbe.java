@@ -28,6 +28,7 @@ final class HttpServerProbe extends Probe {
         VERTX_MESSAGE = 9, VERTX_COMPLETE = 10, VERTX2_HEADERS = 11, VERTX2_END = 12;
     private static final String VERTX_CONNECTION = "io.vertx.core.http.impl.Http1xServerConnection";
     private static final String REACTOR_OPS = "reactor.netty.http.server.HttpServerOperations";
+    private static final Reflect.TypeCheck HTTP_REQUEST = new Reflect.TypeCheck("io.netty.handler.codec.http.HttpRequest");
 
     /** Reactor Netty requests in flight: operations → pending request. */
     private final WeakIdentityMap<Object, Pending> pending = new WeakIdentityMap<>();
@@ -39,10 +40,11 @@ final class HttpServerProbe extends Probe {
         final long startEpochNanos;
         final long start;
 
-        Pending(String label, long startEpochNanos, long start) {
+        /** Starts now. */
+        Pending(String label) {
             this.label = label;
-            this.startEpochNanos = startEpochNanos;
-            this.start = start;
+            this.start = System.nanoTime();
+            this.startEpochNanos = Probes.epochNanos(start);
         }
     }
 
@@ -118,7 +120,7 @@ final class HttpServerProbe extends Probe {
             call.state = args.length > 1 ? new Object[] {args[0], args[1]} : null;
         } else if (call.interception == NETTY) {
             Object msg = args.length > 1 ? args[1] : null;
-            if (!Reflect.isA(msg, "io.netty.handler.codec.http.HttpRequest")) {
+            if (!HTTP_REQUEST.test(msg)) {
                 return;
             }
             method = Reflect.str(msg, "method");
@@ -284,7 +286,7 @@ final class HttpServerProbe extends Probe {
         }
         String label = method + " " + normalize(uri);
         pending.expunge();
-        pending.put(key, new Pending(label, Probes.epochNanos(), System.nanoTime()));
+        pending.put(key, new Pending(label));
         label(call, label);
     }
 
@@ -319,7 +321,7 @@ final class HttpServerProbe extends Probe {
 
     /** {@code Http1xServerConnection.handleMessage(request)} creates the request and runs its handler. */
     private void vertxReceived(Call call, Object connection, Object msg) {
-        if (!Reflect.isA(msg, "io.netty.handler.codec.http.HttpRequest")) {
+        if (!HTTP_REQUEST.test(msg)) {
             return;
         }
         String method = Reflect.str(msg, "method");
@@ -331,7 +333,7 @@ final class HttpServerProbe extends Probe {
         vertx.expunge();
         ArrayDeque<Pending> q = vertx.computeIfAbsent(connection, c -> new ArrayDeque<>());
         synchronized (q) {
-            q.addLast(new Pending(label, Probes.epochNanos(), System.nanoTime()));
+            q.addLast(new Pending(label));
         }
         label(call, label);
     }

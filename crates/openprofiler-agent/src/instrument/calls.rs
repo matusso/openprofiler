@@ -21,6 +21,7 @@ use crate::jvm::jvmti;
 use jvmti_sys::*;
 use openprofiler_model::{CallSiteStat, SampleKind, ThreadState, TraceEvent};
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -139,7 +140,7 @@ struct ThreadCalls {
     /// `None` for the agent's own threads.
     thread: Option<u32>,
     nodes: Vec<Node>,
-    index: HashMap<(u32, u32), u32>,
+    index: FxHashMap<(u32, u32), u32>,
     stack: Vec<Frame>,
     last_flush: Instant,
     /// Call tracer events not yet flushed: (time, frame, exit).
@@ -161,7 +162,7 @@ impl ThreadCalls {
         Self {
             thread,
             nodes: vec![root],
-            index: HashMap::new(),
+            index: FxHashMap::default(),
             stack: vec![],
             last_flush: Instant::now(),
             trace: vec![],
